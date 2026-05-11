@@ -6,6 +6,7 @@ from database import init_db_pool, close_db_pool
 from cache import init_redis, close_redis
 from graph import init_graphiti, close_graphiti
 from mcp_server.server import run_mcp_server
+from config import settings
 
 
 @asynccontextmanager
@@ -29,4 +30,4 @@ app.include_router(review.router, prefix="/review")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=settings.api_port, reload=False)
