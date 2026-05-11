@@ -3,7 +3,7 @@
 **Version:** 0.3  
 **Status:** Draft — Phase 1 complete  
 **Authors:** Founding team  
-**Last updated:** May 2026
+**Last updated:** May 11, 2026
 
 ---
 
@@ -25,7 +25,7 @@
 
 ## 1. Overview
 
-Company Brain is an infrastructure layer that extracts a company's operational knowledge from every source it lives in — Slack, Zendesk, Notion, email — structures it into versioned machine-readable executable skills, keeps it current as the company evolves, and exposes it to AI agents through a standard interface (MCP).
+Company Brain is an infrastructure layer that extracts a company's operational knowledge from every source it lives in — Slack, Zendesk, Notion, GitHub, Jira, email — structures it into versioned machine-readable executable skills, keeps it current as the company evolves, and exposes it to AI agents through a standard interface (MCP).
 
 The output is not a document or a search result. It is an executable skill: a structured rule with conditions, actions, and dependencies that any MCP-compatible agent can query and act on with precision.
 
@@ -43,6 +43,8 @@ It lives in:
 - Slack threads from 18 months ago (#ops-announcements, #pricing-approvals)
 - Tens of thousands of Zendesk ticket resolutions that collectively encode how edge cases are actually handled
 - Notion pages that describe how things worked before the last three policy changes
+- GitHub pull requests and issue threads where engineering exceptions, rollback decisions, and operational fixes are discussed
+- Jira tickets whose workflow history captures how incidents, escalations, and implementation requests are actually routed
 
 AI agents have no authoritative source for this logic. They hallucinate policy, apply stale rules, or fail on edge cases in ways that damage customer trust and require expensive human correction.
 
@@ -54,7 +56,7 @@ Company Brain solves this. It mines operational logic from every source, structu
 
 ### MVP Goals
 
-- Ingest real company data from three sources: Zendesk, Slack, Notion
+- Ingest real company data from five sources: Zendesk, Slack, Notion, GitHub, Jira
 - Extract structured condition-action-dependency triples using the ExIde framework
 - Discover actual behavioral patterns from Zendesk event logs using process mining (PM4Py)
 - Build a temporal knowledge graph from extracted entities and relationships using Graphiti, with a custom Company Brain ontology (PolicyRule, CustomerTier, ExceptionCondition, ThresholdValue)
@@ -101,7 +103,7 @@ Company Brain is organized into five layers. Each layer has a defined input, a s
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  LAYER 1 — DATA SOURCES                                          │
-│  Airbyte OSS · Zendesk · Slack · Notion                          │
+│  Airbyte OSS · Zendesk · Slack · Notion · GitHub · Jira          │
 │  → Postgres staging (raw_content table)                          │
 └────────────────────────────┬─────────────────────────────────────┘
                              │ raw documents
@@ -136,7 +138,7 @@ Company Brain is organized into five layers. Each layer has a defined input, a s
 
 ### Living Currency (cross-cutting)
 
-A webhook endpoint (`POST /ingest/event`) receives high-signal source events — Slack messages from designated channels, Notion page updates. On receipt, the extraction engine re-processes only the affected skill and updates both the pgvector skills registry and the Graphiti graph. If confidence ≥ 90%, the skill auto-publishes with a version bump. If 70–89%, it goes to the review queue. Below 70%, it is logged and discarded. Target latency from source event to published update: under 5 minutes.
+A webhook endpoint (`POST /ingest/event`) receives high-signal source events — Slack messages from designated channels, Notion page updates, GitHub issue or pull request updates, and Jira issue transitions or comments. On receipt, the extraction engine re-processes only the affected skill and updates both the pgvector skills registry and the Graphiti graph. If confidence ≥ 90%, the skill auto-publishes with a version bump. If 70–89%, it goes to the review queue. Below 70%, it is logged and discarded. Target latency from source event to published update: under 5 minutes.
 
 ### Hybrid Retrieval
 
@@ -181,7 +183,7 @@ Graphiti defaults to OpenAI for its internal LLM calls (entity extraction, dedup
 ```sql
 CREATE TABLE raw_content (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source         VARCHAR(50),        -- 'zendesk' | 'slack' | 'notion'
+  source         VARCHAR(50),        -- 'zendesk' | 'slack' | 'notion' | 'github' | 'jira'
   source_id      VARCHAR(255),       -- original record ID from source system
   content        TEXT,
   metadata       JSONB,
@@ -278,7 +280,7 @@ class PolicyRule(BaseModel):
     condition: str = Field(description="The condition under which this rule applies")
     action: str = Field(description="The action to execute when condition is met")
     confidence: float = Field(description="Extraction confidence 0.0-1.0")
-    source_type: str = Field(description="zendesk | slack | notion | process_mining")
+    source_type: str = Field(description="zendesk | slack | notion | github | jira | process_mining")
 
 class CustomerTier(BaseModel):
     """A customer classification that gates specific rules or actions."""
@@ -368,7 +370,7 @@ async def ingest_to_graph(skill_name: str, content: str, source_id: str):
 | GET    | `/skills/{skill_id}/versions`        | Return full version history                                          |
 | POST   | `/skills`                            | Create skill (draft status)                                          |
 | PATCH  | `/skills/{skill_id}`                 | Update skill fields                                                  |
-| POST   | `/ingest/event`                      | Living currency webhook — Slack or Notion events                     |
+| POST   | `/ingest/event`                      | Living currency webhook — Slack, Notion, GitHub, or Jira events      |
 | POST   | `/ingest/batch`                      | Trigger manual extraction run over unprocessed `raw_content`         |
 | GET    | `/review`                            | List pending review queue items                                      |
 | POST   | `/review/{item_id}/approve`          | Approve and publish proposed skill update                            |
@@ -435,7 +437,7 @@ company-brain/
 │       ├── __init__.py
 │       └── schemas.py             # Pydantic request/response models
 ├── airbyte/
-│   └── README.md                  # Connector setup: Zendesk, Slack, Notion
+│   └── README.md                  # Connector setup: Zendesk, Slack, Notion, GitHub, Jira
 └── agent-demo/
     ├── demo.py                    # Claude agent test script — stub
     └── requirements.txt
@@ -757,15 +759,15 @@ API_PORT=8000
 **Deliverables:**
 
 - Airbyte installed locally via `abctl local install`
-- Three source connectors configured: Zendesk (tickets + comments), Slack (target channels), Notion (pages + databases)
+- Five source connectors configured: Zendesk (tickets + comments), Slack (target channels), Notion (pages + databases), GitHub (issues + pull requests), Jira (issues + comments + transitions)
 - Destination connector: Postgres, writing to `raw_content` with correct `source` field populated
-- Full historical sync completed for all three sources
+- Full historical sync completed for all five sources
 - Incremental hourly sync running
 - `airbyte/README.md` with step-by-step connector configuration
 
 **Acceptance criteria:**
 
-- `SELECT COUNT(*), source FROM raw_content GROUP BY source` shows rows from all three sources
+- `SELECT COUNT(*), source FROM raw_content GROUP BY source` shows rows from all five sources
 - Spot check 5 rows from each source — `content` and `metadata` populated correctly
 - Incremental sync runs without errors on second trigger
 
@@ -826,12 +828,12 @@ API_PORT=8000
 
 - `query_brain` MCP tool fully wired: pgvector semantic search → Graphiti graph traversal → merged result → Redis cached → interaction logged
 - Skill response schema includes `graph_context` field with resolved overrides and dependencies
-- `POST /ingest/event` active — receives Slack/Notion webhook, classifies, runs ExIde, ingests to graph, routes by confidence
+- `POST /ingest/event` active — receives Slack, Notion, GitHub, or Jira webhook, classifies, runs ExIde, ingests to graph, routes by confidence
 
 **Acceptance criteria:**
 
 - Calling `query_brain(situation=...)` returns a published skill with populated `graph_context`
-- A mock Slack policy announcement posted to `POST /ingest/event` produces an updated skill within 5 minutes
+- A mock Slack policy announcement or Jira workflow update posted to `POST /ingest/event` produces an updated skill within 5 minutes
 - Graph traversal edges logged in `agent_interactions.graph_path`
 
 ---
@@ -861,7 +863,7 @@ API_PORT=8000
 
 | Question                                                                                                                                                             | Priority                                                  |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| Which data set to use for Phase 2 — a pilot customer's Zendesk/Slack/Notion, or a synthetic data set built to stress-test the extraction pipeline?                   | High — needed before Phase 2                              |
+| Which data set to use for Phase 2 — a pilot customer's Zendesk/Slack/Notion/GitHub/Jira, or a synthetic data set built to stress-test the extraction pipeline?      | High — needed before Phase 2                              |
 | Graphiti GitHub issue #567: custom entity type labels not always persisting correctly to Neo4j. Apply workaround (re-ingest with types) or pin to a patched version? | High — needed before Phase 4                              |
 | Graphiti structured output note: works best with OpenAI. Confirm OpenAI is the entity extraction LLM throughout the pipeline.                                        | High                                                      |
 | Review queue notification — email, Slack DM, or polling the UI?                                                                                                      | Medium — needed for Phase 4                               |

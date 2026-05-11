@@ -124,6 +124,97 @@ And this destination:
 
 Airbyte should land raw sync data in Postgres first. If we later need normalized writes into `raw_content`, we should handle that in a follow-up transformation layer instead of relying on manual UI mapping.
 
+## Detailed Connector Configuration
+
+### Zendesk Support
+
+1. Go to Sources → New Source → Zendesk Support
+2. Configure:
+   - **Subdomain**: your Zendesk subdomain (e.g. `acme` for `acme.zendesk.com`)
+   - **Authentication**: API token (Settings → Apps → Zendesk API → Token Access)
+   - **Start date**: earliest date to sync
+3. Select streams: `tickets`, `ticket_comments`, `ticket_events`, `ticket_fields`
+
+### Slack
+
+1. Go to Sources → New Source → Slack
+2. Configure:
+   - **API Token**: Bot token from Slack App settings (requires `channels:history`, `channels:read`, `users:read` scopes)
+   - **Channel filter**: target channels for policy announcements (e.g. `#ops-announcements`, `#pricing-approvals`)
+   - **Start date**: earliest date to sync
+
+### Notion
+
+1. Go to Sources → New Source → Notion
+2. Configure:
+   - **Token**: Notion integration token (create at https://www.notion.so/my-integrations)
+   - Share relevant pages/databases with the integration
+
+### GitHub
+
+1. Go to Sources → New Source → GitHub
+2. Configure:
+   - **Authentication**: personal access token or GitHub App credentials
+   - **Repositories**: target repositories with operational knowledge
+   - **Start date**: earliest date to sync
+3. Select streams: `issues`, `pull_requests`, `issue_comments`, `pull_request_comments`
+
+### Jira
+
+1. Go to Sources → New Source → Jira
+2. Configure:
+   - **Base URL**: your Jira workspace URL
+   - **Authentication**: API token or OAuth credentials
+   - **Projects / JQL filter**: target projects with support, ops, or engineering workflow knowledge
+   - **Start date**: earliest date to sync
+3. Select streams: `issues`, `comments`, `worklogs`, and transition history if exposed by the connector
+
+## Destination Connector
+
+1. Go to Destinations → New Destination → PostgreSQL
+2. Configure:
+   - **Host**: `localhost` (or Docker host IP if Airbyte runs in Docker)
+   - **Port**: `5432`
+   - **Database**: `company_brain`
+   - **Schema**: `public`
+   - **Username**: `cb`
+   - **Password**: `cb_secret`
+3. Set the default stream prefix to ensure data lands in `raw_content`
+
+> **Note**: Airbyte writes to its own staging tables by default. A custom destination mapping or a dbt transformation step is needed to normalize into `raw_content`. Configure the destination to write `source`, `source_id`, `content`, and `metadata` columns.
+
+## Connections
+
+Create one connection per source → destination pair:
+
+| Connection | Sync frequency | Streams |
+|------------|---------------|---------|
+| Zendesk → Postgres | Hourly | tickets, ticket_comments, ticket_events |
+| Slack → Postgres | Hourly | messages (target channels) |
+| Notion → Postgres | Hourly | pages, databases |
+| GitHub → Postgres | Hourly | issues, pull_requests, comments |
+| Jira → Postgres | Hourly | issues, comments, worklogs, transitions |
+
+## Verify
+
+After first sync:
+
+```sql
+SELECT COUNT(*), source FROM raw_content GROUP BY source;
+```
+
+Expected output:
+
+```
+count | source
+------+---------
+  ... | zendesk
+  ... | slack
+  ... | notion
+  ... | github
+  ... | jira
+```
+
 ## Teammate Workflow
 
 1. Start Docker Desktop.
