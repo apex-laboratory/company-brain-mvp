@@ -124,6 +124,8 @@ And this destination:
 
 Airbyte should land raw sync data in Postgres first. If we later need normalized writes into `raw_content`, we should handle that in a follow-up transformation layer instead of relying on manual UI mapping.
 
+The canonical normalization contract lives in [airbyte/raw-content-contract.md](/Users/afnan/company-brain-mvp/airbyte/raw-content-contract.md).
+
 ## Detailed Connector Configuration
 
 ### Zendesk Support
