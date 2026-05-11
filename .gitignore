@@ -46,6 +46,6 @@ htmlcov/
 .claude
 
 *.docx
-*.xslx
+*.xlsx
 
 CLAUDE.md
