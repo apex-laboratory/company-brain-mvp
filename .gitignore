@@ -44,3 +44,8 @@ htmlcov/
 .ipynb_checkpoints/
 
 .claude
+
+*.docx
+*.xslx
+
+CLAUDE.md
