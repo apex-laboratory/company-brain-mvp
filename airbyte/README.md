@@ -40,6 +40,25 @@ Airbyte UI will be available at `http://localhost:8000` (note: conflicts with br
    - **Token**: Notion integration token (create at https://www.notion.so/my-integrations)
    - Share relevant pages/databases with the integration
 
+### GitHub
+
+1. Go to Sources → New Source → GitHub
+2. Configure:
+   - **Authentication**: personal access token or GitHub App credentials
+   - **Repositories**: target repositories with operational knowledge
+   - **Start date**: earliest date to sync
+3. Select streams: `issues`, `pull_requests`, `issue_comments`, `pull_request_comments`
+
+### Jira
+
+1. Go to Sources → New Source → Jira
+2. Configure:
+   - **Base URL**: your Jira workspace URL
+   - **Authentication**: API token or OAuth credentials
+   - **Projects / JQL filter**: target projects with support, ops, or engineering workflow knowledge
+   - **Start date**: earliest date to sync
+3. Select streams: `issues`, `comments`, `worklogs`, and transition history if exposed by the connector
+
 ## Destination Connector
 
 1. Go to Destinations → New Destination → PostgreSQL
@@ -63,6 +82,8 @@ Create one connection per source → destination pair:
 | Zendesk → Postgres | Hourly | tickets, ticket_comments, ticket_events |
 | Slack → Postgres | Hourly | messages (target channels) |
 | Notion → Postgres | Hourly | pages, databases |
+| GitHub → Postgres | Hourly | issues, pull_requests, comments |
+| Jira → Postgres | Hourly | issues, comments, worklogs, transitions |
 
 ## Verify
 
@@ -79,4 +100,6 @@ count | source
   ... | zendesk
   ... | slack
   ... | notion
+  ... | github
+  ... | jira
 ```
