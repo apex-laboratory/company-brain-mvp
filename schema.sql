@@ -8,8 +8,19 @@ CREATE TABLE raw_content (
   metadata       JSONB,
   content_type   VARCHAR(20),
   graph_ingested BOOLEAN DEFAULT FALSE,
-  ingested_at    TIMESTAMP DEFAULT NOW()
+  ingested_at    TIMESTAMP DEFAULT NOW(),
+  updated_at     TIMESTAMP DEFAULT NOW(),
+  CONSTRAINT raw_content_source_source_id_key UNIQUE (source, source_id)
 );
+
+CREATE INDEX IF NOT EXISTS raw_content_source_idx
+  ON raw_content (source);
+
+CREATE INDEX IF NOT EXISTS raw_content_entity_type_idx
+  ON raw_content (source, (metadata->>'entity_type'));
+
+CREATE INDEX IF NOT EXISTS raw_content_parent_idx
+  ON raw_content (source, (metadata->>'parent_source_id'));
 
 CREATE TABLE skills (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),

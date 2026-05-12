@@ -122,9 +122,16 @@ And this destination:
 
 - PostgreSQL
 
-Airbyte should land raw sync data in Postgres first. If we later need normalized writes into `raw_content`, we should handle that in a follow-up transformation layer instead of relying on manual UI mapping.
+Airbyte should land raw sync data in Postgres first. The post-sync normalization
+step that maps Airbyte's raw staging tables into the canonical `raw_content`
+table lives in version-controlled code:
 
-The canonical normalization contract lives in [airbyte/raw-content-contract.md](/Users/afnan/company-brain-mvp/airbyte/raw-content-contract.md).
+- contract: [`airbyte/raw-content-contract.md`](./raw-content-contract.md)
+- Zendesk normalizer: [`brain-api/services/zendesk_normalizer.py`](../brain-api/services/zendesk_normalizer.py)
+- Zendesk runbook: [`airbyte/zendesk-runbook.md`](./zendesk-runbook.md)
+
+Do not try to normalize via the Airbyte UI destination mapping — that path is
+brittle and not testable. Use the normalizer module instead.
 
 ## Detailed Connector Configuration
 
@@ -183,7 +190,11 @@ The canonical normalization contract lives in [airbyte/raw-content-contract.md](
    - **Password**: `cb_secret`
 3. Set the default stream prefix to ensure data lands in `raw_content`
 
-> **Note**: Airbyte writes to its own staging tables by default. A custom destination mapping or a dbt transformation step is needed to normalize into `raw_content`. Configure the destination to write `source`, `source_id`, `content`, and `metadata` columns.
+> **Note**: Airbyte writes to its own staging tables by default
+> (e.g. `_airbyte_raw_tickets`, `_airbyte_raw_ticket_comments`,
+> `_airbyte_raw_ticket_events`). The mapping from those staging tables into
+> `raw_content` is done by `brain-api/services/zendesk_normalizer.py`. See
+> [`airbyte/zendesk-runbook.md`](./zendesk-runbook.md) for the full flow.
 
 ## Connections
 

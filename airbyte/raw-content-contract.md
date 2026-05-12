@@ -412,3 +412,17 @@ Recommended implementation order:
 4. Add row-shape tests against the validation checklist above.
 
 This keeps connector configuration simple while moving normalization into code we can review, diff, and test.
+
+### Current implementations
+
+| Source | Module | Endpoints |
+| --- | --- | --- |
+| Zendesk | [`brain-api/services/zendesk_normalizer.py`](../brain-api/services/zendesk_normalizer.py) | `POST /ingest/zendesk[/tickets|/comments|/events|/sample]` |
+| Slack | _pending_ | — |
+| Notion | _pending_ | — |
+| GitHub | _pending_ | — |
+| Jira | _pending_ | — |
+
+The Zendesk normalizer enforces this contract via `validate_row` and upserts
+on `UNIQUE (source, source_id)`. See
+[`airbyte/zendesk-runbook.md`](./zendesk-runbook.md) for the end-to-end flow.

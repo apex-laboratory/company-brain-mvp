@@ -1,0 +1,173 @@
+{
+  "subdomain": "acme",
+  "tickets": [
+    {
+      "id": 12345,
+      "subject": "Refund request for delayed shipment",
+      "description": "Customer ordered on 2026-04-20, shipment was delayed 12 days, asking for a refund.",
+      "status": "open",
+      "priority": "normal",
+      "tags": ["refund", "shipping-delay"],
+      "assignee_id": 9981,
+      "requester_id": 55001,
+      "ticket_form_id": 1,
+      "organization_id": 7001,
+      "group_id": 22,
+      "via": {"channel": "web"},
+      "created_at": "2026-05-01T08:00:00Z",
+      "updated_at": "2026-05-01T10:15:00Z"
+    },
+    {
+      "id": 12346,
+      "subject": "VIP enterprise refund — past 30 day window",
+      "description": "Enterprise customer asking for a $2,400 refund 38 days after purchase; damaged in transit.",
+      "status": "pending",
+      "priority": "high",
+      "tags": ["refund", "vip", "enterprise"],
+      "assignee_id": 9982,
+      "requester_id": 55002,
+      "ticket_form_id": 2,
+      "organization_id": 7002,
+      "group_id": 23,
+      "via": {"channel": "email"},
+      "created_at": "2026-05-02T09:30:00Z",
+      "updated_at": "2026-05-04T14:00:00Z"
+    }
+  ],
+  "comments": [
+    {
+      "id": 67890,
+      "ticket_id": 12345,
+      "plain_body": "Approved one-time courtesy refund per the 10-day-delay policy.",
+      "public": true,
+      "author_id": 9981,
+      "author_role": "agent",
+      "via": {"channel": "web"},
+      "created_at": "2026-05-01T09:12:33Z",
+      "audit_id": 770001
+    },
+    {
+      "id": 67891,
+      "ticket_id": 12345,
+      "plain_body": "Customer confirmed receipt of refund.",
+      "public": true,
+      "author_id": 55001,
+      "author_role": "end-user",
+      "via": {"channel": "email"},
+      "created_at": "2026-05-01T11:30:00Z",
+      "audit_id": 770002
+    },
+    {
+      "id": 67900,
+      "ticket_id": 12346,
+      "plain_body": "Escalating to retention because DamagedInTransit overrides time window for enterprise tier.",
+      "public": false,
+      "author_id": 9982,
+      "author_role": "agent",
+      "via": {"channel": "web"},
+      "created_at": "2026-05-03T10:05:00Z",
+      "audit_id": 780001
+    }
+  ],
+  "events": [
+    {
+      "id": 990001,
+      "ticket_id": 12345,
+      "field_name": "status",
+      "previous_value": null,
+      "new_value": "new",
+      "event_type": "Create",
+      "author_id": 55001,
+      "audit_id": 770000,
+      "created_at": "2026-05-01T08:00:00Z"
+    },
+    {
+      "id": 990002,
+      "ticket_id": 12345,
+      "field_name": "status",
+      "previous_value": "new",
+      "new_value": "open",
+      "event_type": "Change",
+      "author_id": 9981,
+      "audit_id": 770001,
+      "created_at": "2026-05-01T09:00:00Z"
+    },
+    {
+      "id": 990003,
+      "ticket_id": 12345,
+      "field_name": "assignee_id",
+      "previous_value": null,
+      "new_value": "9981",
+      "event_type": "Change",
+      "author_id": 9981,
+      "audit_id": 770001,
+      "created_at": "2026-05-01T09:01:00Z"
+    },
+    {
+      "id": 990004,
+      "ticket_id": 12345,
+      "field_name": "status",
+      "previous_value": "open",
+      "new_value": "solved",
+      "event_type": "Change",
+      "author_id": 9981,
+      "audit_id": 770003,
+      "created_at": "2026-05-01T12:00:00Z"
+    },
+    {
+      "id": 990010,
+      "ticket_id": 12346,
+      "field_name": "status",
+      "previous_value": null,
+      "new_value": "new",
+      "event_type": "Create",
+      "author_id": 55002,
+      "audit_id": 780000,
+      "created_at": "2026-05-02T09:30:00Z"
+    },
+    {
+      "id": 990011,
+      "ticket_id": 12346,
+      "field_name": "priority",
+      "previous_value": "normal",
+      "new_value": "high",
+      "event_type": "Change",
+      "author_id": 9982,
+      "audit_id": 780000,
+      "created_at": "2026-05-02T09:45:00Z"
+    },
+    {
+      "id": 990012,
+      "ticket_id": 12346,
+      "field_name": "status",
+      "previous_value": "new",
+      "new_value": "open",
+      "event_type": "Change",
+      "author_id": 9982,
+      "audit_id": 780001,
+      "created_at": "2026-05-02T10:00:00Z"
+    },
+    {
+      "id": 990013,
+      "ticket_id": 12346,
+      "field_name": "group_id",
+      "previous_value": "23",
+      "new_value": "29",
+      "event_type": "Change",
+      "author_id": 9982,
+      "audit_id": 780001,
+      "created_at": "2026-05-03T10:05:00Z"
+    },
+    {
+      "id": 990014,
+      "ticket_id": 12346,
+      "field_name": "status",
+      "previous_value": "open",
+      "new_value": "pending",
+      "event_type": "Change",
+      "author_id": 9982,
+      "audit_id": 780002,
+      "created_at": "2026-05-04T14:00:00Z"
+    }
+  ]
+}
