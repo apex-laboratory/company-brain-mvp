@@ -57,6 +57,11 @@ services:
       SEMAPHORE_LIMIT: 5
       MCP_PORT: ${MCP_PORT:-8001}
       API_PORT: ${API_PORT:-8000}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPOS: ${GITHUB_REPOS:-}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+      GITHUB_PER_PAGE: ${GITHUB_PER_PAGE:-100}
+      GITHUB_MAX_PAGES: ${GITHUB_MAX_PAGES:-200}
     ports:
       - "${BRAIN_API_HOST_PORT:-8080}:8000"
       - "${BRAIN_MCP_HOST_PORT:-8001}:8001"

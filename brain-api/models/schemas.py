@@ -44,6 +44,33 @@ class IngestEvent(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class GitHubSyncRequest(BaseModel):
+    """POST body for /ingest/github/sync.
+
+    All fields are optional; if `repos` is omitted we fall back to the
+    GITHUB_REPOS env var.
+    """
+    repos: list[str] | None = None
+    state: str = "all"  # 'open' | 'closed' | 'all'
+    since: str | None = None  # ISO-8601, forwarded to GitHub on supported streams
+
+
+class GitHubStreamCounts(BaseModel):
+    fetched: int
+    inserted: int
+    updated: int
+
+
+class GitHubRepoSyncResult(BaseModel):
+    repo: str
+    streams: dict[str, GitHubStreamCounts]
+    errors: list[str] = []
+
+
+class GitHubSyncResponse(BaseModel):
+    repos: list[GitHubRepoSyncResult]
+
+
 class ReviewAction(BaseModel):
     reviewer_id: str | None = None
     reason: str | None = None

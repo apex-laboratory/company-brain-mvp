@@ -196,7 +196,9 @@ Notes:
 
 ## GitHub
 
-Airbyte streams in scope for this contract:
+Streams in scope for this contract (see `airbyte/README.md` →
+*GitHub Ingestion (L1-06)* for the implementation runbook — pulled directly
+via REST in this MVP):
 
 - issues
 - issue comments
@@ -207,15 +209,17 @@ Mapping:
 
 | Artifact | `source` | `source_id` | `content` | Required metadata additions |
 | --- | --- | --- | --- | --- |
-| Issue | `github` | `github_issue:<repo_name>:<issue_number>` | Issue title + two newlines + issue body | `entity_type=issue`, `repo`, `state`, `labels`, `author.handle`, `assignee`, `milestone` |
-| Issue comment | `github` | `github_issue_comment:<repo_name>:<issue_number>:<comment_id>` | Comment body | `entity_type=issue_comment`, `parent_source_id=github_issue:<repo_name>:<issue_number>`, `repo`, `author.handle` |
-| Pull request | `github` | `github_pr:<repo_name>:<pr_number>` | PR title + two newlines + PR body | `entity_type=pull_request`, `repo`, `state`, `labels`, `base_branch`, `head_branch`, `merged_at` |
-| PR review comment | `github` | `github_pr_review_comment:<repo_name>:<pr_number>:<comment_id>` | Review comment body | `entity_type=pr_review_comment`, `parent_source_id=github_pr:<repo_name>:<pr_number>`, `repo`, `path`, `line`, `side` |
+| Issue | `github` | `github_issue:<repo_name>:<issue_number>` | Issue title + two newlines + issue body | `entity_type=issue`, `repo`, `org`, `issue_number`, `state`, `state_reason`, `labels`, `assignees`, `author.handle`, `milestone`, `closed_at`, `comments_count` |
+| Issue comment | `github` | `github_issue_comment:<repo_name>:<issue_number>:<comment_id>` | Comment body | `entity_type=issue_comment`, `parent_entity_type=issue`, `parent_entity_id=<issue_number>`, `parent_source_id=github_issue:<repo_name>:<issue_number>`, `repo`, `org`, `comment_id`, `author.handle`, `author_association` |
+| Pull request | `github` | `github_pr:<repo_name>:<pr_number>` | PR title + two newlines + PR body | `entity_type=pull_request`, `repo`, `org`, `pr_number`, `state`, `labels`, `assignees`, `requested_reviewers`, `base_branch`, `head_branch`, `merged`, `merged_at`, `merge_commit_sha`, `draft`, `closed_at` |
+| PR review comment | `github` | `github_pr_review_comment:<repo_name>:<pr_number>:<comment_id>` | Review comment body | `entity_type=pr_review_comment`, `parent_entity_type=pull_request`, `parent_entity_id=<pr_number>`, `parent_source_id=github_pr:<repo_name>:<pr_number>`, `repo`, `org`, `comment_id`, `review_id`, `in_reply_to_id`, `path`, `line`, `side`, `commit_id` |
 
 Notes:
 
 - GitHub artifacts are useful both for product-change policy and engineering workflow knowledge.
 - Keep repository identity in both `source_id` and metadata to avoid collisions across repos.
+- HTML comments (`<!-- ... -->`) are stripped from `content` to avoid leaking PR-template instructions into downstream classification.
+- Discussions and explicit state-transition rows are deferred to a follow-up; the normalizer is structured so a `discussions` stream slots in alongside the others.
 
 ## Jira
 

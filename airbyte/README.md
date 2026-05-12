@@ -154,6 +154,15 @@ The canonical normalization contract lives in [airbyte/raw-content-contract.md](
 
 ### GitHub
 
+For GitHub the MVP runs a code-owned ingestion path (see
+[GitHub ingestion (L1-06)](#github-ingestion-l1-06) below) instead of routing
+through the Airbyte UI. The Airbyte connector remains a future option, but the
+canonical normalization into `raw_content` happens in
+`brain-api/services/github_*` so that the same writer can later be fed by an
+Airbyte staging adapter without changing the contract.
+
+If you do choose to wire up the Airbyte GitHub source for parallel comparison:
+
 1. Go to Sources → New Source → GitHub
 2. Configure:
    - **Authentication**: personal access token or GitHub App credentials
@@ -257,3 +266,184 @@ If `brain-api` is still on `8000`, recreate the compose stack so it picks up the
 docker compose down
 docker compose up -d postgres redis neo4j brain-api
 ```
+
+---
+
+## GitHub Ingestion (L1-06)
+
+This section is the end-to-end runbook for landing GitHub data in
+`raw_content` from a fresh machine. It lives next to the Airbyte docs because
+it covers the same Layer 1 responsibility — but the connector + normalization
+runs inside `brain-api` so we get a deterministic, testable path that doesn't
+depend on Airbyte's staging schema.
+
+### What gets ingested
+
+The connector pulls four GitHub streams per repo and normalizes each row into
+the canonical contract documented in
+[`raw-content-contract.md`](./raw-content-contract.md):
+
+| Stream                | `entity_type`        | `source_id` format                                        |
+| --------------------- | -------------------- | --------------------------------------------------------- |
+| Issues                | `issue`              | `github_issue:<repo>:<number>`                            |
+| Pull requests         | `pull_request`       | `github_pr:<repo>:<number>`                               |
+| Issue comments        | `issue_comment`      | `github_issue_comment:<repo>:<number>:<comment_id>`       |
+| PR review comments    | `pr_review_comment`  | `github_pr_review_comment:<repo>:<number>:<comment_id>`   |
+
+Discussions are intentionally out of scope for the MVP (they require GraphQL
+and a separate token scope); the normalizer is structured to add them later
+without changing the writer.
+
+### GitHub token requirements
+
+Create a Personal Access Token (Settings → Developer settings → Personal
+access tokens) and put it in `.env` as `GITHUB_TOKEN`.
+
+- **Classic token scopes**:
+  - `public_repo` — read-only access to public repositories
+  - `repo` — read access to private repositories (only if you need them)
+  - `read:org` — recommended; resolves org-scoped author identities
+- **Fine-grained token permissions** (per-repo):
+  - Repository → Issues: **Read**
+  - Repository → Pull requests: **Read**
+  - Repository → Metadata: **Read**
+
+No write scopes are required. Never commit the token — it lives in `.env`,
+which is gitignored. Inside Docker the token is forwarded via
+`docker-compose.yml`.
+
+### One-time setup on a fresh machine
+
+1. **Install Docker Desktop** and start it.
+2. **Clone the repo** and `cp .env.example .env`.
+3. **Set credentials in `.env`**:
+   ```env
+   GITHUB_TOKEN=ghp_your_token_here
+   GITHUB_REPOS=apex-laboratory/company-brain-mvp,octocat/Hello-World
+   ```
+4. **Bring up Postgres** (the only dependency for the connector):
+   ```bash
+   docker compose up -d postgres
+   ```
+5. **Confirm the schema is loaded**:
+   ```bash
+   docker compose exec postgres \
+     psql -U cb -d company_brain -c "\d raw_content"
+   ```
+   You should see the `(source, source_id)` UNIQUE constraint listed.
+   If you previously created a Postgres volume before the L1-06 schema
+   change, drop it with `docker compose down -v` so the new constraint and
+   indexes get applied on the next bring-up.
+
+### Running the historical sync
+
+You have two interchangeable entry points. Both are idempotent — re-running
+upserts on `(source, source_id)`.
+
+**Option A — Run inside the brain-api container** (recommended on a fresh box;
+no local Python required):
+
+```bash
+docker compose up -d brain-api
+docker compose exec brain-api python -m scripts.sync_github
+```
+
+**Option B — Trigger via the API** (handy for incremental runs):
+
+```bash
+curl -X POST http://localhost:8080/ingest/github/sync \
+  -H "Content-Type: application/json" \
+  -d '{"state": "all"}'
+```
+
+Override the env list inline:
+
+```bash
+curl -X POST http://localhost:8080/ingest/github/sync \
+  -H "Content-Type: application/json" \
+  -d '{"repos": ["octocat/Hello-World"], "state": "all"}'
+```
+
+**Option C — Run the CLI from your host** (requires a local Python venv with
+`brain-api/requirements.txt` installed and `DATABASE_URL` pointing at
+`localhost`):
+
+```bash
+cd brain-api
+python -m scripts.sync_github --repos octocat/Hello-World
+```
+
+For **incremental** sync, pass `--since 2026-05-01T00:00:00Z` (or the `since`
+field on the API). GitHub will only return records updated after that point
+on streams that support it (issues, comments).
+
+### Verification queries
+
+After a sync completes, run:
+
+```sql
+-- 1. Counts per source confirm GitHub rows landed
+SELECT source, COUNT(*) FROM raw_content GROUP BY source;
+
+-- 2. Counts by entity_type — should see issue / pull_request /
+--    issue_comment / pr_review_comment
+SELECT metadata ->> 'entity_type' AS entity_type, COUNT(*)
+FROM raw_content
+WHERE source = 'github'
+GROUP BY 1
+ORDER BY 1;
+
+-- 3. Sample 5 rows preserving repo, number, author, timestamps, body
+SELECT
+  source_id,
+  metadata ->> 'repo'                AS repo,
+  COALESCE(metadata ->> 'issue_number',
+           metadata ->> 'pr_number') AS number,
+  metadata #>> '{author,handle}'     AS author,
+  metadata ->> 'created_at'          AS created_at,
+  LEFT(content, 120)                 AS content_preview
+FROM raw_content
+WHERE source = 'github'
+ORDER BY ingested_at DESC
+LIMIT 5;
+
+-- 4. Verify parent linkage from comments back to their issue / PR
+SELECT
+  source_id,
+  metadata ->> 'parent_source_id' AS parent
+FROM raw_content
+WHERE source = 'github'
+  AND metadata ->> 'entity_type' IN ('issue_comment', 'pr_review_comment')
+LIMIT 10;
+```
+
+### Smoke test
+
+```bash
+# 1. Bring up Postgres only
+docker compose up -d postgres
+
+# 2. Run the sync against a small public repo
+GITHUB_REPOS=octocat/Hello-World \
+  docker compose run --rm brain-api python -m scripts.sync_github
+
+# 3. Confirm rows
+docker compose exec postgres psql -U cb -d company_brain -c \
+  "SELECT source, COUNT(*) FROM raw_content GROUP BY source;"
+```
+
+### Tradeoffs and deferred work
+
+- **Discussions** are deferred (GraphQL + extra scope). The normalizer is
+  structured so a `discussions` stream slots in alongside the others.
+- **Reviews** (the parent objects of inline review comments) are not pulled as
+  separate rows — review state is denormalized onto each `pr_review_comment`
+  row (`review_id`, `author_association`). If we later need review-level
+  rationale text, add a `github_pr_review:<repo>:<pr>:<review_id>` row.
+- **State transitions** (issue close events, label changes) live in the
+  GitHub `events` and `timeline` endpoints. We capture the *current* state on
+  the issue/PR row but do not yet stream transitions — add a
+  `github_issue_event:` row type when Phase 3 process mining needs them.
+- **Airbyte parity**: the same writer + normalizer can later be fed from
+  `_airbyte_raw_*` staging tables. The seam is `services/github_client.py` —
+  swap it for an Airbyte staging reader and the rest is reusable.
