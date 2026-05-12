@@ -137,13 +137,41 @@ The canonical normalization contract lives in [airbyte/raw-content-contract.md](
    - **Start date**: earliest date to sync
 3. Select streams: `tickets`, `ticket_comments`, `ticket_events`, `ticket_fields`
 
-### Slack
+### Slack (L1-04)
 
 1. Go to Sources → New Source → Slack
 2. Configure:
-   - **API Token**: Bot token from Slack App settings (requires `channels:history`, `channels:read`, `users:read` scopes)
-   - **Channel filter**: target channels for policy announcements (e.g. `#ops-announcements`, `#pricing-approvals`)
-   - **Start date**: earliest date to sync
+   - **API Token**: Bot token from Slack App settings (requires `channels:history`, `channels:read`, `users:read` scopes; add `groups:history` / `groups:read` for private channels)
+   - **Channel filter**: scope to high-signal, policy-heavy channels (e.g. `#ops-announcements`, `#pricing-approvals`). Avoid social channels — they add noise without lifting rule recall.
+   - **Start date**: earliest date to backfill
+3. Select streams: `channels`, `users`, `channel_messages`, `threads`. `channels` and `users` are required for resolving channel names and `@user` mentions during normalization.
+4. Connect to the Postgres destination (see Destination section). Run "Sync Now" for the historical backfill and confirm Airbyte reports success.
+5. Run the post-sync normalization step:
+
+   ```bash
+   export DATABASE_URL=postgresql://cb:cb_secret@localhost:5432/company_brain
+   export SLACK_WORKSPACE=your-workspace        # subdomain only, no .slack.com
+   python -m airbyte.normalize.run slack
+   ```
+
+   This reads Airbyte's raw staging tables (`airbyte_internal.slack_raw__stream_*`
+   or the legacy `_airbyte_raw_*` layout) and writes canonical rows into
+   `raw_content` per [airbyte/raw-content-contract.md](raw-content-contract.md).
+   Channel-join / topic-change / bot-add system messages are dropped as noise.
+
+6. Verify (L1-04 acceptance criteria):
+
+   ```sql
+   SELECT COUNT(*) FROM raw_content WHERE source = 'slack';
+   SELECT source_id,
+          left(content, 80)              AS preview,
+          metadata->>'entity_type'        AS entity_type,
+          metadata->>'channel_name'       AS channel,
+          metadata->'author'->>'handle'   AS author
+   FROM raw_content
+   WHERE source = 'slack'
+   LIMIT 5;
+   ```
 
 ### Notion
 
