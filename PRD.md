@@ -1,9 +1,8 @@
-# Company Brain — MVP Product Requirements Document
+# Company Brain — Product Specification
 
-**Version:** 0.3  
-**Status:** Draft — Phase 1 complete  
-**Authors:** Founding team  
-**Last updated:** May 11, 2026
+**Version:** 1.0  
+**Status:** Active  
+**Last updated:** May 2026
 
 ---
 
@@ -11,243 +10,345 @@
 
 1. [Overview](#1-overview)
 2. [Problem Statement](#2-problem-statement)
-3. [Goals and Non-Goals](#3-goals-and-non-goals)
+3. [What We Are Not Building](#3-what-we-are-not-building)
 4. [Users](#4-users)
-5. [Architecture Overview](#5-architecture-overview)
+5. [Architecture](#5-architecture)
 6. [Tech Stack](#6-tech-stack)
-7. [Data Model](#7-data-model)
-8. [Knowledge Graph Ontology](#8-knowledge-graph-ontology)
-9. [API Surface](#9-api-surface)
-10. [Phases of Execution](#10-phases-of-execution)
-11. [Open Questions](#11-open-questions)
+7. [Skill Format](#7-skill-format)
+8. [Data Model](#8-data-model)
+9. [Source Authority Config](#9-source-authority-config)
+10. [Features](#10-features)
+11. [Processes](#11-processes)
+12. [Onboarding Flow](#12-onboarding-flow)
+13. [API Surface](#13-api-surface)
+14. [Phases of Execution](#14-phases-of-execution)
+15. [Open Questions](#15-open-questions)
 
 ---
 
 ## 1. Overview
 
-Company Brain is an infrastructure layer that extracts a company's operational knowledge from every source it lives in — Slack, Zendesk, Notion, GitHub, Jira, email — structures it into versioned machine-readable executable skills, keeps it current as the company evolves, and exposes it to AI agents through a standard interface (MCP).
+Company Brain is the missing layer between raw company data and reliable AI automation.
 
-The output is not a document or a search result. It is an executable skill: a structured rule with conditions, actions, and dependencies that any MCP-compatible agent can query and act on with precision.
+Every company runs on operational knowledge that exists nowhere a machine can read — in Slack threads, Notion pages, Zendesk ticket resolutions, GitHub pull request discussions, and people's heads. AI agents fail on company-specific tasks not because the models are weak but because this knowledge is inaccessible to them.
 
-**The one-line pitch:** Every AI agent in the world will eventually hit the wall of not knowing company-specific logic. Company Brain is the infrastructure that solves that — permanently, and once.
+Company Brain solves this by connecting to every source that knowledge lives in, extracting it into structured executable skills, keeping those skills current as the company evolves, and serving them to any AI agent through a standard interface.
+
+The output is not a search result or a document summary. It is an executable skill: a structured, versioned, human-reviewed description of how the company handles a specific situation, complete with trigger conditions, decision logic, exceptions, and the actions an agent can take.
+
+**One-line pitch:** Every AI agent in the world will eventually hit the wall of not knowing company-specific logic. Company Brain is the infrastructure that solves that — once, permanently, for every company.
 
 ---
 
 ## 2. Problem Statement
 
-Companies deploying AI agents consistently hit the same failure mode: the agent handles generic tasks well but fails on company-specific edge cases — pricing exceptions, escalation rules, return policy thresholds, incident runbooks — because that logic exists nowhere a machine can read.
+Companies deploying AI agents hit the same failure mode consistently: the agent handles generic tasks well but collapses on company-specific edge cases. Pricing exceptions, escalation rules, return policy thresholds, incident runbooks — this logic exists nowhere a machine can reliably read.
 
 It lives in:
 
-- People's heads (the CS lead who handles every exception by pattern recognition accumulated over years)
-- Slack threads from 18 months ago (#ops-announcements, #pricing-approvals)
-- Tens of thousands of Zendesk ticket resolutions that collectively encode how edge cases are actually handled
-- Notion pages that describe how things worked before the last three policy changes
-- GitHub pull requests and issue threads where engineering exceptions, rollback decisions, and operational fixes are discussed
-- Jira tickets whose workflow history captures how incidents, escalations, and implementation requests are actually routed
+- Slack threads from 14 months ago where a policy decision was made in message 47 of a 50-message chain
+- Notion pages that describe how things worked before the last three policy revisions
+- Zendesk ticket resolutions that collectively encode how edge cases are actually handled, but are buried in thousands of tickets
+- GitHub pull request review comments where engineering exceptions and rollback decisions were debated
+- Jira tickets whose comment history captures how incidents are actually routed
+- The head of the CS lead who handles every exception by pattern recognition built over years
 
-AI agents have no authoritative source for this logic. They hallucinate policy, apply stale rules, or fail on edge cases in ways that damage customer trust and require expensive human correction.
+AI agents have no authoritative source for any of this. They hallucinate policy, apply stale rules, or fail on edge cases in ways that damage customer trust and require expensive human correction.
 
-Company Brain solves this. It mines operational logic from every source, structures it into executable skills backed by a temporal knowledge graph, keeps it current automatically, and serves it to agents via MCP with a single query.
+The right fix is not better prompting or larger context windows. It is a dedicated infrastructure layer that extracts this knowledge, structures it, keeps it current, and serves it to agents on demand. That is Company Brain.
 
 ---
 
-## 3. Goals and Non-Goals
+## 3. What We Are Not Building
 
-### MVP Goals
+These decisions reflect deliberate choices to keep the MVP shippable and the product honest.
 
-- Ingest real company data from five sources: Zendesk, Slack, Notion, GitHub, Jira
-- Extract structured condition-action-dependency triples using the ExIde framework
-- Discover actual behavioral patterns from Zendesk event logs using process mining (PM4Py)
-- Build a temporal knowledge graph from extracted entities and relationships using Graphiti, with a custom Company Brain ontology (PolicyRule, CustomerTier, ExceptionCondition, ThresholdValue)
-- Store versioned skills in a PostgreSQL registry backed by pgvector for semantic retrieval
-- Serve skills to any MCP-compatible agent via FastMCP using hybrid retrieval: pgvector for semantic similarity, Graphiti graph traversal for relational precision
-- Expose a REST API for non-MCP agent frameworks
-- Detect high-signal source events and trigger skill re-extraction within 5 minutes (living currency)
-- Surface low-confidence extractions for human review before publishing
-- Demonstrate the full pipeline end-to-end with a Claude agent demo
-
-### MVP Non-Goals
-
-- Salesforce, HubSpot, Gmail, Gong, Confluence connectors (add post-MVP)
-- Fine-tuned HuggingFace content classifier (Claude Haiku handles classification via prompt for MVP)
-- Full grounding layer constraining agent actions to skill's explicit tool schemas (v2)
-- Multi-tenant data isolation and PII redaction pipeline (required before external customers, not for internal prototype)
-- n8n on Layer 5 (Claude agent calls FastMCP directly; living currency uses a plain FastAPI webhook endpoint)
-- Persistent feedback loop processing episodic agent data back into the brain (stub only — log to table, process in v2)
+| Not building                                | Reason                                                                                                                                                          |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A chatbot over documents                    | That is a solved problem. Company Brain produces executable skills, not search results.                                                                         |
+| A knowledge graph (Neo4j + Graphiti)        | Boundary classification and override detection via vector similarity + LLM calls handles what the graph was supposed to do, without the operational complexity. |
+| Airbyte batch ingestion                     | Replaced entirely by MCP connectors + webhooks. Sources are queried directly.                                                                                   |
+| PM4Py process mining                        | A Sonnet call over resolved Zendesk tickets produces equivalent output for MVP purposes.                                                                        |
+| ExIde two-stage extraction                  | Replaced by a cleaner two-pass extraction design with better separation of concerns.                                                                            |
+| Multi-tenant PII redaction                  | Required before external enterprise customers. Not for internal prototype.                                                                                      |
+| Fine-tuned content classifier               | Claude Haiku via prompt handles classification at MVP scale.                                                                                                    |
+| Salesforce, HubSpot, Gmail, Gong connectors | Post-MVP. Five sources are sufficient to prove the extraction pipeline.                                                                                         |
 
 ---
 
 ## 4. Users
 
-### Primary: AI engineers deploying support or ops agents
+### Primary — AI engineers deploying support or ops agents
 
-These are the people who keep hitting the "agent doesn't know our process" wall. They have a budget line for tooling, they can self-serve an API integration, and they do not need to go through procurement. At a 50–200 person B2B SaaS company, this is typically one person — the engineer who owns the agent stack.
+These are the people who keep hitting the "agent doesn't know our process" wall. At a 50–500 person B2B SaaS company, this is typically one person: the engineer who owns the agent stack. They have a tooling budget, they can self-serve an API integration, and they do not need procurement approval.
 
-**Pain they feel:** Writing and maintaining bespoke prompt context for every policy edge case. When policy changes, they have to find every prompt it touches and update each manually. When an edge case breaks the agent, they have to diagnose it manually.
+**Pain:** Writing and maintaining bespoke prompt context for every policy edge case. When policy changes, they have to find every prompt it touches and update each manually. When an edge case breaks the agent, they have to diagnose it manually and patch it by hand.
 
-**How they use Company Brain:** Point the MCP server at their agent framework. Query `query_brain(situation)` before each task. Receive matched skill with decision logic and tool schemas. Done.
+**How they use Company Brain:** Connect sources during onboarding. Point MCP server at their agent framework. The agent calls `query_brain(situation)` before each task. Brain returns the matched skill with decision logic and actions. Done.
 
-### Secondary: CS or ops team leads who manage the human review queue
+### Secondary — CS or ops team leads who manage the review queue
 
-When the extraction engine produces a low-confidence skill update (70–90% confidence), it goes to the review queue instead of auto-publishing. This person reviews the proposed change, sees the source it came from, and approves or rejects. They are not technical.
+When the extraction engine produces a low-confidence skill or detects a contradiction between sources, it goes to the review queue instead of auto-publishing. This person reviews proposed changes, sees the source context, and approves, rejects, or corrects. They are not technical.
 
-**How they use Company Brain:** Simple review UI (FastAPI + minimal HTML for MVP). See proposed update, see source context, approve or reject.
+**How they use Company Brain:** Simple review UI. See the proposed change alongside the source it came from. Make a decision in under 30 seconds per item. The UI is designed so they never need to understand the extraction system — just the content.
 
 ---
 
-## 5. Architecture Overview
+## 5. Architecture
 
-Company Brain is organized into five layers. Each layer has a defined input, a specific responsibility, and a structured output that feeds the layer below. The knowledge graph and vector store together form the retrieval backbone.
+Company Brain is organized into three layers. The onboarding sweep populates the brain at signup. The event-driven pipeline keeps it current thereafter. The delivery layer serves skills to agents.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  LAYER 1 — DATA SOURCES                                          │
-│  Airbyte OSS · Zendesk · Slack · Notion · GitHub · Jira          │
-│  → Postgres staging (raw_content table)                          │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ raw documents
-┌────────────────────────────▼─────────────────────────────────────┐
-│  LAYER 2 — EXTRACTION ENGINE                                     │
-│  Claude Haiku (classifier + ExIde) · PM4Py · OpenAI embeddings   │
-│  → condition-action-dependency triples + embeddings              │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ structured triples
-┌────────────────────────────▼─────────────────────────────────────┐
-│  LAYER 3 — KNOWLEDGE CORE                                        │
-│  ┌──────────────────────┐  ┌───────────────────┐  ┌──────────┐  │
-│  │ Graphiti + Neo4j     │  │ Skills Registry   │  │  Redis   │  │
-│  │ temporal graph       │  │ pgvector +        │  │  cache   │  │
-│  │ custom ontology      │  │ PostgreSQL        │  │          │  │
-│  └──────────────────────┘  └───────────────────┘  └──────────┘  │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ hybrid retrieval result
-┌────────────────────────────▼─────────────────────────────────────┐
-│  LAYER 4 — DELIVERY INTERFACE                                    │
-│  FastMCP server (port 8001) · FastAPI REST (port 8000)           │
-│  Hybrid retrieval: pgvector (semantic) + Graphiti (relational)   │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ grounded skill context
-┌────────────────────────────▼─────────────────────────────────────┐
-│  LAYER 5 — AGENT RUNTIME                                         │
-│  Claude agent demo · FastMCP client · feedback log stub          │
-└──────────────────────────────────────────────────────────────────┘
-                             │ episodic feedback
-                             └──────────────────► BRAIN UPDATES (v2)
+┌─────────────────────────────────────────────────────────────────┐
+│  SOURCES                                                        │
+│  Slack · Notion · GitHub · Jira · Zendesk                       │
+│  Connected via MCP clients + webhook subscriptions              │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+              ┌─────────────┴──────────────┐
+              │ ONBOARDING SWEEP           │ EVENT-DRIVEN
+              │ (one-time, at signup)      │ (ongoing, webhook)
+              └─────────────┬──────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│  EXTRACTION ENGINE                                              │
+│  Relevance gate → Context expansion → Two-pass extraction       │
+│  → Boundary classification → Contradiction detection           │
+│  → Confidence scoring → Skill writing + embedding              │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│  KNOWLEDGE CORE                                                 │
+│  PostgreSQL + pgvector  ·  Redis cache  ·  Review queue        │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────────┐
+│  DELIVERY                                                       │
+│  FastMCP (port 8001)  ·  FastAPI REST (port 8000)              │
+│  query_brain tool  ·  Query-driven extraction fallback         │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                     AI AGENTS
 ```
 
-### Living Currency (cross-cutting)
+### Living Currency
 
-A webhook endpoint (`POST /ingest/event`) receives high-signal source events — Slack messages from designated channels, Notion page updates, GitHub issue or pull request updates, and Jira issue transitions or comments. On receipt, the extraction engine re-processes only the affected skill and updates both the pgvector skills registry and the Graphiti graph. If confidence ≥ 90%, the skill auto-publishes with a version bump. If 70–89%, it goes to the review queue. Below 70%, it is logged and discarded. Target latency from source event to published update: under 5 minutes.
+Every source connected during onboarding also has a webhook subscription created for ongoing monitoring. When a relevant event occurs in a monitored Slack channel, Notion space, or Jira project, the extraction engine re-processes only the affected content. Updated skills publish within five minutes of the source event.
 
 ### Hybrid Retrieval
 
-For every agent query, retrieval runs in two stages:
+For every agent query:
 
-1. **Semantic stage (pgvector):** cosine similarity search over skill description embeddings returns candidate skill IDs ranked by semantic closeness
-2. **Graph stage (Graphiti):** for the top candidates, Graphiti graph traversal resolves relational context — which rules override others, which exception conditions apply, which customer tier gates a specific action. Graph hits surface above pure semantic matches.
-
-The combined result is the highest-precision skill match Company Brain can produce.
+1. Embed the situation string
+2. Check Redis cache — hit: return immediately
+3. pgvector cosine similarity search over published skill embeddings → top 5 candidates
+4. If max similarity ≥ 0.70: return best match
+5. If max similarity < 0.70: trigger query-driven extraction from live sources
 
 ---
 
 ## 6. Tech Stack
 
-| Layer | Component                | Technology                         | Notes                                                                               |
-| ----- | ------------------------ | ---------------------------------- | ----------------------------------------------------------------------------------- |
-| 1     | Data connectors          | Airbyte OSS                        | Self-hosted via `abctl local install`. Runs separately from main compose.           |
-| 1     | Ingestion destination    | Postgres 16                        | `raw_content` table. Airbyte writes here.                                           |
-| 2     | Content classifier       | Claude Haiku                       | Prompt-based: rule / fact / event / noise                                           |
-| 2     | Rule extractor           | Claude Haiku + ExIde               | Two-stage: pseudo-code intermediate → condition-action-dependency triple            |
-| 2     | Process mining           | PM4Py                              | Runs on Zendesk ticket event logs. Discovers actual decision patterns.              |
-| 2     | Embeddings               | OpenAI text-embedding-3-small      | 1536 dimensions. Used for pgvector retrieval and Graphiti entity embeddings.        |
-| 3     | Temporal knowledge graph | Graphiti (Apache 2.0) + Neo4j 5.26 | Custom Company Brain ontology. Hybrid retrieval: semantic + BM25 + graph traversal. |
-| 3     | Vector store             | pgvector (Postgres extension)      | IVFFlat index on skill description embeddings. Semantic retrieval layer.            |
-| 3     | Skills registry          | PostgreSQL 16                      | Versioned skill records, conflict tracking, audit log.                              |
-| 3     | Hot-path cache           | Redis 7                            | 5-minute TTL on skill search results. Invalidated on publish/update.                |
-| 4     | MCP server               | FastMCP (Python)                   | Exposes `query_brain` tool. SSE transport on port 8001.                             |
-| 4     | REST API                 | FastAPI                            | CRUD + search + webhook + review endpoints on port 8000.                            |
-| 5     | Agent demo               | Anthropic Python SDK               | Claude calls FastMCP server directly. No orchestration framework dependency.        |
-| Infra | Container runtime        | Docker + Docker Compose            | All services. Airbyte has its own compose managed separately.                       |
-
-### Graphiti configuration note
-
-Graphiti defaults to OpenAI for its internal LLM calls (entity extraction, deduplication, relationship classification). Since we are already using the OpenAI API for embeddings, Graphiti runs on the same key with no additional provider setup. Install: `pip install graphiti-core`. Entity extraction concurrency is controlled via `SEMAPHORE_LIMIT` — set to 5 for MVP to avoid rate limit errors during bulk ingestion.
+| Component          | Technology                    | Notes                                                                    |
+| ------------------ | ----------------------------- | ------------------------------------------------------------------------ |
+| API server         | FastAPI (Python)              | REST endpoints port 8000. Extraction engine lives here.                  |
+| MCP server         | FastMCP                       | `query_brain` tool on port 8001. SSE transport.                          |
+| Database           | PostgreSQL 16 + pgvector      | Skills registry, versioning, review queue, event log.                    |
+| Vector index       | pgvector IVFFlat              | Cosine similarity on 1536-dim skill embeddings.                          |
+| Cache              | Redis 7                       | 5-min TTL on search results. Invalidated on publish/update.              |
+| Content classifier | Claude Haiku                  | Relevance gate, decision moment identification, boundary classification. |
+| Skill extractor    | Claude Sonnet                 | Two-pass extraction from authority-annotated context.                    |
+| Embeddings         | OpenAI text-embedding-3-small | 1536 dimensions. Skills table + agent query embedding.                   |
+| Container runtime  | Docker + Docker Compose       | All services. Single compose file.                                       |
+| Review UI          | FastAPI + Jinja2              | Minimal HTML. No frontend framework needed for MVP.                      |
+| Agent demo         | Anthropic Python SDK          | Claude calls FastMCP directly. No orchestration framework.               |
 
 ---
 
-## 7. Data Model
+## 7. Skill Format
 
-### `raw_content` — Airbyte staging
+The output of every extraction is a structured markdown document. This is what agents receive when they call `query_brain`. It is designed to be both human-readable (for the review queue) and machine-readable (for agents).
 
-```sql
-CREATE TABLE raw_content (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source         VARCHAR(50),        -- 'zendesk' | 'slack' | 'notion' | 'github' | 'jira'
-  source_id      VARCHAR(255),       -- original record ID from source system
-  content        TEXT,
-  metadata       JSONB,
-  content_type   VARCHAR(20),        -- 'rule' | 'fact' | 'event' | 'noise'
-  graph_ingested BOOLEAN DEFAULT FALSE,
-  ingested_at    TIMESTAMP DEFAULT NOW()
-);
+```markdown
+# Skill: {skill_name}
+
+## Trigger
+
+{Plain English description of when this skill applies.
+Written in "when-to-invoke" framing for semantic search accuracy.}
+
+## Base Logic
+
+IF {condition_a} → {action}
+IF {condition_b} → {action}
+IF {condition_c} → escalate to {role}
+
+## Exceptions
+
+| Condition   | Override       | Source | Authority       | Date   |
+| ----------- | -------------- | ------ | --------------- | ------ |
+| {condition} | {what changes} | {url}  | high/medium/low | {date} |
+
+## Actions
+
+- {action_name}({params}) → {what it does}
+- {action_name}({params}) → {what it does}
+
+## Source
+
+Primary: {source_url} ({author}, {date})
+Authority: {high | medium | low}
+
+## Metadata
+
+Version: {n}
+Confidence: {0.0–1.0}
+Status: {published | pending_review | draft | archived}
+Last updated: {timestamp}
+Changed by: {system | human_authored | {reviewer_id}}
 ```
 
-### `skills` — versioned skills registry
+### Why this format
+
+Skills are stored and served as structured text, not as graph nodes or JSON blobs. Agents read and follow markdown instructions reliably. The exceptions table is the most important structural decision — it means most new policy extractions append a row to an existing skill's exception block rather than creating a new skill, which keeps the registry coherent and queryable.
+
+---
+
+## 8. Data Model
+
+### `skills`
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE skills (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name           VARCHAR(255) UNIQUE NOT NULL,
-  version        INTEGER DEFAULT 1,
-  confidence     FLOAT,
-  description    TEXT,             -- semantic retrieval field — when-to-invoke framing
-  decision_logic TEXT,             -- IF/THEN rule body in SKILL.md format
-  tool_schemas   JSONB,            -- [{name, params, returns}]
-  source_ids     JSONB DEFAULT '[]',
-  conflict_flags JSONB DEFAULT '[]',
-  graph_node_ids JSONB DEFAULT '[]',  -- Graphiti node UUIDs for this skill's entities
-  status         VARCHAR(20) DEFAULT 'draft',  -- draft | pending_review | published | archived
-  embedding      VECTOR(1536),
-  created_at     TIMESTAMP DEFAULT NOW(),
-  updated_at     TIMESTAMP DEFAULT NOW()
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name              VARCHAR(255) UNIQUE NOT NULL,
+  version           INTEGER DEFAULT 1,
+  trigger           TEXT,
+  base_logic        TEXT,
+  exceptions_block  JSONB DEFAULT '[]',
+  -- [{condition, override, source_url, source_authority, author, date}]
+  actions           JSONB DEFAULT '[]',
+  -- [{name, params, description}]
+  source_ids        JSONB DEFAULT '[]',
+  source_authority  VARCHAR(10),
+  -- high | medium | low  (authority of the primary backing source)
+  conflict_flags    JSONB DEFAULT '[]',
+  status            VARCHAR(20) DEFAULT 'draft',
+  -- draft | pending_review | published | archived
+  confidence        FLOAT,
+  embedding         VECTOR(1536),
+  changed_by        VARCHAR(50),
+  -- system | human_authored | {reviewer_id}
+  created_at        TIMESTAMP DEFAULT NOW(),
+  updated_at        TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX ON skills USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX ON skills USING ivfflat (embedding vector_cosine_ops)
+  WITH (lists = 100);
+CREATE INDEX ON skills (status);
+CREATE INDEX ON skills (source_authority);
 ```
 
-### `skill_versions` — full change history
+### `skill_versions`
+
+Full change history. Every write to a published skill creates a row here before updating the parent record.
 
 ```sql
 CREATE TABLE skill_versions (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  skill_id       UUID REFERENCES skills(id),
-  version        INTEGER,
-  decision_logic TEXT,
-  confidence     FLOAT,
-  changed_by     VARCHAR(50),      -- 'system' | reviewer user ID
-  created_at     TIMESTAMP DEFAULT NOW()
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  skill_id          UUID REFERENCES skills(id),
+  version           INTEGER,
+  base_logic        TEXT,
+  exceptions_block  JSONB,
+  confidence        FLOAT,
+  changed_by        VARCHAR(50),
+  change_type       VARCHAR(30),
+  -- update | exception_added | human_edit | sweep_sourced
+  created_at        TIMESTAMP DEFAULT NOW()
 );
 ```
 
-### `review_queue` — human-in-the-loop gates
+### `review_queue`
+
+Human-in-the-loop gate for low-confidence extractions, contradictions, and sweep-sourced skills.
 
 ```sql
 CREATE TABLE review_queue (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   skill_id        UUID REFERENCES skills(id),
+  review_type     VARCHAR(30),
+  -- update | exception | contradiction | new | query_driven | sweep_sourced
   proposed_update JSONB,
+  -- the full proposed skill body
+  source_a        JSONB,
+  -- {url, author, timestamp, excerpt, authority, tier}
+  source_b        JSONB,
+  -- populated only for review_type = contradiction
   confidence      FLOAT,
   reason          TEXT,
-  status          VARCHAR(20) DEFAULT 'pending',  -- pending | approved | rejected
+  status          VARCHAR(20) DEFAULT 'pending',
+  -- pending | approved | rejected | human_written
+  resolved_by     VARCHAR(50),
   created_at      TIMESTAMP DEFAULT NOW(),
   resolved_at     TIMESTAMP
 );
+
+CREATE INDEX ON review_queue (status);
+CREATE INDEX ON review_queue (review_type);
 ```
 
-### `agent_interactions` — episodic feedback stub
+### `source_events`
+
+Log of every incoming webhook event. Used for sweep resume, audit trail, and debugging extraction failures.
+
+```sql
+CREATE TABLE source_events (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source       VARCHAR(50),
+  -- slack | notion | github | jira | zendesk
+  event_type   VARCHAR(50),
+  -- message | page_update | pr_merged | issue_closed | ticket_resolved | etc
+  source_id    VARCHAR(255),
+  payload      JSONB,
+  processed    BOOLEAN DEFAULT FALSE,
+  skill_id     UUID,
+  -- set after extraction if a skill was created or updated
+  outcome      VARCHAR(30),
+  -- published | queued | discarded | duplicate | contradiction
+  sweep_id     UUID,
+  -- set if this event was processed during an onboarding sweep
+  created_at   TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX ON source_events (source, processed);
+CREATE INDEX ON source_events (sweep_id);
+```
+
+### `sweeps`
+
+Tracks onboarding and manual sweep jobs.
+
+```sql
+CREATE TABLE sweeps (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  status         VARCHAR(20) DEFAULT 'running',
+  -- running | completed | failed | paused
+  config         JSONB,
+  -- the source_authority.yaml contents at time of sweep
+  progress       JSONB DEFAULT '{}',
+  -- {source: {total, processed, published, queued, discarded}}
+  skills_created INTEGER DEFAULT 0,
+  skills_queued  INTEGER DEFAULT 0,
+  started_at     TIMESTAMP DEFAULT NOW(),
+  completed_at   TIMESTAMP
+);
+```
+
+### `agent_interactions`
+
+Stub for episodic feedback. Logged on every `query_brain` call. Processed in v2.
 
 ```sql
 CREATE TABLE agent_interactions (
@@ -255,7 +356,8 @@ CREATE TABLE agent_interactions (
   skill_id           UUID REFERENCES skills(id),
   query              TEXT,
   matched_confidence FLOAT,
-  graph_path         JSONB,         -- edges traversed during Graphiti retrieval
+  match_type         VARCHAR(20),
+  -- semantic | query_driven | no_match
   agent_action       JSONB,
   human_override     BOOLEAN DEFAULT FALSE,
   created_at         TIMESTAMP DEFAULT NOW()
@@ -264,608 +366,944 @@ CREATE TABLE agent_interactions (
 
 ---
 
-## 8. Knowledge Graph Ontology
+## 9. Source Authority Config
 
-Company Brain uses Graphiti with a prescribed domain ontology. Custom entity types and edge types are defined as Pydantic models and passed to Graphiti at ingestion time. Graphiti handles entity deduplication, temporal validity windows, and provenance tracking automatically.
+Loaded from `source_authority.yaml` at startup. Not stored in the database. Defines which sources are authoritative, which are monitored for ongoing events, and what the routing thresholds are.
 
-### Entity types
+```yaml
+# source_authority.yaml
 
-> **Note:** graphiti-core 0.7+ uses plain `pydantic.BaseModel` for custom entity and edge types. The `EntityNode` / `EntityEdge` base classes from earlier versions no longer exist.
+tiers:
+  high:
+    weight: 1.0
+    sources:
+      - type: notion
+        signals: [designated_policy_page, owner_edited]
+      - type: github
+        signals: [path_prefix=/docs, path_prefix=/runbooks]
+      - type: jira
+        signals: [ticket_type=policy, status=done]
 
-```python
-from pydantic import BaseModel, Field
+  medium:
+    weight: 0.7
+    sources:
+      - type: slack
+        signals:
+          [
+            channel=policy,
+            channel=ops-decisions,
+            channel=cs-escalations,
+            channel=engineering-decisions,
+          ]
+      - type: zendesk
+        signals: [tag=policy-exception, status=solved]
 
-class PolicyRule(BaseModel):
-    """A discrete operational rule that governs an agent decision."""
-    condition: str = Field(description="The condition under which this rule applies")
-    action: str = Field(description="The action to execute when condition is met")
-    confidence: float = Field(description="Extraction confidence 0.0-1.0")
-    source_type: str = Field(description="zendesk | slack | notion | github | jira | process_mining")
+  low:
+    weight: 0.4
+    sources:
+      - type: slack
+        signals: []
+      - type: github
+        signals: [content_type=comment]
+      - type: jira
+        signals: [content_type=comment]
 
-class CustomerTier(BaseModel):
-    """A customer classification that gates specific rules or actions."""
-    tier_name: str = Field(description="Name of the tier e.g. standard, enterprise, B2B")
-    crm_field: str = Field(description="CRM field that stores this value", default="")
+routing:
+  auto_publish_confidence: 0.90
+  auto_publish_authority_floor: medium
+  review_queue_confidence_floor: 0.70
+  # below 0.70 → draft, not surfaced to reviewers
 
-class ThresholdValue(BaseModel):
-    """A numeric threshold that determines rule branching."""
-    value: float = Field(description="The threshold number")
-    unit: str = Field(description="Unit e.g. days, USD, percentage")
-    context: str = Field(description="What this threshold applies to")
+monitored:
+  slack_channels: [] # populated from onboarding config
+  notion_spaces: [] # populated from onboarding config
+  jira_projects: [] # populated from onboarding config
+  github_paths: [/docs, /runbooks, /.github]
+  zendesk_tags: [policy-exception, escalation-approved, exception-granted]
 
-class ExceptionCondition(BaseModel):
-    """A condition that overrides or modifies a base rule."""
-    override_type: str = Field(description="time_window | policy | routing")
-    trigger: str = Field(description="What triggers this exception")
-```
-
-### Edge types
-
-```python
-from pydantic import BaseModel, Field
-
-class OverridesEdge(BaseModel):
-    """Source rule overrides target rule when its condition is met."""
-    priority: int = Field(description="Override priority — higher wins on conflict", default=1)
-
-class HasExceptionForEdge(BaseModel):
-    """Source policy has a defined exception path for target entity."""
-    exception_action: str = Field(description="Action taken in the exception case")
-
-class GovernsEdge(BaseModel):
-    """Source rule governs the handling of target entity type."""
-    scope: str = Field(description="Scope of governance e.g. time, amount, routing")
-
-class RequiresRoutingToEdge(BaseModel):
-    """Source entity type requires routing to target role or system."""
-    routing_condition: str = Field(description="Condition that triggers routing")
-```
-
-### Example graph subgraph (return policy domain)
-
-```
-(DamagedInTransit: ExceptionCondition) -[OVERRIDES]->       (TimeWindowRule: PolicyRule)
-(TimeWindowRule: PolicyRule)           -[GOVERNS]->          (ReturnRequest: PolicyRule)
-(RefundPolicy: PolicyRule)             -[HAS_EXCEPTION_FOR]-> (PremiumAccount: CustomerTier)
-(B2BAccount: CustomerTier)             -[REQUIRES_ROUTING_TO]-> (AccountManager: PolicyRule)
-(ThirtyDayWindow: ThresholdValue)      -[GOVERNS]->          (ReturnRequest: PolicyRule)
-```
-
-### Graphiti ingestion pattern
-
-```python
-from graphiti_core import Graphiti
-from datetime import datetime, timezone
-
-ENTITY_TYPES = {
-    "PolicyRule": PolicyRule,
-    "CustomerTier": CustomerTier,
-    "ThresholdValue": ThresholdValue,
-    "ExceptionCondition": ExceptionCondition,
-}
-
-async def ingest_to_graph(skill_name: str, content: str, source_id: str):
-    graphiti = await get_graphiti()
-    episode = await graphiti.add_episode(
-        name=skill_name,
-        episode_body=content,
-        source_description=f"Extracted from {source_id}",
-        reference_time=datetime.now(timezone.utc),
-        entity_types=ENTITY_TYPES,
-    )
-    return episode
+sweep:
+  processing_order:
+    - notion
+    - github
+    - jira
+    - slack
+    - zendesk
+  rate_per_minute: 10 # items processed per source per minute
+  semaphore_limit: 5 # concurrent LLM calls
+  auto_publish_during_sweep: false
+  # all sweep extractions go to review_queue regardless of confidence
 ```
 
 ---
 
-## 9. API Surface
+## 10. Features
+
+### Layer 1 — Source Connections
+
+**Feature 1 — Webhook receiver**
+`POST /ingest/event` receives incoming events from all connected sources. Validates the payload, logs to `source_events`, and enqueues for extraction processing.
+
+Supported event types per source:
+
+| Source  | Event types                                                                   |
+| ------- | ----------------------------------------------------------------------------- |
+| Slack   | `message` in monitored channels, `message_changed` (edits), `pin_added`       |
+| Notion  | `page.updated`, `page.created` in monitored spaces                            |
+| GitHub  | `pull_request.closed` (merged), `issue.closed`, `push` to monitored paths     |
+| Jira    | `issue.updated` (status transitions), `comment.created` on monitored projects |
+| Zendesk | `ticket.updated` (solved), `ticket.tagged` with monitored tags                |
+
+**Feature 2 — Context expanders**
+One expander per source. Each knows how to fetch full surrounding context for an event, not just the triggering message. Called during extraction after the relevance gate passes.
+
+| Source  | What the expander fetches                                            |
+| ------- | -------------------------------------------------------------------- |
+| Slack   | Full thread from the message ID, including all replies and reactions |
+| Notion  | Full page body + parent page title + linked page titles and excerpts |
+| GitHub  | PR description + all review comments + body of linked issues         |
+| Jira    | Ticket body + all comments + linked tickets + transition log         |
+| Zendesk | Ticket + all comments + tags + resolution note                       |
+
+**Feature 3 — Source authority annotator**
+Reads `source_authority.yaml`, determines the tier of an incoming event or sweep item based on source type and signals, and annotates the context before passing it to extraction. The tier is passed explicitly to the extraction prompt so the LLM knows how to weight conflicting information.
+
+---
+
+### Layer 2 — Extraction Engine
+
+**Feature 4 — Relevance gate** (Claude Haiku)
+Single LLM call. Binary question: does this content contain operational decision logic, a policy rule, a process instruction, or an exception to an existing rule? Yes → proceed. No → mark `source_events.outcome = discarded`. This is the cheapest call in the pipeline and filters most noise before any expensive processing.
+
+**Feature 5 — Pass 1: Decision moment identifier** (Claude Haiku)
+For threaded or long-form sources (Slack threads, Jira comment chains, GitHub review threads): reads the full content and identifies only the authoritative decision moments.
+
+Signals it looks for:
+
+- Definitive language: "going forward", "the policy is", "from now on", "confirmed:", "final answer:", "we've decided"
+- Positive reactions from multiple people (✅, 👍) indicating consensus
+- Pinned messages (always treated as authoritative)
+- @channel or @here announcements in policy channels
+- Messages from designated authorities (CS lead, Head of Operations, etc.)
+- Recency among debated messages (later messages often resolve earlier disagreement)
+
+Output: `[{message_id, author, timestamp, decision_text, signals}]`
+
+**Feature 6 — Pass 2: Skill extractor** (Claude Sonnet)
+Takes decision moments from Pass 1 plus authority-annotated full context. Extracts a structured skill draft. The prompt instructs the model to prioritize higher-authority sources when sources conflict and to express uncertainty rather than hallucinate.
+
+Output:
+
+```json
+{
+  "trigger": "...",
+  "base_logic": "...",
+  "exceptions": [...],
+  "actions": [...],
+  "extraction_confidence": 0.0-1.0,
+  "uncertainty_notes": "..."
+}
+```
+
+**Feature 7 — Boundary classifier** (Claude Haiku)
+After extraction, runs a pgvector cosine search over published skills (top 3 matches). If max similarity > 0.82, sends the new extraction alongside the matching skill to Haiku with a four-way classification question:
+
+- **UPDATE** — this changes the base logic of the existing skill
+- **EXCEPTION** — this is a new exception or override to add to the existing skill
+- **DUPLICATE** — this says the same thing the existing skill already says
+- **NEW** — this is genuinely distinct from all existing skills
+
+Routes by result:
+
+- UPDATE → propose a version diff on base_logic, send to contradiction detector
+- EXCEPTION → append a row to the exceptions_block, send to confidence scorer
+- DUPLICATE → discard, log source_id as already covered
+- NEW → create new skill entry, send to contradiction detector
+
+**Feature 8 — Contradiction detector**
+Runs when the boundary classifier returns UPDATE or NEW. Compares the proposed change against the current published skill. If the proposed content conflicts with the existing content on the same condition:
+
+- Does not update the skill
+- Does not create a new skill
+- Creates a `review_queue` row with `review_type = contradiction`, populating both `source_a` and `source_b` with full source metadata
+- Marks `source_events.outcome = contradiction`
+
+**Feature 9 — Confidence scorer**
+Computes the final confidence score used for routing decisions.
+
+```
+base_score = extraction_confidence (Sonnet self-report, 0.0–1.0)
+
+authority_multiplier:
+  high   → 1.0
+  medium → 0.85
+  low    → 0.65
+
+final_confidence = base_score × authority_multiplier
+
+overrides:
+  contradiction_detected = true  → confidence = 0.0 (forces review)
+  changed_by = human_authored    → confidence = 1.0 (bypasses routing)
+  sweep_sourced = true           → route to review_queue regardless of score
+```
+
+**Feature 10 — Skill writer**
+Takes the extraction output and confidence score. Writes or updates the skills table. Creates a `skill_versions` row on every change to a published skill. Routes by confidence:
+
+```
+confidence ≥ 0.90
+  AND no contradiction
+  AND source_authority ≥ medium
+  AND sweep_sourced = false
+  → auto-publish, version bump, Redis cache invalidate
+
+confidence 0.70–0.89
+  OR source_authority = low
+  OR sweep_sourced = true
+  → status = pending_review, write to review_queue
+
+confidence < 0.70
+  → status = draft, logged to source_events, not shown in review queue
+```
+
+**Feature 11 — Embedder**
+Calls OpenAI `text-embedding-3-small` on the skill's `trigger` + `base_logic` text. Stores the resulting 1536-dimension vector in `skills.embedding`. Called after skill_writer completes. Also called at query time to embed the agent's situation string for semantic search.
+
+---
+
+### Layer 3 — Knowledge Core
+
+**Feature 12 — pgvector semantic search**
+IVFFlat index on `skills.embedding`. Cosine similarity search over published skills. Used by both the boundary classifier (searching for related existing skills) and the `query_brain` delivery tool (finding the best match for an agent query). Returns top-k results with similarity scores.
+
+**Feature 13 — Redis search cache**
+Five-minute TTL on `query_brain` search results, keyed by the query embedding hash. Invalidated immediately on any skill publish, version bump, or status change. Reduces LLM embedding calls and database load for repeated or similar agent queries.
+
+**Feature 14 — Skill versioning**
+Every update to a published skill creates a `skill_versions` row capturing the previous state, the change type, and the `changed_by` field. The parent skills row then updates with the new content and an incremented version number. The full version history is accessible via `GET /skills/{id}/versions`.
+
+---
+
+### Layer 4 — Delivery
+
+**Feature 15 — `query_brain` MCP tool**
+The primary interface for AI agents. Full implementation:
+
+1. Embed the incoming situation string (OpenAI)
+2. Check Redis cache — hit: return immediately
+3. pgvector cosine search → top 5 published skills by similarity
+4. If max similarity ≥ 0.70: return best match
+5. If max similarity < 0.70: trigger Feature 16 (query-driven extraction)
+6. Cache result in Redis (5-min TTL)
+7. Log to `agent_interactions`
+
+Response schema:
+
+```json
+{
+  "skill_name": "Refund Request Handling",
+  "trigger": "Customer submits a refund request",
+  "base_logic": "IF order_age <= 30 days → approve...",
+  "exceptions": [
+    {
+      "condition": "Item damaged in transit",
+      "override": "Approve regardless of time window",
+      "source_url": "https://slack.com/...",
+      "authority": "medium",
+      "date": "2025-03-12"
+    }
+  ],
+  "actions": [
+    { "name": "approve_refund", "params": ["order_id"] },
+    { "name": "reject_refund", "params": ["order_id", "reason"] },
+    { "name": "escalate_to_human", "params": ["order_id", "assignee"] }
+  ],
+  "confidence": 0.94,
+  "source_authority": "high",
+  "version": 3,
+  "match_type": "semantic",
+  "similarity_score": 0.91
+}
+```
+
+**Feature 16 — Query-driven extraction**
+When `query_brain` finds no match (max similarity < 0.70), instead of returning empty:
+
+1. Use the situation string as a search query against source MCPs (Notion, Slack designated channels, Zendesk)
+2. Fetch top results from connected sources
+3. Run full extraction pipeline on combined results (same as event-driven)
+4. Return the extracted skill to the agent immediately, flagged as `match_type: query_driven`
+5. Store as draft in `review_queue` with `review_type: query_driven` for human promotion to published
+6. If the agent interaction is later marked as successful (no override, no correction), confidence bumps on next review
+
+**Feature 17 — FastAPI REST API**
+
+See Section 13 for full endpoint reference.
+
+---
+
+### Review System
+
+**Feature 18 — Review queue list**
+`GET /review` returns pending items grouped by type. Contradictions are shown first (highest risk if unresolved). Each item shows: skill name, review type, source authority, confidence, source name, and age.
+
+**Feature 19 — Update review card**
+For `review_type = update`. Shows the existing skill's base_logic alongside the proposed change as a side-by-side diff. Approve: bumps version, publishes, invalidates cache. Reject: discards the proposed update, logs outcome.
+
+**Feature 20 — Exception review card**
+For `review_type = exception`. Shows the existing skill and the single proposed row to append to the exceptions table. Approve: appends the row, bumps version. Reject: discards.
+
+**Feature 21 — Contradiction review card**
+For `review_type = contradiction`. The most critical card. Shows both conflicting sources side by side with full metadata, and the current published skill state.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ ⚠️ Contradiction: Refund Request Handling               │
+├──────────────────┬──────────────────────────────────────┤
+│ SOURCE A         │ SOURCE B                             │
+│ Notion [HIGH]    │ Slack #cs-policy [MEDIUM]            │
+│ Apr 1, 2025      │ Mar 15, 2025                         │
+│ Sarah Chen       │ Mike Torres                          │
+│                  │                                      │
+│ "Approve refunds │ "30 day hard limit,                  │
+│  up to 45 days   │  no exceptions for                   │
+│  for premium"    │  premium customers"                  │
+│                  │                                      │
+│ [Open in Notion] │ [Open in Slack]                     │
+├──────────────────┴──────────────────────────────────────┤
+│ CURRENT SKILL SAYS: 30 day hard limit                   │
+├─────────────────────────────────────────────────────────┤
+│ [Source A is correct]  [Source B is correct]            │
+│ [Neither — I'll write the correct version]              │
+└─────────────────────────────────────────────────────────┘
+```
+
+Outcomes:
+
+- Pick Source A or B → that source becomes the authoritative basis, skill updates, `changed_by = reviewer_id`
+- Write correction → reviewer writes the correct version directly, `changed_by = human_authored`, confidence = 1.0, auto-publishes
+
+**Feature 22 — Query-driven review card**
+For `review_type = query_driven`. Shows what the agent queried, the skill the live extraction produced, and the source it came from. Reviewer can promote to published, edit and promote, or discard.
+
+**Feature 23 — Bulk review for sweep items**
+During and after the onboarding sweep, the review queue will contain many `sweep_sourced` items. The bulk review UI lets reviewers approve or reject groups of pending skills by topic cluster rather than one at a time. Clusters are computed by grouping skills with pairwise similarity > 0.75. Reviewing the highest-confidence item in a cluster and selecting "apply to similar" approves all items in the cluster at once.
+
+---
+
+### Onboarding
+
+**Feature 24 — Source connector setup**
+OAuth connection flow for each source. Slack, Notion, GitHub, Jira, and Zendesk each have their own OAuth screen. Connection credentials are stored and used for both the onboarding sweep and ongoing webhook subscriptions.
+
+**Feature 25 — Onboarding configuration UI**
+Channel, space, and project picker with time window selector. The user explicitly chooses which sources contain operational knowledge. This configuration:
+
+1. Drives the onboarding sweep (what to ingest)
+2. Sets up webhook subscriptions (what to monitor going forward)
+3. Populates the `monitored` section of `source_authority.yaml`
+
+**Feature 26 — Sweep worker**
+Background job that processes historical content in authority-priority order with rate limiting. Resumable: if the job fails, it picks up from the last processed item using the `source_events.sweep_id` field. Progress is tracked per source in the `sweeps` table.
+
+Processing order: Notion → GitHub → Jira → Slack → Zendesk
+
+```python
+async def run_sweep(sweep_id: str):
+    sources = get_ordered_sources(sweep_id)   # authority order
+
+    for source in sources:
+        items = await fetch_historical_items(source)
+        await update_sweep_progress(sweep_id, source, total=len(items))
+
+        async with asyncio.Semaphore(SEMAPHORE_LIMIT):
+            for batch in chunks(items, size=10):
+                await asyncio.gather(*[
+                    process_item(item, sweep_id=sweep_id)
+                    for item in batch
+                ])
+                await update_sweep_progress(sweep_id, source, processed=10)
+                await asyncio.sleep(60 / SWEEP_RATE)
+```
+
+**Feature 27 — Sweep progress tracking**
+`GET /ingest/sweep/{sweep_id}/status` returns real-time progress:
+
+```json
+{
+  "status": "running",
+  "sources": {
+    "notion": {
+      "total": 71,
+      "processed": 71,
+      "published": 0,
+      "queued": 20,
+      "discarded": 51
+    },
+    "github": {
+      "total": 18,
+      "processed": 18,
+      "published": 0,
+      "queued": 8,
+      "discarded": 10
+    },
+    "slack": {
+      "total": 401,
+      "processed": 257,
+      "published": 0,
+      "queued": 31,
+      "discarded": 226
+    },
+    "zendesk": {
+      "total": 1240,
+      "processed": 0,
+      "published": 0,
+      "queued": 0,
+      "discarded": 0
+    }
+  },
+  "skills_created": 59,
+  "review_queue_count": 59,
+  "started_at": "2025-05-16T09:00:00Z"
+}
+```
+
+---
+
+### Agent Demo
+
+**Feature 28 — Claude agent demo** (`agent-demo/demo.py`)
+
+End-to-end demonstration of the full system.
+
+Scenario: `"Customer requesting refund, 38 days post-purchase, $200 order, claims item arrived damaged in transit"`
+
+Expected flow:
+
+1. Agent calls `query_brain(situation=...)`
+2. Brain returns Refund Request Handling skill, version 3
+3. Exceptions block contains: "Item damaged in transit → Approve regardless of time window"
+4. Agent reads exception, overrides the 30-day base logic
+5. Agent calls `approve_refund(order_id)` + `initiate_carrier_claim(order_id)`
+6. Agent prints resolution grounded in the returned skill (name + version cited)
+7. Interaction logged to `agent_interactions` with `match_type: semantic`
+
+Acceptance: zero hallucinated policy in agent output. Every decision traceable to a published, human-reviewed skill.
+
+---
+
+## 11. Processes
+
+### Process 1 — Event-Driven Extraction
+
+The core ongoing loop. Runs on every webhook event from a monitored source.
+
+```
+Source event received
+  → POST /ingest/event
+  → Log to source_events (processed=false)
+  → Enqueue for processing
+
+  [RELEVANCE GATE — Haiku]
+  → Is this content operational decision logic?
+  → No  → source_events.outcome = discarded. Stop.
+  → Yes → continue
+
+  [CONTEXT EXPANSION]
+  → Fetch full surrounding context via source MCP
+  → Annotate with source authority tier
+
+  [PASS 1 — DECISION MOMENT IDENTIFICATION — Haiku]
+  → For threaded sources: extract authoritative decision moments
+  → Output: [{message_id, author, timestamp, decision_text, signals}]
+  → For non-threaded sources (Notion pages, GitHub files): skip to Pass 2
+
+  [PASS 2 — SKILL EXTRACTION — Sonnet]
+  → Input: decision moments + authority-annotated context
+  → Output: {trigger, base_logic, exceptions, actions, extraction_confidence}
+
+  [EMBEDDING]
+  → Call OpenAI text-embedding-3-small on trigger + base_logic
+
+  [BOUNDARY CLASSIFICATION — Haiku]
+  → pgvector search: top 3 matches, get similarity scores
+  → max_similarity > 0.82?
+      YES → Haiku call: UPDATE | EXCEPTION | DUPLICATE | NEW
+      NO  → assume NEW, skip to contradiction check
+
+  UPDATE    → go to CONTRADICTION DETECTOR with diff
+  EXCEPTION → append to exceptions_block → go to CONFIDENCE SCORER
+  DUPLICATE → source_events.outcome = duplicate. Stop.
+  NEW       → go to CONTRADICTION DETECTOR
+
+  [CONTRADICTION DETECTOR]
+  → Does proposed content conflict with current published skill?
+  → No  → go to CONFIDENCE SCORER
+  → Yes → create review_queue row (type=contradiction, source_a, source_b)
+           source_events.outcome = contradiction. Stop.
+
+  [CONFIDENCE SCORER]
+  → final_confidence = extraction_confidence × authority_multiplier
+
+  [SKILL WRITER]
+  → confidence ≥ 0.90 + authority ≥ medium + not sweep
+      → publish, version bump, cache invalidate
+  → confidence 0.70–0.89 OR authority=low
+      → pending_review in review_queue
+  → confidence < 0.70
+      → draft, logged only
+
+  → source_events.processed = true
+  → source_events.outcome = published | queued | draft
+```
+
+### Process 2 — Onboarding Sweep
+
+One-time at signup. Populates the brain from historical data.
+
+```
+User completes onboarding config
+  → POST /ingest/sweep
+  → Create sweeps row (status=running)
+  → Write monitored sources to source_authority.yaml
+  → Set up webhook subscriptions for all selected sources
+
+  [SWEEP WORKER — background job]
+  → For each source in authority order (Notion → GitHub → Jira → Slack → Zendesk):
+      → Fetch historical items within configured time window
+      → For each batch of 10:
+          → Run full extraction pipeline (Process 1 steps)
+          → EXCEPT: confidence scorer always routes to review_queue
+            (auto_publish_during_sweep = false)
+          → Rate limit: 10 items/minute/source
+      → Update sweeps.progress per source
+
+  [COMPLETION]
+  → sweeps.status = completed
+  → Notify user: "{n} skills ready for your review"
+  → Ongoing webhook monitoring now active
+```
+
+### Process 3 — Agent Query (Match Found)
+
+The happy path. Runs on every `query_brain` call when a published skill exists.
+
+```
+Agent calls query_brain(situation="...")
+
+  [CACHE CHECK]
+  → Hash situation embedding → check Redis
+  → Hit → return cached skill. Log to agent_interactions. Stop.
+  → Miss → continue
+
+  [EMBEDDING]
+  → Call OpenAI text-embedding-3-small on situation string
+
+  [SEMANTIC SEARCH]
+  → pgvector cosine search → top 5 published skills
+  → max_similarity ≥ 0.70?
+      NO  → go to Process 4 (query-driven extraction)
+      YES → select best match
+
+  [RESPONSE]
+  → Build full skill response (trigger, base_logic, exceptions, actions, metadata)
+  → Cache in Redis (5-min TTL)
+  → Log to agent_interactions (match_type=semantic)
+  → Return to agent
+```
+
+### Process 4 — Query-Driven Extraction
+
+Fallback when no published skill matches the agent's query.
+
+```
+max_similarity < 0.70 (no match found in Process 3)
+
+  [LIVE SOURCE SEARCH]
+  → Use situation string as search query
+  → Search Notion designated spaces
+  → Search Slack monitored channels
+  → Search Zendesk resolved tickets
+  → Fetch top 5 results across all sources
+
+  [EXTRACTION]
+  → Run full extraction pipeline (Process 1 steps)
+  → Flag extracted skill: match_type=query_driven
+
+  [IMMEDIATE RESPONSE]
+  → Return extracted skill to agent immediately
+  → Include flag: "query_driven: true, confidence: low, pending_review: true"
+
+  [STORAGE]
+  → Store as draft in review_queue (type=query_driven)
+  → Log to agent_interactions (match_type=query_driven)
+```
+
+### Process 5 — Boundary Classification
+
+Runs inside Process 1 after Pass 2 extraction completes.
+
+```
+New extraction produced
+
+  [SIMILARITY SEARCH]
+  → pgvector search: top 3 published skills by embedding similarity
+  → Record similarity scores
+
+  max_similarity > 0.82?
+    NO  → treat as NEW, proceed to Contradiction Detector
+
+    YES → [HAIKU BOUNDARY CALL]
+          Input: new extraction + matching skill
+          Question: UPDATE | EXCEPTION | DUPLICATE | NEW?
+
+          UPDATE    → build diff of base_logic change
+                   → proceed to Contradiction Detector with diff
+          EXCEPTION → construct exceptions_block row
+                   → proceed to Confidence Scorer
+                   → (no contradiction check for exceptions)
+          DUPLICATE → discard
+                   → log source as already covered by skill_id
+          NEW       → proceed to Contradiction Detector
+```
+
+### Process 6 — Contradiction Resolution
+
+Runs in the review queue when a reviewer opens a contradiction card.
+
+```
+Reviewer opens contradiction review card
+
+  Card shows:
+  → Source A (higher authority shown first)
+  → Source B
+  → Current published skill state
+  → [Source A correct] [Source B correct] [Write correction]
+
+  [Source A correct]
+  → source_a becomes the authoritative basis
+  → Skill updates with source_a content
+  → changed_by = reviewer_id
+  → Version bump, cache invalidate
+  → review_queue.status = approved
+
+  [Source B correct]
+  → Same as Source A path but with source_b
+
+  [Write correction]
+  → Reviewer writes the correct skill content directly in UI
+  → changed_by = human_authored
+  → confidence = 1.0
+  → Auto-publish (human_authored always publishes regardless of confidence routing)
+  → Version bump, cache invalidate
+  → review_queue.status = human_written
+```
+
+### Process 7 — Human Review (Standard)
+
+Runs for update, exception, new, query_driven, and sweep_sourced queue items.
+
+```
+Reviewer opens review queue list
+  → Sees items ordered: contradiction → update → exception → new → query_driven
+
+Reviewer opens item card
+  → Sees proposed change, source context, source authority, confidence
+
+  [APPROVE]
+  → Skill updates with proposed content
+  → version bump if updating published skill
+  → changed_by = reviewer_id
+  → cache invalidate
+  → review_queue.status = approved
+
+  [REJECT]
+  → Proposed update discarded
+  → source_events.outcome updated
+  → review_queue.status = rejected
+
+  [BULK APPROVE — sweep items only]
+  → UI clusters sweep items by similarity > 0.75
+  → Reviewing top item → "Apply to similar" → approves entire cluster
+```
+
+---
+
+## 12. Onboarding Flow
+
+### Step 1 — Connect Sources
+
+User sees a source connection screen. Each source has a Connect button that initiates OAuth. User can connect any subset of the five sources — doesn't have to be all five.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Connect your company's knowledge sources                │
+├─────────────────────────────────────────────────────────┤
+│ ○ Slack          [Connect →]                           │
+│ ○ Notion         [Connect →]                           │
+│ ○ GitHub         [Connect →]                           │
+│ ○ Jira           [Connect →]                           │
+│ ○ Zendesk        [Connect →]                           │
+├─────────────────────────────────────────────────────────┤
+│ Connected: 0 of 5                                       │
+│                        [Continue with connected →]      │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Step 2 — Configure What to Include
+
+User explicitly selects which channels, spaces, and projects contain operational knowledge. This selection defines both the sweep scope and the ongoing monitoring scope.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Which sources contain policy and process decisions?     │
+├─────────────────────────────────────────────────────────┤
+│ SLACK — select channels                                 │
+│ ☑ #cs-escalations    ☑ #ops-decisions   ☑ #policy     │
+│ ☐ #general           ☐ #random          ☐ #dev-chat   │
+│ How far back?  [Last 6 months ▼]                       │
+├─────────────────────────────────────────────────────────┤
+│ NOTION — select spaces                                  │
+│ ☑ Operations         ☑ Engineering Runbooks            │
+│ ☐ Marketing          ☐ People & Culture                │
+├─────────────────────────────────────────────────────────┤
+│ GITHUB — paths included automatically                   │
+│ /docs  /runbooks  /.github/workflows                   │
+├─────────────────────────────────────────────────────────┤
+│ JIRA — select projects                                  │
+│ ☑ OPS   ☑ CS   ☐ MARKETING   ☐ GROWTH                 │
+│ ☑ Only include policy/process ticket types             │
+├─────────────────────────────────────────────────────────┤
+│ ZENDESK                                                 │
+│ ☑ Include resolved tickets                             │
+│ How far back?  [Last 6 months ▼]                       │
+├─────────────────────────────────────────────────────────┤
+│                   [Build my brain →]                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Step 3 — Sweep Runs
+
+Progress screen. User can start reviewing the queue while the sweep runs. They do not need to wait for completion.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Building your brain...                                  │
+│ You can review skills as they come in — don't wait.    │
+├─────────────────────────────────────────────────────────┤
+│ ✅ Notion Operations      48 pages     20 queued       │
+│ ✅ Notion Runbooks        23 pages      8 queued       │
+│ ⏳ Slack #cs-escalations  ████████░░  312 threads      │
+│ ⏳ Slack #ops-decisions   ████░░░░░░   89 threads      │
+│ ⌛ Jira OPS + CS          waiting...                   │
+│ ⌛ Zendesk tickets        waiting...                   │
+├─────────────────────────────────────────────────────────┤
+│ 28 skills ready for review                              │
+│                                                         │
+│ [Review queue →]        [I'll check back later]        │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Important Note on Sweep Design
+
+Skills extracted during the sweep never auto-publish regardless of confidence score. Every sweep-sourced skill requires a human to approve it before it becomes part of the published brain that agents query.
+
+This is intentional. Historical data is less reliable than live events — policies change, Slack threads contain outdated stances, and you do not want an agent running on an automatically populated brain that no human has verified. The sweep gets the brain to a working draft state. Human review gets it to a trusted published state.
+
+---
+
+## 13. API Surface
 
 ### FastAPI REST — port 8000
 
-| Method | Path                                 | Description                                                          |
-| ------ | ------------------------------------ | -------------------------------------------------------------------- |
-| GET    | `/health`                            | Returns `{"status": "ok", "db": bool, "redis": bool, "neo4j": bool}` |
-| GET    | `/skills/search?q={query}&limit={k}` | Hybrid retrieval: pgvector + Graphiti graph traversal                |
-| GET    | `/skills/{skill_id}`                 | Return full skill body                                               |
-| GET    | `/skills/{skill_id}/versions`        | Return full version history                                          |
-| POST   | `/skills`                            | Create skill (draft status)                                          |
-| PATCH  | `/skills/{skill_id}`                 | Update skill fields                                                  |
-| POST   | `/ingest/event`                      | Living currency webhook — Slack, Notion, GitHub, or Jira events      |
-| POST   | `/ingest/batch`                      | Trigger manual extraction run over unprocessed `raw_content`         |
-| GET    | `/review`                            | List pending review queue items                                      |
-| POST   | `/review/{item_id}/approve`          | Approve and publish proposed skill update                            |
-| POST   | `/review/{item_id}/reject`           | Reject proposed update                                               |
+| Method | Path                                 | Description                                            |
+| ------ | ------------------------------------ | ------------------------------------------------------ |
+| GET    | `/health`                            | Returns `{status, db, redis}`                          |
+| GET    | `/skills/search?q={query}&limit={k}` | pgvector semantic search over published skills         |
+| GET    | `/skills/{id}`                       | Full skill body                                        |
+| GET    | `/skills/{id}/versions`              | Full version history                                   |
+| POST   | `/skills`                            | Manual skill create (sets `changed_by=human_authored`) |
+| PATCH  | `/skills/{id}`                       | Manual skill edit                                      |
+| POST   | `/ingest/event`                      | Webhook receiver                                       |
+| POST   | `/ingest/sweep`                      | Trigger onboarding or manual sweep                     |
+| GET    | `/ingest/sweep/{sweep_id}/status`    | Sweep progress                                         |
+| GET    | `/review`                            | List pending queue items (grouped by type)             |
+| GET    | `/review/{id}`                       | Single item with full source context                   |
+| POST   | `/review/{id}/approve`               | Approve and publish                                    |
+| POST   | `/review/{id}/reject`                | Reject                                                 |
+| POST   | `/review/{id}/write`                 | Human writes the correct version                       |
+| POST   | `/review/bulk-approve`               | Approve a list of item IDs (sweep bulk review)         |
 
 ### FastMCP server — port 8001
 
 ```python
 @mcp.tool()
-async def query_brain(situation: str, entities: dict = {}) -> dict:
+async def query_brain(situation: str) -> dict:
     """
-    Query the company brain for the operational skill that matches this situation.
-    Call this before executing any company-specific task.
-    Returns decision logic, tool schemas, confidence score, and graph_context
-    showing resolved overrides and dependencies.
+    Query the company brain for the operational skill that matches
+    this situation. Call this before executing any company-specific task.
+
+    Returns the skill's trigger, base decision logic, exceptions table,
+    available actions, confidence score, and match metadata.
+
+    If no published skill matches, triggers a live extraction from
+    connected sources and returns the result flagged as query_driven.
     """
 ```
 
 ---
 
-## 10. Phases of Execution
+## 14. Phases of Execution
 
----
+### Phase 1 — Infrastructure
 
-### Phase 1 — App Architecture ✅ Complete
-
-**Scope:** No business logic. Establish the complete project structure, Docker environment, database schema, Neo4j instance, and empty service stubs so that every subsequent phase slots cleanly into a known location with zero structural rework.
+**Scope:** Project structure, Docker environment, database schema, empty service stubs. No business logic.
 
 **Deliverables:**
 
-#### Folder structure
+- `docker-compose.yml` with Postgres (pgvector), Redis, brain-api
+- `schema.sql` with all five tables (skills, skill_versions, review_queue, source_events, sweeps, agent_interactions)
+- `brain-api/` with FastAPI app, all router stubs returning 501, config, database pool, Redis client
+- `mcp_server/server.py` with `query_brain` stub
+- `source_authority.yaml` with default config
 
-```
-company-brain/
-├── docker-compose.yml
-├── .env.example
-├── schema.sql
-├── brain-api/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── main.py                    # FastAPI app — registers routers, lifespan events
-│   ├── config.py                  # Settings from env via pydantic-settings
-│   ├── database.py                # Async Postgres pool (asyncpg)
-│   ├── cache.py                   # Redis client (redis-py async)
-│   ├── graph.py                   # Graphiti client init + ontology registration
-│   ├── routers/
-│   │   ├── __init__.py
-│   │   ├── health.py              # GET /health — checks Postgres, Redis, Neo4j
-│   │   ├── skills.py              # Skill CRUD + search (stubs — return 501)
-│   │   ├── ingest.py              # POST /ingest/event + /ingest/batch (stubs)
-│   │   └── review.py              # Review queue endpoints (stubs)
-│   ├── services/
-│   │   ├── __init__.py
-│   │   ├── classifier.py          # Content type classifier — stub
-│   │   ├── extractor.py           # ExIde pipeline — stub
-│   │   ├── embedder.py            # OpenAI embedding wrapper — stub
-│   │   ├── process_miner.py       # PM4Py wrapper — stub
-│   │   ├── graph_builder.py       # Graphiti ingestion + ontology types — stub
-│   │   └── skill_writer.py        # Skill registry + graph write logic — stub
-│   ├── mcp_server/
-│   │   ├── __init__.py
-│   │   └── server.py              # FastMCP server with query_brain stub
-│   └── models/
-│       ├── __init__.py
-│       └── schemas.py             # Pydantic request/response models
-├── airbyte/
-│   └── README.md                  # Connector setup: Zendesk, Slack, Notion, GitHub, Jira
-└── agent-demo/
-    ├── demo.py                    # Claude agent test script — stub
-    └── requirements.txt
-```
+**Acceptance:**
 
-#### `docker-compose.yml`
-
-```yaml
-services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_DB: company_brain
-      POSTGRES_USER: cb
-      POSTGRES_PASSWORD: cb_secret
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cb -d company_brain"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  neo4j:
-    image: neo4j:5.26-community
-    environment:
-      NEO4J_AUTH: neo4j/neo4j_secret
-      NEO4J_dbms_memory_heap_initial__size: 512m
-      NEO4J_dbms_memory_heap_max__size: 1G
-      NEO4J_PLUGINS: '["apoc"]'
-    volumes:
-      - neo4jdata:/data
-    ports:
-      - "7474:7474" # Neo4j Browser
-      - "7687:7687" # Bolt protocol (Graphiti connects here)
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-
-  brain-api:
-    build: ./brain-api
-    environment:
-      DATABASE_URL: postgresql://cb:cb_secret@postgres/company_brain
-      REDIS_URL: redis://redis:6379
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_USER: neo4j
-      NEO4J_PASSWORD: neo4j_secret
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      SEMAPHORE_LIMIT: 5
-      MCP_PORT: 8001
-      API_PORT: 8000
-    ports:
-      - "8000:8000"
-      - "8001:8001"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-    volumes:
-      - ./brain-api:/app
-    command: python main.py
-
-volumes:
-  pgdata:
-  neo4jdata:
-```
-
-#### `brain-api/requirements.txt`
-
-> **Note:** Using `>=` floor pins rather than exact pins. `fastmcp==0.4.0` and `graphiti-core==0.3.0` from the original spec are outdated — both packages have breaking API changes in their current major versions.
-
-```
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-asyncpg>=0.29.0
-redis[asyncio]>=5.0.0
-pgvector>=0.3.0
-pydantic>=2.7.0
-pydantic-settings>=2.3.0
-fastmcp>=2.0.0
-anthropic>=0.34.0
-openai>=1.40.0
-graphiti-core>=0.7.0
-neo4j>=5.26.0
-pm4py>=2.7.11
-pandas>=2.2.0
-httpx>=0.27.0
-python-dotenv>=1.0.0
-jinja2>=3.1.4
-```
-
-#### `brain-api/config.py`
-
-```python
-from pydantic_settings import BaseSettings
-
-class Settings(BaseSettings):
-    database_url: str
-    redis_url: str
-    neo4j_uri: str
-    neo4j_user: str
-    neo4j_password: str
-    anthropic_api_key: str
-    openai_api_key: str
-    semaphore_limit: int = 5
-    mcp_port: int = 8001
-    api_port: int = 8000
-
-    class Config:
-        env_file = ".env"
-
-settings = Settings()
-```
-
-#### `brain-api/graph.py`
-
-```python
-from graphiti_core import Graphiti
-from config import settings
-
-_graphiti: Graphiti | None = None
-
-async def init_graphiti():
-    global _graphiti
-    _graphiti = Graphiti(
-        uri=settings.neo4j_uri,
-        user=settings.neo4j_user,
-        password=settings.neo4j_password,
-    )
-    await _graphiti.build_indices_and_constraints()
-
-async def get_graphiti() -> Graphiti:
-    if _graphiti is None:
-        raise RuntimeError("Graphiti not initialized")
-    return _graphiti
-
-async def check_neo4j_health() -> bool:
-    """Defensive connectivity check — handles varying graphiti driver internals."""
-    if _graphiti is None:
-        return False
-    try:
-        driver = _graphiti.driver
-        if hasattr(driver, "execute_query"):
-            await driver.execute_query("RETURN 1 AS n")
-        elif hasattr(driver, "_driver"):
-            await driver._driver.verify_connectivity()
-        return True
-    except Exception:
-        return False
-
-async def close_graphiti():
-    if _graphiti:
-        await _graphiti.close()
-```
-
-#### `brain-api/main.py`
-
-```python
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from routers import health, skills, ingest, review
-from database import init_db_pool, close_db_pool
-from cache import init_redis, close_redis
-from graph import init_graphiti, close_graphiti
-import asyncio
-from mcp_server.server import run_mcp_server
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await init_db_pool()
-    await init_redis()
-    await init_graphiti()
-    asyncio.create_task(run_mcp_server())
-    yield
-    await close_graphiti()
-    await close_db_pool()
-    await close_redis()
-
-app = FastAPI(title="Company Brain API", version="0.2.0", lifespan=lifespan)
-
-app.include_router(health.router)
-app.include_router(skills.router, prefix="/skills")
-app.include_router(ingest.router, prefix="/ingest")
-app.include_router(review.router, prefix="/review")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-```
-
-#### `brain-api/routers/health.py`
-
-```python
-from fastapi import APIRouter
-from database import get_pool
-from cache import get_redis
-from graph import check_neo4j_health
-
-router = APIRouter()
-
-@router.get("/health")
-async def health():
-    status = {"status": "ok", "db": False, "redis": False, "neo4j": False}
-    try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-        status["db"] = True
-    except Exception:
-        pass
-    try:
-        r = await get_redis()
-        await r.ping()
-        status["redis"] = True
-    except Exception:
-        pass
-    status["neo4j"] = await check_neo4j_health()
-    return status
-```
-
-#### `brain-api/routers/skills.py` (stub pattern — all other routers follow this)
-
-```python
-from fastapi import APIRouter, HTTPException
-
-router = APIRouter()
-
-@router.get("/search")
-async def search_skills(q: str, limit: int = 5):
-    raise HTTPException(status_code=501, detail="Not implemented — Phase 4")
-
-@router.get("/{skill_id}")
-async def get_skill(skill_id: str):
-    raise HTTPException(status_code=501, detail="Not implemented — Phase 4")
-
-@router.get("/{skill_id}/versions")
-async def get_versions(skill_id: str):
-    raise HTTPException(status_code=501, detail="Not implemented — Phase 4")
-```
-
-#### `brain-api/mcp_server/server.py`
-
-> **Note:** `mcp.run_async(...)` was renamed to `mcp.run_http_async(...)` in FastMCP 2.x.
-
-```python
-from fastmcp import FastMCP
-
-mcp = FastMCP("Company Brain")
-
-@mcp.tool()
-async def query_brain(situation: str, entities: dict = {}) -> dict:
-    """
-    Query the company brain for the operational skill that matches this situation.
-    Call this before executing any company-specific task.
-    Returns decision logic, tool schemas, confidence score, and graph_context
-    showing resolved overrides and dependencies.
-    """
-    return {
-        "status": "stub",
-        "message": "MCP server running. Skill retrieval implemented in Phase 5.",
-        "situation_received": situation,
-    }
-
-async def run_mcp_server():
-    await mcp.run_http_async(transport="sse", host="0.0.0.0", port=8001)
-```
-
-#### `.env.example`
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-DATABASE_URL=postgresql://cb:cb_secret@localhost/company_brain
-REDIS_URL=redis://localhost:6379
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=neo4j_secret
-SEMAPHORE_LIMIT=5
-MCP_PORT=8001
-API_PORT=8000
-```
-
-#### Phase 1 acceptance criteria
-
-- `docker compose up` starts all four services with no errors
-- `GET localhost:8000/health` returns `{"status": "ok", "db": true, "redis": true, "neo4j": true}`
-- `GET localhost:8000/skills/search?q=test` returns HTTP 501
-- FastMCP server reachable on port 8001
-- All tables exist in Postgres (`\dt` in psql)
-- pgvector extension installed (`SELECT * FROM pg_extension WHERE extname = 'vector'`)
-- Neo4j Browser accessible at `localhost:7474`
-- Graphiti indices and constraints built (`SHOW INDEXES` in Neo4j Browser returns Graphiti-managed indexes)
+- `docker compose up` with no errors
+- `GET /health` returns `{status: ok, db: true, redis: true}`
+- All tables present in Postgres
+- pgvector extension installed
+- FastMCP reachable on port 8001
+- All stubs return HTTP 501
 
 ---
 
-### Phase 2 — Layer 1: Data Ingestion
+### Phase 2 — Source Connections + Onboarding
 
-**Scope:** Airbyte setup and data flow into `raw_content`.
+**Scope:** OAuth connector setup, onboarding configuration UI, sweep worker, source authority annotator, context expanders.
 
 **Deliverables:**
 
-- Airbyte installed locally via `abctl local install`
-- Five source connectors configured: Zendesk (tickets + comments), Slack (target channels), Notion (pages + databases), GitHub (issues + pull requests), Jira (issues + comments + transitions)
-- Destination connector: Postgres, writing to `raw_content` with correct `source` field populated
-- Full historical sync completed for all five sources
-- Incremental hourly sync running
-- `airbyte/README.md` with step-by-step connector configuration
+- OAuth flows for all five sources
+- Onboarding config UI (channel/space picker + time window)
+- Sweep worker with priority ordering and rate limiting
+- `GET /ingest/sweep/{id}/status` with per-source progress
+- Context expander for each source
+- Source authority annotator reading `source_authority.yaml`
+- Webhook receiver `POST /ingest/event` (logs and enqueues, does not yet extract)
+- Webhook subscriptions created for monitored sources after onboarding
 
-**Acceptance criteria:**
+**Acceptance:**
 
-- `SELECT COUNT(*), source FROM raw_content GROUP BY source` shows rows from all five sources
-- Spot check 5 rows from each source — `content` and `metadata` populated correctly
-- Incremental sync runs without errors on second trigger
+- User can complete OAuth for all five sources
+- After onboarding config, sweep worker starts and processes items in authority order
+- `GET /ingest/sweep/{id}/status` shows real-time per-source progress
+- `source_events` table populates during sweep
+- Webhook subscriptions verified active for all monitored channels
 
 ---
 
-### Phase 3 — Layer 2: Extraction Engine
+### Phase 3 — Extraction Engine
 
-**Scope:** Content classification, ExIde rule extraction, PM4Py process mining, embedding generation, skill writing.
+**Scope:** Full extraction pipeline. Relevance gate, two-pass extraction, boundary classifier, contradiction detector, confidence scorer, embedder, skill writer.
 
 **Deliverables:**
 
-- `classifier.py` — calls Claude Haiku to label each unprocessed `raw_content` row as rule / fact / event / noise
-- `extractor.py` — two-stage ExIde pipeline: raw text → pseudo-code intermediate → condition-action-dependency JSON triple
-- `process_miner.py` — reads Zendesk ticket event rows as PM4Py event log, discovers dominant resolution patterns, outputs rule candidates
-- `embedder.py` — calls OpenAI `text-embedding-3-small` on skill description field
-- `skill_writer.py` — takes extracted triples, computes confidence, writes to `skills` table with status routing: ≥90% → published, 70–89% → pending_review, <70% → draft
-- `POST /ingest/batch` — triggers full extraction run over unprocessed `raw_content` rows
+- `services/relevance_gate.py` — Haiku classifier
+- `services/decision_identifier.py` — Pass 1, Haiku thread structurer
+- `services/skill_extractor.py` — Pass 2, Sonnet structured extractor
+- `services/boundary_classifier.py` — Haiku four-way classifier
+- `services/contradiction_detector.py` — conflict comparison
+- `services/confidence_scorer.py` — authority-weighted scoring
+- `services/embedder.py` — OpenAI embedding wrapper
+- `services/skill_writer.py` — write to skills table with routing logic
+- End-to-end processing of sweep items through full pipeline
+- `review_queue` populates with sweep-sourced skills
 
-**Acceptance criteria:**
+**Acceptance:**
 
-- `POST /ingest/batch` produces skill rows in `skills` table
-- At least 3 published skills from a Zendesk data set
-- At least 1 conflict-flagged skill in `review_queue`
-- Skills with confidence < 70% remain as draft
-- Each published skill has a non-null `embedding` vector
+- Running sweep on real or synthetic data produces skills in `review_queue`
+- At least 10 published skills after human approval of sweep items
+- Duplicate Slack messages about the same policy correctly classified as DUPLICATE
+- At least one contradiction correctly detected and routed to `review_queue` with both sources populated
+- Every skill in the `skills` table has a non-null `embedding` vector
 
 ---
 
-### Phase 4 — Layer 3: Knowledge Core
+### Phase 4 — Review System
 
-**Scope:** Graphiti graph ingestion with custom ontology, pgvector search, Redis caching, skill versioning, human review workflow.
+**Scope:** All review UI card types, bulk sweep review, human-authored override, skill versioning confirmed working.
 
 **Deliverables:**
 
-- `graph_builder.py` — full implementation with custom entity types (PolicyRule, CustomerTier, ThresholdValue, ExceptionCondition) and edge types (OverridesEdge, HasExceptionForEdge, GovernsEdge, RequiresRoutingToEdge). Ingests each extracted skill into Graphiti as an episode. Stores returned Graphiti node UUIDs in `skills.graph_node_ids`. Sets `raw_content.graph_ingested = true` on completion.
-- pgvector cosine similarity search over published skills
-- Redis cache on search results (5-minute TTL, invalidated on publish/update)
-- Version bump logic: every update to a published skill creates a `skill_versions` row and increments `skills.version`
-- All skill and review endpoints live
-- Minimal review UI: FastAPI Jinja2 template listing pending items with source context and approve/reject buttons
+- Review queue list page (grouped by type, contradictions first)
+- Update review card with diff view
+- Exception review card
+- Contradiction review card (two sources + three action buttons)
+- Query-driven review card
+- Bulk approve UI for sweep items (cluster by similarity)
+- `POST /review/{id}/write` endpoint for human corrections
+- Skill versioning verified: every approval creates `skill_versions` row and bumps `skills.version`
+- Cache invalidation on every approval
 
-**Acceptance criteria:**
+**Acceptance:**
 
-- `GET localhost:8000/skills/search?q=refund+request` returns ranked skills with scores
-- Second identical query served from Redis
-- Neo4j Browser shows extracted entity nodes with custom type labels and typed edges
-- Graphiti search returns related entities when queried with a policy situation string
-- Approving a review item increments version, changes status to published, invalidates cache
-- Rejected item does not appear in published skills
+- Reviewer can process a contradiction item in under 30 seconds
+- Picking "Source A is correct" updates the skill, creates a version row, invalidates Redis
+- Human-written correction sets `changed_by = human_authored`, confidence = 1.0, auto-publishes
+- Bulk approve works: approving top item in a cluster with "apply to similar" approves the full cluster
+- Rejected items do not appear in published skills or agent responses
 
 ---
 
-### Phase 5 — Layer 4: Delivery Interface
+### Phase 5 — Delivery
 
-**Scope:** FastMCP server wired to hybrid retrieval. REST endpoints complete. Living currency webhook active.
+**Scope:** `query_brain` fully wired. Query-driven extraction active. Event-driven pipeline live end-to-end. Redis caching confirmed. REST search endpoints complete.
 
 **Deliverables:**
 
-- `query_brain` MCP tool fully wired: pgvector semantic search → Graphiti graph traversal → merged result → Redis cached → interaction logged
-- Skill response schema includes `graph_context` field with resolved overrides and dependencies
-- `POST /ingest/event` active — receives Slack, Notion, GitHub, or Jira webhook, classifies, runs ExIde, ingests to graph, routes by confidence
+- `query_brain` MCP tool fully implemented (embed → cache check → search → return or fallback)
+- Query-driven extraction fallback (Feature 16)
+- Event-driven pipeline active: webhook events now trigger full extraction, not just logging
+- `GET /skills/search` endpoint live with pgvector results
+- Redis cache confirmed working: second identical query served from cache
+- `agent_interactions` logging on every `query_brain` call
 
-**Acceptance criteria:**
+**Acceptance:**
 
-- Calling `query_brain(situation=...)` returns a published skill with populated `graph_context`
-- A mock Slack policy announcement or Jira workflow update posted to `POST /ingest/event` produces an updated skill within 5 minutes
-- Graph traversal edges logged in `agent_interactions.graph_path`
-
----
-
-### Phase 6 — Layer 5: Agent Demo
-
-**Scope:** Working Claude agent resolving a customer support scenario end-to-end. Recorded as a demo.
-
-**Demo scenario:**
-
-1. Input: "Customer requesting refund, 38 days post-purchase, $200 order, claims item arrived damaged in transit"
-2. Agent calls `query_brain(situation=...)`
-3. Brain returns skill with `graph_context` showing DamagedInTransit OVERRIDES TimeWindowRule
-4. Agent applies override: approve_return + initiate_carrier_claim despite the time window
-5. Agent prints resolution grounded in the returned skill
-6. Interaction logged to `agent_interactions`
-
-**Acceptance criteria:**
-
-- Demo runs end-to-end in under 2 minutes
-- Agent produces correct resolution traceable to a published skill and graph-resolved override
-- Zero hallucinated policy in agent output
+- `query_brain(situation="customer requesting refund past 30 days")` returns a published skill
+- Second identical call served from Redis (confirmed via cache hit log)
+- Posting a mock Slack policy message to `POST /ingest/event` produces an updated or new skill within 5 minutes
+- Query with no matching skill triggers query-driven extraction and returns a result flagged `query_driven: true`
 
 ---
 
-## 11. Open Questions
+### Phase 6 — Agent Demo
 
-| Question                                                                                                                                                             | Priority                                                  |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| Which data set to use for Phase 2 — a pilot customer's Zendesk/Slack/Notion/GitHub/Jira, or a synthetic data set built to stress-test the extraction pipeline?      | High — needed before Phase 2                              |
-| Graphiti GitHub issue #567: custom entity type labels not always persisting correctly to Neo4j. Apply workaround (re-ingest with types) or pin to a patched version? | High — needed before Phase 4                              |
-| Graphiti structured output note: works best with OpenAI. Confirm OpenAI is the entity extraction LLM throughout the pipeline.                                        | High                                                      |
-| Review queue notification — email, Slack DM, or polling the UI?                                                                                                      | Medium — needed for Phase 4                               |
-| Pricing model for first customers — platform fee + per-query, flat monthly, or outcome-based?                                                                        | Medium — needed before any external customer conversation |
-| FalkorDB as Neo4j alternative — lighter Docker footprint, sub-10ms queries, Graphiti-compatible. Evaluate if Neo4j memory is a concern on dev machines.              | Low                                                       |
+**Scope:** End-to-end Claude agent demo. Recorded. All acceptance criteria met.
+
+**Deliverables:**
+
+- `agent-demo/demo.py` complete
+- Demo runs the refund scenario end-to-end
+- Agent resolution is fully traceable to published skill + version
+
+**Acceptance:**
+
+- Demo completes in under 2 minutes
+- Agent produces correct resolution (approve_refund + initiate_carrier_claim despite 38-day window) based on the exceptions table entry
+- Zero hallucinated policy — every claim in agent output references the returned skill
+- Interaction logged to `agent_interactions` with skill_id, query, and match_type
+
+---
+
+## 15. Open Questions
+
+| Question                                                                                                                                                                                                                         | Priority | Needed by                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------- |
+| Which data set for Phase 3 validation — pilot customer's real data or a synthetic data set designed to stress-test contradiction detection and boundary classification?                                                          | High     | Before Phase 3                            |
+| Should the review queue send notifications (email, Slack DM) when new items arrive, or is polling the UI sufficient for MVP?                                                                                                     | Medium   | Before Phase 4                            |
+| What is the right lookback window default for the sweep? 3 months is safer (less stale data) but 12 months surfaces more institutional knowledge.                                                                                | Medium   | Before Phase 2                            |
+| Pricing model: platform fee + per-query, flat monthly, or outcome-based?                                                                                                                                                         | High     | Before any external customer conversation |
+| When a human writes a correction (`changed_by = human_authored`), should the original conflicting source URLs still be stored in `source_ids` for traceability, or replaced by the human correction as the sole source?          | Low      | Before Phase 4                            |
+| Should the `query_brain` tool accept an optional `entities` dict (customer tier, order value, etc.) that could be used to filter exception conditions? Adds precision but increases integration complexity for agent developers. | Low      | Before Phase 5                            |
+| FalkorDB as a lighter-weight future alternative to Neo4j if graph traversal is added post-MVP — worth evaluating now to avoid future migration pain?                                                                             | Low      | Post-MVP                                  |
