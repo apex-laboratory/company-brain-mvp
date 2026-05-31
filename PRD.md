@@ -156,8 +156,8 @@ For every agent query:
 | Database           | PostgreSQL 16 + pgvector      | Skills registry, versioning, review queue, event log.                    |
 | Vector index       | pgvector IVFFlat              | Cosine similarity on 1536-dim skill embeddings.                          |
 | Cache              | Redis 7                       | 5-min TTL on search results. Invalidated on publish/update.              |
-| Content classifier | Claude Haiku                  | Relevance gate, decision moment identification, boundary classification. |
-| Skill extractor    | Claude Sonnet                 | Two-pass extraction from authority-annotated context.                    |
+| Fast classifier    | Groq (`llama-3.3-70b-versatile`) | Relevance gate, decision moment identification, boundary classification. 10–20× faster than Haiku at lower cost. Sufficient for binary/four-way labels. |
+| Skill extractor    | Claude Sonnet                 | Pass 2 extraction + contradiction detection. Quality-sensitive: produces the skill document agents act on. |
 | Embeddings         | OpenAI text-embedding-3-small | 1536 dimensions. Skills table + agent query embedding.                   |
 | Container runtime  | Docker + Docker Compose       | All services. Single compose file.                                       |
 | Review UI          | FastAPI + Jinja2              | Minimal HTML. No frontend framework needed for MVP.                      |
@@ -364,11 +364,57 @@ CREATE TABLE agent_interactions (
 );
 ```
 
+### `source_connections`
+
+OAuth token storage and monitored channel/space/project configuration. Created during onboarding. The `monitored_ids` field drives both the sweep scope and ongoing webhook monitoring — stored here instead of `source_authority.yaml` so changes take effect immediately without a process restart.
+
+```sql
+CREATE TABLE source_connections (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source           VARCHAR(50) UNIQUE NOT NULL,
+  -- slack | notion | github | jira | zendesk
+  status           VARCHAR(20) DEFAULT 'connected',
+  -- connected | disconnected | error
+  access_token     TEXT,
+  refresh_token    TEXT,
+  token_expires_at TIMESTAMP,
+  monitored_ids    JSONB DEFAULT '[]',
+  -- channel/space/project IDs selected during onboarding
+  lookback_days    INTEGER DEFAULT 180,
+  connected_at     TIMESTAMP DEFAULT NOW(),
+  updated_at       TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX ON source_connections (source, status);
+```
+
+### `webhook_subscriptions`
+
+Tracks every active webhook subscription created during onboarding. Required for lifecycle management: when a source is disconnected or a monitored channel is removed, subscriptions must be explicitly revoked. Without this table there is no way to know what to un-subscribe.
+
+```sql
+CREATE TABLE webhook_subscriptions (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source          VARCHAR(50),
+  source_ref_id   VARCHAR(255),
+  -- ID the source system assigned to this subscription
+  target_id       VARCHAR(255),
+  -- channel/space/project being monitored
+  status          VARCHAR(20) DEFAULT 'active',
+  -- active | revoked
+  created_at      TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX ON webhook_subscriptions (source, status);
+```
+
 ---
 
 ## 9. Source Authority Config
 
-Loaded from `source_authority.yaml` at startup. Not stored in the database. Defines which sources are authoritative, which are monitored for ongoing events, and what the routing thresholds are.
+Loaded from `source_authority.yaml` at startup. Contains only static configuration: tier weights, routing thresholds, and sweep settings. Version-controlled alongside the codebase.
+
+**The `monitored` section is not in this file.** Which channels, spaces, and projects to monitor is stored in `source_connections.monitored_ids` (populated during onboarding). The config loader merges both at runtime. This avoids requiring a process restart when onboarding adds a new monitored channel.
 
 ```yaml
 # source_authority.yaml
@@ -388,13 +434,7 @@ tiers:
     weight: 0.7
     sources:
       - type: slack
-        signals:
-          [
-            channel=policy,
-            channel=ops-decisions,
-            channel=cs-escalations,
-            channel=engineering-decisions,
-          ]
+        signals: [channel=policy, channel=ops-decisions, channel=cs-escalations, channel=engineering-decisions]
       - type: zendesk
         signals: [tag=policy-exception, status=solved]
 
@@ -414,22 +454,10 @@ routing:
   review_queue_confidence_floor: 0.70
   # below 0.70 → draft, not surfaced to reviewers
 
-monitored:
-  slack_channels: [] # populated from onboarding config
-  notion_spaces: [] # populated from onboarding config
-  jira_projects: [] # populated from onboarding config
-  github_paths: [/docs, /runbooks, /.github]
-  zendesk_tags: [policy-exception, escalation-approved, exception-granted]
-
 sweep:
-  processing_order:
-    - notion
-    - github
-    - jira
-    - slack
-    - zendesk
-  rate_per_minute: 10 # items processed per source per minute
-  semaphore_limit: 5 # concurrent LLM calls
+  processing_order: [notion, github, jira, slack, zendesk]
+  rate_per_minute: 10    # items processed per source per minute
+  semaphore_limit: 5     # concurrent LLM calls
   auto_publish_during_sweep: false
   # all sweep extractions go to review_queue regardless of confidence
 ```
@@ -1132,6 +1160,8 @@ This is intentional. Historical data is less reliable than live events — polic
 | POST   | `/review/{id}/reject`                | Reject                                                 |
 | POST   | `/review/{id}/write`                 | Human writes the correct version                       |
 | POST   | `/review/bulk-approve`               | Approve a list of item IDs (sweep bulk review)         |
+| GET    | `/connections`                       | List connected sources and their status                |
+| DELETE | `/connections/{source}`              | Disconnect a source (revokes active webhook subscriptions) |
 
 ### FastMCP server — port 8001
 

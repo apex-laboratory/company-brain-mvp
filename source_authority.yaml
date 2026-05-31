@@ -1,0 +1,50 @@
+# source_authority.yaml
+#
+# Static tier/routing configuration for the extraction pipeline.
+# Loaded at startup from the path set in SOURCE_AUTHORITY_PATH (default: source_authority.yaml).
+#
+# Note: the "monitored" section (which channels/spaces/projects to watch) is NOT stored
+# here — it lives in source_connections.monitored_ids so changes take effect immediately
+# without a process restart.
+
+tiers:
+  high:
+    weight: 1.0
+    sources:
+      - type: notion
+        signals: [designated_policy_page, owner_edited]
+      - type: github
+        signals: [path_prefix=/docs, path_prefix=/runbooks]
+      - type: jira
+        signals: [ticket_type=policy, status=done]
+
+  medium:
+    weight: 0.7
+    sources:
+      - type: slack
+        signals: [channel=policy, channel=ops-decisions, channel=cs-escalations, channel=engineering-decisions]
+      - type: zendesk
+        signals: [tag=policy-exception, status=solved]
+
+  low:
+    weight: 0.4
+    sources:
+      - type: slack
+        signals: []
+      - type: github
+        signals: [content_type=comment]
+      - type: jira
+        signals: [content_type=comment]
+
+routing:
+  auto_publish_confidence: 0.90
+  auto_publish_authority_floor: medium
+  review_queue_confidence_floor: 0.70
+  # below 0.70 → draft, not surfaced to reviewers
+
+sweep:
+  processing_order: [notion, github, jira, slack, zendesk]
+  rate_per_minute: 10       # items processed per source per minute
+  semaphore_limit: 5        # concurrent LLM calls
+  auto_publish_during_sweep: false
+  # all sweep extractions go to review_queue regardless of confidence

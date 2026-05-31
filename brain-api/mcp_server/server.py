@@ -4,12 +4,18 @@ mcp = FastMCP("Company Brain")
 
 
 @mcp.tool()
-async def query_brain(situation: str, entities: dict = {}) -> dict:
+async def query_brain(situation: str) -> dict:
     """
     Query the company brain for the operational skill that matches this situation.
     Call this before executing any company-specific task.
-    Returns decision logic, tool schemas, confidence score, and graph_context
-    showing resolved overrides and dependencies.
+
+    Returns the skill's trigger, base decision logic, exceptions table,
+    available actions, confidence score, source authority, version, and
+    match metadata (match_type, similarity_score).
+
+    If no published skill matches (similarity < 0.70), triggers a live
+    extraction from connected sources and returns the result flagged as
+    match_type=query_driven.
     """
     return {
         "status": "stub",
