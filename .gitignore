@@ -42,5 +42,7 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
-
+.agents
 .claude
+.mcp.json
+skills-lock.json
