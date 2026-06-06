@@ -327,12 +327,16 @@ RETURNS UUID AS $$
 $$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public;
 
 -- Read the calling user's role within their org
+-- Must join through users because organization_members.user_id is our internal UUID,
+-- while auth.uid() returns the Supabase auth_id (users.auth_id)
 CREATE OR REPLACE FUNCTION current_member_role()
 RETURNS member_role AS $$
-  SELECT role FROM organization_members
-  WHERE org_id = current_org_id()
-    AND user_id = auth.uid()
-    AND is_active = TRUE
+  SELECT om.role
+  FROM organization_members om
+  JOIN users u ON u.id = om.user_id
+  WHERE om.org_id = current_org_id()
+    AND u.auth_id = auth.uid()
+    AND om.is_active = TRUE
   LIMIT 1;
 $$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public;
 
