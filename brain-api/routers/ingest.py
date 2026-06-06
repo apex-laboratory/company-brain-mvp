@@ -3,6 +3,7 @@ import json
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
+from models.schemas import IngestEvent, SweepConfig
 
 from database import get_pool
 from models.schemas import IngestEvent, SweepConfig, SweepSourceProgress, SweepStatus
