@@ -1,0 +1,3 @@
+-- Local development seed data
+-- Add test organisations, users, etc. here for local testing
+-- Run automatically on: supabase db reset

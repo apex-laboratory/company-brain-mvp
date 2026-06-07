@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.local.example
 
 # Python
 __pycache__/
@@ -20,6 +21,11 @@ env/
 # Docker volumes (local dev data)
 pgdata/
 neo4jdata/
+
+# Supabase local state
+.supabase/
+supabase/.branches/
+supabase/.temp/
 
 # IDE
 .vscode/
@@ -42,5 +48,7 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
-
+.agents
 .claude
+.mcp.json
+skills-lock.json
