@@ -52,3 +52,4 @@ htmlcov/
 .claude
 .mcp.json
 skills-lock.json
+.gstack/
