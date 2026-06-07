@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,6 +11,12 @@ from .base import Base
 
 class Skill(Base):
     __tablename__ = "skills"
+    __table_args__ = (
+        UniqueConstraint("org_id", "name", name="skills_org_id_name_key"),
+        Index("ix_skills_org_id_status", "org_id", "status"),
+        Index("ix_skills_org_id_source_authority", "org_id", "source_authority"),
+        # HNSW index (skills_embedding_hnsw) is raw SQL — declared in migration only
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -38,6 +44,7 @@ class Skill(Base):
 
 class SkillVersion(Base):
     __tablename__ = "skill_versions"
+    __table_args__ = (Index("ix_skill_versions_org_id_skill_id", "org_id", "skill_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")

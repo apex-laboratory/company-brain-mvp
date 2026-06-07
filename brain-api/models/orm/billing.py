@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import ARRAY, BigInteger, Date, DateTime, ForeignKey, Integer, LargeBinary, String, text
+from sqlalchemy import ARRAY, BigInteger, Date, DateTime, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +10,10 @@ from .base import Base
 
 class OrganizationApiKey(Base):
     __tablename__ = "organization_api_keys"
+    __table_args__ = (
+        Index("ix_organization_api_keys_org_id", "org_id"),
+        Index("ix_organization_api_keys_key_hash", "key_hash"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -32,6 +36,10 @@ class OrganizationApiKey(Base):
 
 class OrganizationUsage(Base):
     __tablename__ = "organization_usage"
+    __table_args__ = (
+        UniqueConstraint("org_id", "period_start", name="organization_usage_org_id_period_start_key"),
+        # ix_organization_usage_org_id_period_start is a DESC functional index — declared in migration only
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")

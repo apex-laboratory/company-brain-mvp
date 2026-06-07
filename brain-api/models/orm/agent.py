@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, String, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +10,10 @@ from .base import Base
 
 class AgentInteraction(Base):
     __tablename__ = "agent_interactions"
+    __table_args__ = (
+        Index("ix_agent_interactions_org_id_user_id", "org_id", "user_id"),
+        Index("ix_agent_interactions_org_id_skill_id", "org_id", "skill_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")

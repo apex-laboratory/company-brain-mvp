@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, LargeBinary, String, text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +31,10 @@ class Organization(Base):
 
 class OrganizationMember(Base):
     __tablename__ = "organization_members"
+    __table_args__ = (
+        UniqueConstraint("org_id", "user_id", name="organization_members_org_id_user_id_key"),
+        Index("ix_organization_members_user_id", "user_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -49,6 +53,7 @@ class OrganizationMember(Base):
 
 class Invitation(Base):
     __tablename__ = "invitations"
+    __table_args__ = (Index("ix_invitations_org_id_email", "org_id", "email"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -77,7 +82,6 @@ class OrganizationSettings(Base):
         ForeignKey("organizations.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    max_seats: Mapped[int] = mapped_column(Integer, server_default=text("5"))
     max_skills: Mapped[int] = mapped_column(Integer, server_default=text("500"))
     max_sweeps_per_day: Mapped[int] = mapped_column(Integer, server_default=text("3"))
     retention_days: Mapped[int] = mapped_column(Integer, server_default=text("365"))

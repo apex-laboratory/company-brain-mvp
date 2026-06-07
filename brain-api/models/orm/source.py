@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ARRAY, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, text
+from sqlalchemy import ARRAY, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +10,10 @@ from .base import Base
 
 class SourceConnection(Base):
     __tablename__ = "source_connections"
+    __table_args__ = (
+        UniqueConstraint("org_id", "source", "external_account_id", name="source_connections_org_id_source_external_account_id_key"),
+        Index("ix_source_connections_org_id_source_status", "org_id", "source", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -33,6 +37,7 @@ class SourceConnection(Base):
 
 class WebhookSubscription(Base):
     __tablename__ = "webhook_subscriptions"
+    __table_args__ = (Index("ix_webhook_subscriptions_org_id_source_status", "org_id", "source", "status"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
@@ -50,6 +55,11 @@ class WebhookSubscription(Base):
 
 class SourceEvent(Base):
     __tablename__ = "source_events"
+    __table_args__ = (
+        UniqueConstraint("org_id", "source", "external_event_id", name="source_events_org_id_source_external_event_id_key"),
+        Index("ix_source_events_org_id_source_processed", "org_id", "source", "processed"),
+        Index("ix_source_events_org_id_sweep_id", "org_id", "sweep_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")

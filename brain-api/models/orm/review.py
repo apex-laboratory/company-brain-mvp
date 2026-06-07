@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, String, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +10,10 @@ from .base import Base
 
 class ReviewQueue(Base):
     __tablename__ = "review_queue"
+    __table_args__ = (
+        Index("ix_review_queue_org_id_status", "org_id", "status"),
+        Index("ix_review_queue_org_id_review_type", "org_id", "review_type"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
