@@ -1,59 +1,69 @@
-import uuid
 from datetime import date, datetime
 
-from sqlalchemy import ARRAY, BigInteger, Date, DateTime, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import ARRAY, BigInteger, Date, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, UniqueConstraint, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
 
 
-class OrganizationApiKey(Base):
-    __tablename__ = "organization_api_keys"
+class ApiKey(Base):
+    """
+    Workspace API keys for MCP / agent / LangGraph access.
+    key_hash is a usable credential — admins only via RLS.
+    Pre-tenant lookup (authenticate by key_hash) runs through a SECURITY DEFINER
+    function that bypasses RLS before workspace context exists.
+    """
+    __tablename__ = "api_keys"
     __table_args__ = (
-        Index("ix_organization_api_keys_org_id", "org_id"),
-        Index("ix_organization_api_keys_key_hash", "key_hash"),
+        Index("ix_api_keys_workspace_id", "workspace_id"),
+        Index("ix_api_keys_key_hash",     "key_hash"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    id: Mapped[str] = mapped_column(Text, primary_key=True)              # key_…
+    workspace_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
-    )
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)              # 'Production MCP client'
     key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    key_prefix: Mapped[str] = mapped_column(String(10), nullable=False)
-    scopes: Mapped[list] = mapped_column(ARRAY(String), server_default=text('\'{"read"}\''))
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
-    created_by: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    key_prefix: Mapped[str] = mapped_column(Text, nullable=False)        # 'hph_live_abc1' for UI identification
+    scopes: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(Text, ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("NOW()"))
 
 
-class OrganizationUsage(Base):
-    __tablename__ = "organization_usage"
+class UsagePeriod(Base):
+    """
+    Metering rows upserted by the usage.rollup job.
+    spark JSONB: precomputed sparkline arrays for the billing page UI.
+    """
+    __tablename__ = "usage_periods"
     __table_args__ = (
-        UniqueConstraint("org_id", "period_start", name="organization_usage_org_id_period_start_key"),
-        # ix_organization_usage_org_id_period_start is a DESC functional index — declared in migration only
+        UniqueConstraint("workspace_id", "period_start",
+                         name="usage_periods_workspace_id_period_start_key"),
+        # DESC index declared in migration only
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
-    )
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
     period_start: Mapped[date] = mapped_column(Date, nullable=False)
     period_end: Mapped[date] = mapped_column(Date, nullable=False)
-    skills_total: Mapped[int] = mapped_column(Integer, server_default=text("0"))
-    sweeps_run: Mapped[int] = mapped_column(Integer, server_default=text("0"))
-    queries_total: Mapped[int] = mapped_column(Integer, server_default=text("0"))
-    tokens_used: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
-    embeddings_run: Mapped[int] = mapped_column(Integer, server_default=text("0"))
-    connector_syncs: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'"))
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("NOW()"))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("NOW()"))
+    brain_queries: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    brain_query_limit: Mapped[int | None] = mapped_column(Integer)
+    mcp_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    skills_served: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    tokens_used: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    spark: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
