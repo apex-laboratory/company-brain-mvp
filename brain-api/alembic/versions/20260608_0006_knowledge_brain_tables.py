@@ -245,7 +245,7 @@ def upgrade() -> None:
     # read for the activity timeline. No updates — effectively append-only.
     op.create_table(
         "activity_events",
-        sa.Column("id",              sa.Text, primary_key=True),              # act_…
+        sa.Column("id",              sa.Text, primary_key=True),              # evt_…
         sa.Column("workspace_id",    sa.Text,
                                      sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
                                      nullable=False),

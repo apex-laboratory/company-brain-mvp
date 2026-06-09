@@ -18,6 +18,8 @@ FORCE ROW LEVEL SECURITY was already applied in migration 0002 for the old table
 All new tables created in 0003–0006 get it here.
 
 Policy intent per table:
+  users                — own row always readable; workspace members readable within context;
+                         only own row updatable; insert/delete via privileged service role
   workspaces           — members see only their own workspace; no direct write via RLS
   workspace_members    — all members read roster; admins insert/update; no delete via app
   invitations          — admins only (token_hash is a usable credential)
@@ -52,14 +54,15 @@ depends_on: Union[str, Sequence[str], None] = None
 
 # Tables that were created in 0003 and need FORCE RLS applied here
 # (0002 only applied it to the old tables that were dropped in 0003)
+# users is global (no workspace_id) but still gets FORCE RLS so a misconfigured
+# superuser session cannot bypass the select/update policies below.
 _NEW_TENANT_TABLES = [
+    "users",
     "workspaces", "workspace_members", "invitations", "workspace_settings",
     "skills", "skill_versions",
     "source_connections", "source_channels", "webhook_subscriptions",
     "source_events", "sweeps", "agent_interactions",
     "api_keys", "usage_periods", "audit_log",
-    # added in 0005
-    # source_channels already in list above
     # added in 0006
     "decisions", "decision_pins", "reviews",
     "brain_builds", "brain_conversations", "brain_messages", "activity_events",
@@ -102,6 +105,35 @@ def upgrade() -> None:
     # ─────────────────────────────────────────────────────────────────────────
     # POLICIES
     # ─────────────────────────────────────────────────────────────────────────
+
+    # ── users ─────────────────────────────────────────────────────────────────
+    # users is a global table (no workspace_id). Two read cases:
+    #   1. A session always sees its own row (needed for auth flows before a
+    #      workspace context is set, e.g. sign-in, accept-invite).
+    #   2. Any workspace member sees every other member of the same workspace
+    #      (needed for roster joins and display).
+    # INSERT is a bootstrap/invite-acceptance flow — runs via SECURITY DEFINER
+    # function or service role, never through the app_user RLS path.
+    op.execute("""
+        CREATE POLICY users_select ON users FOR SELECT
+          USING (
+            id = current_user_id()
+            OR (
+              current_workspace_id() IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM workspace_members wm
+                WHERE wm.user_id = users.id
+                  AND wm.workspace_id = current_workspace_id()
+                  AND wm.is_active = TRUE
+              )
+            )
+          )
+    """)
+    op.execute("""
+        CREATE POLICY users_update ON users FOR UPDATE
+          USING      (id = current_user_id())
+          WITH CHECK (id = current_user_id())
+    """)
 
     # ── workspaces ────────────────────────────────────────────────────────────
     # A user sees a workspace only if they are an active member.
@@ -398,6 +430,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     policies = [
+        ("users",                "users_select"),
+        ("users",                "users_update"),
         ("workspaces",           "workspaces_select"),
         ("workspaces",           "workspaces_update"),
         ("workspace_members",    "members_select"),

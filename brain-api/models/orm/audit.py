@@ -20,7 +20,7 @@ class AuditLog(Base):
         # DESC functional index (audit_log_workspace_id_created_at_desc) declared in migration only
     )
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    id: Mapped[str] = mapped_column(Text, primary_key=True)              # no prefix — internal append-only log
     workspace_id: Mapped[str] = mapped_column(
         Text, ForeignKey("workspaces.id"), nullable=False
     )

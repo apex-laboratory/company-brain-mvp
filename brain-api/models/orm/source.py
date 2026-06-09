@@ -104,7 +104,7 @@ class SourceEvent(Base):
     __tablename__ = "source_events"
     __table_args__ = (
         UniqueConstraint("workspace_id", "provider", "external_event_id",
-                         name="source_events_workspace_id_provider_external_event_id_key"),
+                         name="source_events_workspace_provider_event_key"),
         Index("ix_source_events_workspace_id_provider_processed",
               "workspace_id", "provider", "processed"),
         Index("ix_source_events_workspace_id_sweep_id", "workspace_id", "sweep_id"),

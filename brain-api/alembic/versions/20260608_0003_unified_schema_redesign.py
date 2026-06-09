@@ -164,7 +164,8 @@ def upgrade() -> None:
         sa.UniqueConstraint("workspace_id", "user_id",
                             name="workspace_members_workspace_id_user_id_key"),
     )
-    op.create_index(None, "workspace_members", ["workspace_id", "user_id"])
+    # UniqueConstraint already creates a btree index on (workspace_id, user_id);
+    # only the user_id index is needed as a separate entry.
     op.create_index(None, "workspace_members", ["user_id"])
 
     # ── 7. invitations ────────────────────────────────────────────────────────
@@ -473,7 +474,7 @@ def upgrade() -> None:
     # ── 18. audit_log ─────────────────────────────────────────────────────────
     op.create_table(
         "audit_log",
-        sa.Column("id",           sa.Text, primary_key=True),              # act_…
+        sa.Column("id",           sa.Text, primary_key=True),              # no prefix — internal append-only log
         sa.Column("workspace_id", sa.Text,
                                   sa.ForeignKey("workspaces.id"),
                                   nullable=False),

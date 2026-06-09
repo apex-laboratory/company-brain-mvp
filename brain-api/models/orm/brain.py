@@ -92,7 +92,7 @@ class ActivityEvent(Base):
     """Lightweight dashboard feed. Append-only; system inserts, members read."""
     __tablename__ = "activity_events"
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True)              # act_…
+    id: Mapped[str] = mapped_column(Text, primary_key=True)              # evt_…
     workspace_id: Mapped[str] = mapped_column(
         Text, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )

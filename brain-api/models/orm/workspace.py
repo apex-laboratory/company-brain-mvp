@@ -37,7 +37,6 @@ class WorkspaceMember(Base):
     __tablename__ = "workspace_members"
     __table_args__ = (
         UniqueConstraint("workspace_id", "user_id", name="workspace_members_workspace_id_user_id_key"),
-        Index("ix_workspace_members_workspace_id_user_id", "workspace_id", "user_id"),
         Index("ix_workspace_members_user_id", "user_id"),
     )
 
