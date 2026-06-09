@@ -1,4 +1,4 @@
-import json
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from sqlalchemy import text
@@ -31,23 +31,33 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def get_tenant_db(claims: dict) -> AsyncGenerator[AsyncSession, None]:
+@asynccontextmanager
+async def run_in_tenant(
+    workspace_id: str,
+    user_id: str,
+    role: str,
+) -> AsyncGenerator[AsyncSession, None]:
     """
-    Session with request.jwt.claims set for the current transaction.
+    Async context manager that opens a session and sets transaction-local GUCs
+    so RLS policies (current_workspace_id(), current_member_role()) see the
+    correct tenant context.
 
-    RLS policies call current_org_id() which reads this claim, so every query
-    is automatically scoped to the caller's org. Use this for all user-facing
-    endpoints — never get_db() for tenant data.
+    The GUCs are transaction-local (set_config(..., true)) — they reset when
+    the transaction ends and cannot leak across pooled connections.
 
-    Usage in FastAPI:
-        async def my_route(token_claims: dict = Depends(get_claims)):
-            async with get_tenant_db(token_claims) as db:
-                ...
+    Usage:
+        async with run_in_tenant(workspace_id, user_id, role) as db:
+            result = await db.execute(select(Skill).where(...))
     """
     async with AsyncSessionLocal() as session:
-        # transaction-local: resets when the transaction ends
-        await session.execute(
-            text("SELECT set_config('request.jwt.claims', :claims, true)"),
-            {"claims": json.dumps(claims)},
-        )
-        yield session
+        async with session.begin():
+            await session.execute(
+                text(
+                    "SELECT "
+                    "set_config('app.current_workspace_id', :wid, true), "
+                    "set_config('app.current_user_id',      :uid, true), "
+                    "set_config('app.current_role',         :role, true)"
+                ),
+                {"wid": workspace_id, "uid": user_id, "role": role},
+            )
+            yield session
