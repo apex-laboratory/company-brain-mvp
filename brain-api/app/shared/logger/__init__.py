@@ -30,7 +30,7 @@ REDACTED_KEYS: frozenset[str] = frozenset(
         "secret",
         "encryption_key",
         "email",
-        "code",  # oauth authorization codes
+        "oauth_code",  # oauth authorization codes (name the field oauth_code)
     }
 )
 

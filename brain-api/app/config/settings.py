@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # NoDecode: keep the raw env string so the validator below can split it on
     # commas (otherwise pydantic-settings tries to JSON-decode list fields).
     allowed_origins: Annotated[list[str], NoDecode]
+    # Host header allow-list for TrustedHostMiddleware. Defaults to "*" for
+    # local/test; production must set explicit hostnames (e.g. "api.example.com").
+    allowed_hosts: Annotated[list[str], NoDecode] = ["*"]
 
     ai_service_url: str
     ai_service_token: str
@@ -64,9 +67,9 @@ class Settings(BaseSettings):
             raise ValueError("must be valid hex") from exc
         return v
 
-    @field_validator("allowed_origins", mode="before")
+    @field_validator("allowed_origins", "allowed_hosts", mode="before")
     @classmethod
-    def parse_origins(cls, v: str | list[str]) -> list[str]:
+    def parse_csv_list(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v

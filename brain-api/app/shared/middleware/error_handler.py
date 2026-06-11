@@ -51,9 +51,9 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         if exc.status >= 500:
-            log.error("request_failed", code=exc.code)
+            log.error("request_failed", error_code=exc.code)
         else:
-            log.warning("request_rejected", code=exc.code)
+            log.warning("request_rejected", error_code=exc.code)
         headers: dict[str, str] = {}
         if exc.code == "rate_limited" and isinstance(exc.details, dict):
             retry = exc.details.get("retryAfterSeconds")

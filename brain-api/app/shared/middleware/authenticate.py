@@ -22,6 +22,7 @@ from app.config.settings import settings
 from app.modules.auth.repository import AuthRepository
 from app.shared.errors.app_error import UnauthorizedError
 from app.shared.helpers.crypto import sha256_hash
+from app.shared.middleware.rate_limit import enforce_api_key_rate_limit
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -43,8 +44,19 @@ class AuthContext:
 
 def _from_jwt(token: str) -> AuthContext | None:
     try:
-        payload = jwt.decode(token, settings.jwt_access_secret, algorithms=["HS256"])
+        payload = jwt.decode(
+            token,
+            settings.jwt_access_secret,
+            algorithms=["HS256"],
+            # python-jose only *validates* exp when present; require_exp rejects a
+            # token that omits it, so a well-signed but unexpiring token can't
+            # become a permanent credential. (require_exp is jose's boolean flag;
+            # the PyJWT-style {"require": [...]} list is silently ignored here, and
+            # jose can't require custom claims — those are checked below.)
+            options={"require_exp": True},
+        )
     except JWTError:
+        # Bad signature, expired, or no exp claim.
         return None
     try:
         return AuthContext(
@@ -55,7 +67,7 @@ def _from_jwt(token: str) -> AuthContext | None:
             kind="jwt",
         )
     except KeyError:
-        # Token is well-signed but missing required claims — treat as invalid.
+        # Well-signed and unexpired but missing an app claim — treat as invalid.
         return None
 
 
@@ -86,6 +98,7 @@ async def get_auth_context(
 
     api_key = request.headers.get("X-API-Key")
     if api_key:
+        await enforce_api_key_rate_limit(request)
         auth = await _from_api_key(api_key)
         if auth is not None:
             request.state.auth = auth
