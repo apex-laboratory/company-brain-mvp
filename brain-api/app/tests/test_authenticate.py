@@ -30,7 +30,8 @@ def _bearer(token: str) -> HTTPAuthorizationCredentials:
 
 
 def _encode(claims: dict[str, object]) -> str:
-    return jwt.encode(claims, settings.jwt_access_secret, algorithm="HS256")
+    token: str = jwt.encode(claims, settings.jwt_access_secret, algorithm="HS256")
+    return token
 
 
 @pytest.mark.asyncio
