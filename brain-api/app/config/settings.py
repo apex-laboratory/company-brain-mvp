@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     resend_api_key: str
     default_from_email: str = "Brainite <founders@brainites.com>"
 
+    # ── source connectors (KAN-2) ─────────────────────────────────────────────
+    # Public base URL the providers redirect back to (e.g. https://api.brainites.com).
+    # The per-provider callback path is appended: {base}/api/v1/sources/{provider}/callback.
+    oauth_redirect_base_url: str = "http://localhost:4000"
+    # Dashboard URL the callback bounces the browser back to after connecting.
+    frontend_url: str = "http://localhost:3000"
+    # Notion OAuth (the first connector; the other four are added as they land).
+    notion_client_id: str = ""
+    notion_client_secret: str = ""
+
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes
     refresh_token_ttl_seconds: int = 30 * 24 * 60 * 60  # 30 days

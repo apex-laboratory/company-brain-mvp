@@ -24,3 +24,6 @@ structlog>=24.1.0                  # structured JSON logging + redaction
 slowapi>=0.1.9                     # Redis-backed rate limiting
 ulid-py>=1.1.0                     # prefixed ULID id generation
 email-validator>=2.1.0            # pydantic EmailStr validation
+
+# ── source connectors (KAN-2) ─────────────────────────────────────────────────
+arq>=0.25.0                        # async Redis job queue (source sync + webhook ingest)

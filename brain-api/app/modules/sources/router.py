@@ -1,0 +1,77 @@
+"""Sources router (BACKEND_BEST_PRACTICES.md §2, §6).
+
+Paths + dependencies only — all logic lives in :class:`SourcesService`. Mounted
+under ``/api/v1`` by ``main.py``.
+
+All connection routes require an **admin** dashboard JWT (``source_connections``
+is admin-only at the RLS layer). The OAuth *callback* is exempt: it is a browser
+redirect from the provider that carries no JWT, so it authenticates via the
+signed, single-use ``state`` instead.
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import RedirectResponse
+
+from app.modules.sources.schemas import ChannelSelectRequest
+from app.modules.sources.service import SourcesService
+from app.shared.http.respond import accepted, no_content, ok
+from app.shared.middleware.authenticate import AuthContext, get_auth_context
+from app.shared.middleware.authorize import require_role
+from app.shared.middleware.rate_limit import OAUTH_CALLBACK_LIMIT, limiter
+
+router = APIRouter(prefix="/sources", tags=["sources"])
+
+_service = SourcesService()
+
+
+@router.get("", dependencies=[Depends(require_role("admin"))])
+async def list_sources(request: Request, auth: AuthContext = Depends(get_auth_context)):
+    """List this workspace's source connections."""
+    connections = await _service.list_connections(auth)
+    return ok(request, [c.model_dump(by_alias=True) for c in connections])
+
+
+@router.post("/{provider}/authorize", dependencies=[Depends(require_role("admin"))])
+async def authorize(
+    provider: str, request: Request, auth: AuthContext = Depends(get_auth_context)
+):
+    """Begin the OAuth flow: return the provider consent URL to redirect the user to."""
+    result = await _service.start_authorization(auth, provider)
+    return accepted(request, result.model_dump(by_alias=True))
+
+
+@router.get("/{provider}/callback")
+@limiter.limit(OAUTH_CALLBACK_LIMIT)
+async def callback(provider: str, request: Request, code: str, state: str):
+    """OAuth redirect target: exchange the code, store the connection, bounce to the dashboard."""
+    redirect_to = await _service.handle_callback(provider, code, state)
+    return RedirectResponse(url=redirect_to, status_code=302)
+
+
+@router.post("/{source_id}/disconnect", dependencies=[Depends(require_role("admin"))])
+async def disconnect(source_id: str, auth: AuthContext = Depends(get_auth_context)):
+    """Revoke (best-effort) and delete a source connection."""
+    await _service.disconnect(auth, source_id)
+    return no_content()
+
+
+@router.get("/{source_id}/channels", dependencies=[Depends(require_role("admin"))])
+async def list_channels(
+    source_id: str, request: Request, auth: AuthContext = Depends(get_auth_context)
+):
+    """List provider-discoverable channels merged with persisted selection state."""
+    channels = await _service.list_channels(auth, source_id)
+    return ok(request, [c.model_dump(by_alias=True) for c in channels])
+
+
+@router.patch("/{source_id}/channels", dependencies=[Depends(require_role("admin"))])
+async def select_channels(
+    source_id: str,
+    body: ChannelSelectRequest,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Toggle which channels are selected for ingestion."""
+    channels = await _service.select_channels(auth, source_id, body)
+    return ok(request, [c.model_dump(by_alias=True) for c in channels])

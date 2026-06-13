@@ -19,7 +19,11 @@ from sqlalchemy import text
 from app.config.database import close_db_pool, get_session
 from app.config.redis import close_redis, get_redis, init_redis
 from app.config.settings import settings
+from app.integrations.base import close_http_client
+from app.jobs.queue import close_queue
 from app.modules.auth.router import router as auth_router
+from app.modules.sources.router import router as sources_router
+from app.modules.webhooks.router import router as webhooks_router
 from app.shared.middleware.error_handler import register_exception_handlers
 from app.shared.middleware.rate_limit import limiter
 from app.shared.middleware.request_context import RequestContextMiddleware
@@ -30,6 +34,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_redis()
     yield
     await close_redis()
+    await close_queue()
+    await close_http_client()
     await close_db_pool()
 
 
@@ -61,6 +67,8 @@ app.add_exception_handler(RateLimitExceeded, cast(Any, _rate_limit_exceeded_hand
 register_exception_handlers(app)
 
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(sources_router, prefix="/api/v1")
+app.include_router(webhooks_router, prefix="/api/v1")
 
 
 @app.get("/health")
