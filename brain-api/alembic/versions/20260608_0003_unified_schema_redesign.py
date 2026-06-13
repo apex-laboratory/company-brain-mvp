@@ -27,7 +27,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 from pgvector.sqlalchemy import Vector
-from sqlalchemy.dialects.postgresql import ARRAY, INET, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, INET, JSONB, UUID, ENUM
 
 revision: str = "0003"
 down_revision: Union[str, None] = "0002"
@@ -109,7 +109,7 @@ def upgrade() -> None:
         sa.Column("name",             sa.Text, nullable=False),
         sa.Column("slug",             sa.Text, nullable=False, unique=True),
         sa.Column("domain",           sa.Text),
-        sa.Column("plan",             sa.Enum("trial", "starter", "pro", "enterprise",
+        sa.Column("plan",             ENUM("trial", "starter", "pro", "enterprise",
                                               name="workspace_plan", create_type=False),
                                       nullable=False, server_default=sa.text("'trial'")),
         sa.Column("seat_limit",       sa.Integer, nullable=False, server_default=sa.text("5")),
@@ -154,7 +154,7 @@ def upgrade() -> None:
         sa.Column("user_id",      sa.Text,
                                   sa.ForeignKey("users.id", ondelete="CASCADE"),
                                   nullable=False),
-        sa.Column("role",         sa.Enum("admin", "editor", "viewer",
+        sa.Column("role",         ENUM("admin", "editor", "viewer",
                                           name="member_role", create_type=False),
                                   nullable=False, server_default=sa.text("'viewer'")),
         sa.Column("is_active",    sa.Boolean, nullable=False, server_default=sa.text("TRUE")),
@@ -176,11 +176,11 @@ def upgrade() -> None:
                                   sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
                                   nullable=False),
         sa.Column("email",        sa.Text, nullable=False),
-        sa.Column("role",         sa.Enum("admin", "editor", "viewer",
+        sa.Column("role",         ENUM("admin", "editor", "viewer",
                                           name="member_role", create_type=False),
                                   nullable=False, server_default=sa.text("'viewer'")),
         sa.Column("token_hash",   sa.LargeBinary, nullable=False, unique=True),
-        sa.Column("status",       sa.Enum("pending", "accepted", "revoked", "expired",
+        sa.Column("status",       ENUM("pending", "accepted", "revoked", "expired",
                                           name="invite_status", create_type=False),
                                   nullable=False, server_default=sa.text("'pending'")),
         sa.Column("invited_by",   sa.Text,
@@ -224,7 +224,7 @@ def upgrade() -> None:
         sa.Column("version",          sa.Text, nullable=False,
                                       server_default=sa.text("'v1'")),     # 'v1','v4'…
         sa.Column("description",      sa.Text),
-        sa.Column("status",           sa.Enum("stable", "active", "draft", "review",
+        sa.Column("status",           ENUM("stable", "active", "draft", "review",
                                               name="skill_status", create_type=False),
                                       nullable=False, server_default=sa.text("'draft'")),
         sa.Column("source_providers", ARRAY(sa.Text),
@@ -293,16 +293,16 @@ def upgrade() -> None:
         sa.Column("workspace_id",         sa.Text,
                                           sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
                                           nullable=False),
-        sa.Column("provider",             sa.Enum("slack", "notion", "github",
+        sa.Column("provider",             ENUM("slack", "notion", "github",
                                                   "jira", "zendesk",
                                                   name="source_provider", create_type=False),
                                           nullable=False),
         sa.Column("name",                 sa.Text, nullable=False),        # 'Slack workspace'
-        sa.Column("status",               sa.Enum("connected", "disconnected",
+        sa.Column("status",               ENUM("connected", "disconnected",
                                                   "error", "pending",
                                                   name="source_status", create_type=False),
                                           nullable=False, server_default=sa.text("'pending'")),
-        sa.Column("sync_status",          sa.Enum("healthy", "pending",
+        sa.Column("sync_status",          ENUM("healthy", "pending",
                                                   "syncing", "error",
                                                   name="sync_status", create_type=False),
                                           nullable=False, server_default=sa.text("'pending'")),
@@ -333,7 +333,7 @@ def upgrade() -> None:
         sa.Column("workspace_id",  sa.Text,
                                    sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
                                    nullable=False),
-        sa.Column("provider",      sa.Enum("slack", "notion", "github",
+        sa.Column("provider",      ENUM("slack", "notion", "github",
                                            "jira", "zendesk",
                                            name="source_provider", create_type=False),
                                    nullable=False),
