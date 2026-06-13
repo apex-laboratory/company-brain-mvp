@@ -10,7 +10,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 from pgvector.sqlalchemy import Vector
-from sqlalchemy.dialects.postgresql import JSONB, UUID, INET, ARRAY
+from sqlalchemy.dialects.postgresql import JSONB, UUID, INET, ARRAY, ENUM
 
 revision: str = "0001"
 down_revision: Union[str, None] = None
@@ -58,7 +58,7 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("org_id", UUID(as_uuid=True), sa.ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
         sa.Column("user_id", UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("role", sa.Enum("owner", "admin", "editor", "viewer", name="member_role", create_type=False), nullable=False, server_default=sa.text("'viewer'")),
+        sa.Column("role", ENUM("owner", "admin", "editor", "viewer", name="member_role", create_type=False), nullable=False, server_default=sa.text("'viewer'")),
         sa.Column("is_active", sa.Boolean, server_default=sa.text("TRUE")),
         sa.Column("invited_by", UUID(as_uuid=True), sa.ForeignKey("users.id")),
         sa.Column("joined_at", sa.DateTime, server_default=sa.text("NOW()")),
@@ -73,7 +73,7 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("org_id", UUID(as_uuid=True), sa.ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False),
         sa.Column("email", sa.String(255), nullable=False),
-        sa.Column("role", sa.Enum("owner", "admin", "editor", "viewer", name="member_role", create_type=False), nullable=False, server_default=sa.text("'viewer'")),
+        sa.Column("role", ENUM("owner", "admin", "editor", "viewer", name="member_role", create_type=False), nullable=False, server_default=sa.text("'viewer'")),
         sa.Column("token_hash", sa.LargeBinary, nullable=False, unique=True),
         sa.Column("invited_by", UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False),
         sa.Column("expires_at", sa.DateTime, nullable=False, server_default=sa.text("NOW() + INTERVAL '7 days'")),

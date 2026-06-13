@@ -29,7 +29,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID, ENUM
 
 revision: str = "0006"
 down_revision: Union[str, None] = "0005"
@@ -63,10 +63,10 @@ def upgrade() -> None:
                                      nullable=False),
         sa.Column("ai_decision_id",  UUID(as_uuid=True)),                     # link to AI service
         sa.Column("title",           sa.Text, nullable=False),
-        sa.Column("source_provider", sa.Enum("slack", "notion", "github", "jira", "zendesk",
+        sa.Column("source_provider", ENUM("slack", "notion", "github", "jira", "zendesk",
                                              name="source_provider", create_type=False)),
         sa.Column("source_location", sa.Text),
-        sa.Column("status",          sa.Enum("approved", "active", "review",
+        sa.Column("status",          ENUM("approved", "active", "review",
                                              name="decision_status", create_type=False),
                                      nullable=False, server_default=sa.text("'review'")),
         sa.Column("confidence",      sa.Integer),                             # 0–100
@@ -127,11 +127,11 @@ def upgrade() -> None:
                                       nullable=False),
         sa.Column("ai_review_id",     UUID(as_uuid=True)),                    # AI-service queue id
         sa.Column("title",            sa.Text, nullable=False),
-        sa.Column("kind",             sa.Enum("policy_change", "new_decision",
+        sa.Column("kind",             ENUM("policy_change", "new_decision",
                                               "contradiction", "exception",
                                               name="review_kind", create_type=False),
                                       nullable=False),
-        sa.Column("source_provider",  sa.Enum("slack", "notion", "github", "jira", "zendesk",
+        sa.Column("source_provider",  ENUM("slack", "notion", "github", "jira", "zendesk",
                                               name="source_provider", create_type=False)),
         sa.Column("source_location",  sa.Text),
         sa.Column("before_text",      sa.Text),
@@ -139,7 +139,7 @@ def upgrade() -> None:
         sa.Column("evidence_quote",   sa.Text),
         sa.Column("evidence_author",  sa.Text),
         sa.Column("confidence",       sa.Integer),                            # 0–100
-        sa.Column("status",           sa.Enum("pending", "approved", "rejected",
+        sa.Column("status",           ENUM("pending", "approved", "rejected",
                                               name="review_status", create_type=False),
                                       nullable=False, server_default=sa.text("'pending'")),
         sa.Column("verdict",          sa.Text),                               # 'approve' | 'reject'
@@ -169,7 +169,7 @@ def upgrade() -> None:
         sa.Column("workspace_id", sa.Text,
                                   sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
                                   nullable=False),
-        sa.Column("status",       sa.Enum("queued", "running", "completed",
+        sa.Column("status",       ENUM("queued", "running", "completed",
                                           "failed", "canceled",
                                           name="build_status", create_type=False),
                                   nullable=False, server_default=sa.text("'queued'")),
@@ -227,7 +227,7 @@ def upgrade() -> None:
         sa.Column("conversation_id", sa.Text,
                                      sa.ForeignKey("brain_conversations.id", ondelete="CASCADE"),
                                      nullable=False),
-        sa.Column("role",            sa.Enum("user", "assistant",
+        sa.Column("role",            ENUM("user", "assistant",
                                              name="message_role", create_type=False),
                                      nullable=False),
         sa.Column("content",         sa.Text, nullable=False),
@@ -252,7 +252,7 @@ def upgrade() -> None:
         sa.Column("type",            sa.Text, nullable=False),               # 'skill' | 'decision' | 'review' | 'source' …
         sa.Column("title",           sa.Text, nullable=False),
         sa.Column("detail",          sa.Text),
-        sa.Column("source_provider", sa.Enum("slack", "notion", "github", "jira", "zendesk",
+        sa.Column("source_provider", ENUM("slack", "notion", "github", "jira", "zendesk",
                                              name="source_provider", create_type=False)),
         sa.Column("created_at",      sa.DateTime(timezone=True),
                                      nullable=False, server_default=sa.text("now()")),
