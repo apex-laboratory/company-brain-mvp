@@ -18,6 +18,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM
 
 revision: str = "0005"
 down_revision: Union[str, None] = "0004"
@@ -35,7 +36,7 @@ def upgrade() -> None:
         sa.Column("source_id",    sa.Text,
                                   sa.ForeignKey("source_connections.id", ondelete="CASCADE"),
                                   nullable=False),
-        sa.Column("provider",     sa.Enum("slack", "notion", "github", "jira", "zendesk",
+        sa.Column("provider",     ENUM("slack", "notion", "github", "jira", "zendesk",
                                           name="source_provider", create_type=False),
                                   nullable=False),
         sa.Column("external_id",  sa.Text),                                # channel/space/project id at provider
