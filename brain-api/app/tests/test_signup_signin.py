@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
+from sqlalchemy.exc import IntegrityError
 
 from app.config.settings import settings
 from app.modules.auth import service as service_module
@@ -36,9 +37,13 @@ from app.shared.helpers.crypto import sha256_hash
 class _FakeSession:
     def __init__(self) -> None:
         self.committed = False
+        self.rolled_back = False
 
     async def commit(self) -> None:
         self.committed = True
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
 
 
 class _FakeAuthRepository(AuthRepository):
@@ -49,9 +54,11 @@ class _FakeAuthRepository(AuthRepository):
         *,
         existing_user: UserRecord | None = None,
         membership: MembershipRecord | None = None,
+        create_user_raises: Exception | None = None,
     ) -> None:
         self._existing_user = existing_user
         self._membership = membership
+        self._create_user_raises = create_user_raises
         self.created_user: UserRecord | None = None
         self.refresh_tokens: list[dict[str, Any]] = []
         self.last_login_user_id: str | None = None
@@ -60,6 +67,10 @@ class _FakeAuthRepository(AuthRepository):
         return self._existing_user
 
     async def create_user(self, session: Any, user_id: str, email: str) -> UserRecord:
+        if self._create_user_raises is not None:
+            # Simulates a concurrent signup winning the race: the pre-check saw no
+            # row, but the INSERT trips the users_email_lower unique index.
+            raise self._create_user_raises
         self.created_user = UserRecord(id=user_id, email=email, name=None)
         return self.created_user
 
@@ -128,6 +139,8 @@ async def test_signup_creates_user_and_returns_onboarding() -> None:
     assert result.workspace is None
     assert result.user.email == "dana@riverline.io"  # normalized to lowercase
     assert repo.created_user is not None
+    # Signup is an authenticated login — last_login_at is stamped, not left NULL.
+    assert repo.last_login_user_id == result.user.id
 
     claims = _decode(result.access_token)
     assert claims["sub"] == result.user.id
@@ -155,6 +168,21 @@ async def test_signup_stores_only_the_refresh_token_hash() -> None:
 async def test_signup_conflict_when_email_exists() -> None:
     repo = _FakeAuthRepository(
         existing_user=UserRecord(id="usr_1", email="a@b.io", name=None)
+    )
+    service = AuthService(repository=repo)
+
+    with pytest.raises(ConflictError):
+        await service.signup(_request("a@b.io"), user_agent=None, ip=None)
+
+
+@pytest.mark.asyncio
+async def test_signup_concurrent_duplicate_maps_to_conflict() -> None:
+    # The pre-check passes (no existing user) but the INSERT loses the race and
+    # raises IntegrityError; the service must surface a 409 ConflictError, not let
+    # the raw DB error escape to the catch-all 500 handler.
+    repo = _FakeAuthRepository(
+        existing_user=None,
+        create_user_raises=IntegrityError("INSERT", {}, Exception("unique")),
     )
     service = AuthService(repository=repo)
 

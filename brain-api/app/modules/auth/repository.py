@@ -97,7 +97,8 @@ class AuthRepository:
         """Return the user's primary active workspace membership, or ``None``.
 
         Primary = admin membership if the user has one, otherwise the earliest
-        joined. Soft-deleted workspaces are excluded.
+        joined; ties are broken by ``workspace_id`` so the choice is stable across
+        sign-ins. Soft-deleted workspaces are excluded.
         """
         row = (
             await session.execute(
@@ -112,7 +113,7 @@ class AuthRepository:
                     WHERE m.user_id = :user_id
                       AND m.is_active = TRUE
                       AND w.deleted_at IS NULL
-                    ORDER BY (m.role = 'admin') DESC, m.joined_at ASC
+                    ORDER BY (m.role = 'admin') DESC, m.joined_at ASC, m.workspace_id ASC
                     LIMIT 1
                     """
                 ).bindparams(user_id=user_id),

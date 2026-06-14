@@ -15,10 +15,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from jose import jwt
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.config.settings import settings
-from app.modules.auth.repository import AuthRepository
+from app.modules.auth.repository import (
+    AuthRepository,
+    MembershipRecord,
+    UserRecord,
+)
 from app.modules.auth.schemas import (
     AuthSessionOut,
     EmailSigninRequest,
@@ -51,7 +57,18 @@ class AuthService:
             if await self._repository.find_user_by_email(session, email) is not None:
                 raise ConflictError("Email already registered")
 
-            user = await self._repository.create_user(session, generate_id("user"), email)
+            try:
+                user = await self._repository.create_user(
+                    session, generate_id("user"), email
+                )
+            except IntegrityError as exc:
+                # Lost a race to a concurrent signup: the pre-check passed but a
+                # parallel request inserted this email first, tripping the
+                # users_email_lower unique index. Map to the same 409 as the
+                # pre-check rather than letting it surface as a 500.
+                await session.rollback()
+                raise ConflictError("Email already registered") from exc
+
             access_token, refresh_token = await self.issue_token_pair(
                 session,
                 user_id=user.id,
@@ -60,14 +77,14 @@ class AuthService:
                 user_agent=user_agent,
                 ip=ip,
             )
+            await self._repository.touch_last_login(session, user.id)
             await session.commit()
 
-        return AuthSessionOut(
-            user=UserOut(id=user.id, email=user.email, name=user.name),
-            workspace=None,
+        return self._session_response(
+            user,
+            membership=None,
             access_token=access_token,
             refresh_token=refresh_token,
-            next_step="onboarding",
         )
 
     async def signin(
@@ -101,6 +118,27 @@ class AuthService:
             await self._repository.touch_last_login(session, user.id)
             await session.commit()
 
+        return self._session_response(
+            user,
+            membership=membership,
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
+
+    @staticmethod
+    def _session_response(
+        user: UserRecord,
+        *,
+        membership: MembershipRecord | None,
+        access_token: str,
+        refresh_token: str,
+    ) -> AuthSessionOut:
+        """Assemble the session payload shared by signup and signin.
+
+        ``next_step`` derives solely from workspace membership: a user with an
+        active workspace lands on the ``dashboard``; one without (a fresh signup,
+        or an account that never finished onboarding) goes to ``onboarding``.
+        """
         workspace = (
             WorkspaceOut(
                 id=membership.workspace_id,
@@ -120,7 +158,7 @@ class AuthService:
 
     async def issue_token_pair(
         self,
-        session: Any,
+        session: AsyncSession,
         *,
         user_id: str,
         workspace_id: str | None,
@@ -159,8 +197,10 @@ class AuthService:
         """Sign the dashboard access token (claims per BACKEND_BEST_PRACTICES §7).
 
         ``workspace_id``/``role`` are ``None`` for a freshly signed-up user who has
-        no workspace yet; the keys are always present so the auth middleware's
-        required-claim check passes.
+        no workspace yet. The claims are always emitted (as JSON null), and
+        ``AuthContext`` models both as optional, so the middleware accepts the
+        token and simply leaves tenant scoping unset until the user joins or
+        creates a workspace.
         """
         expires_at = now + timedelta(seconds=settings.access_token_ttl_seconds)
         payload: dict[str, Any] = {
