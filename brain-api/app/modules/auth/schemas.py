@@ -13,7 +13,14 @@ from pydantic.alias_generators import to_camel
 
 
 class _Request(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Accept camelCase request bodies (the API contract uses camelCase JSON
+    # fields, e.g. ``refreshToken``) while still allowing the snake_case field
+    # name; reject any unexpected key (mass-assignment defense).
+    model_config = ConfigDict(
+        extra="forbid",
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class _Response(BaseModel):
