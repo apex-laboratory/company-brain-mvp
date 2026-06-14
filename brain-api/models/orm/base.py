@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from sqlalchemy import text
+from sqlalchemy import MetaData, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -21,8 +21,18 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+# SQLAlchemy's built-in convention for unnamed indexes is "ix_%(column_0_label)s"
+# — it uses only the FIRST column, so two unnamed indexes on the same table that
+# share a first column collide (e.g. two ix_skills_workspace_id). Including every
+# column name makes auto-generated index names unique. Alembic picks this up via
+# target_metadata, so `op.create_index(None, ...)` in migrations names correctly.
+NAMING_CONVENTION = {
+    "ix": "ix_%(table_name)s_%(column_0_N_name)s",
+}
+
+
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

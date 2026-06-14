@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"  # the shared .env also carries app/ settings keys
 
 
 settings = Settings()
