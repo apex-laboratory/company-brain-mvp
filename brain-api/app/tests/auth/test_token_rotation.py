@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 from app.config.settings import settings
-from app.modules.auth.repository import AuthRepository, Membership, RefreshTokenRow
+from app.modules.auth.repository import AuthRepository, MembershipRecord, RefreshTokenRow
 from app.modules.auth.router import _refresh_failed, _token_from
 from app.modules.auth.schemas import LogoutRequest, RefreshRequest
 from app.modules.auth.service import AuthService
@@ -50,7 +50,7 @@ class _Row:
 @dataclass
 class FakeRepository(AuthRepository):
     rows: list[_Row] = field(default_factory=list)
-    membership: Membership | None = None
+    membership: MembershipRecord | None = None
     revoke_family_calls: list[str] = field(default_factory=list)
     for_update_flags: list[bool] = field(default_factory=list)
     _counter: int = 0
@@ -71,9 +71,9 @@ class FakeRepository(AuthRepository):
                 )
         return None
 
-    async def find_active_membership(
+    async def find_primary_membership(
         self, session: Any, user_id: str
-    ) -> Membership | None:
+    ) -> MembershipRecord | None:
         return self.membership
 
     # -- writes --
@@ -142,7 +142,12 @@ def _decode(token: str) -> dict[str, Any]:
 # ── refresh: happy path ───────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_refresh_rotates_and_returns_new_pair() -> None:
-    repo = FakeRepository(membership=Membership(workspace_id="wrk_1", role="admin"))
+    repo = FakeRepository(
+        membership=MembershipRecord(
+            workspace_id="wrk_1", role="admin",
+            workspace_name="Riverline", workspace_slug="riverline",
+        )
+    )
     old = _seed(repo, "raw-old")
     service = AuthService(repository=repo)
     session = FakeSession()
@@ -198,7 +203,12 @@ async def test_refresh_unknown_token_raises_401() -> None:
 
 @pytest.mark.asyncio
 async def test_refresh_reuse_revokes_entire_family_and_raises_401() -> None:
-    repo = FakeRepository(membership=Membership("wrk_1", "admin"))
+    repo = FakeRepository(
+        membership=MembershipRecord(
+            workspace_id="wrk_1", role="admin",
+            workspace_name="W", workspace_slug="w",
+        )
+    )
     # Two live siblings plus the already-revoked token being replayed.
     _seed(repo, "raw-sibling", id="rt-sib", family_id="rt_fam")
     _seed(repo, "raw-revoked", id="rt-rev", family_id="rt_fam", revoked_at=datetime.now(UTC))
@@ -218,7 +228,12 @@ async def test_refresh_reuse_revokes_entire_family_and_raises_401() -> None:
 
 @pytest.mark.asyncio
 async def test_refresh_expired_token_raises_401_without_rotation() -> None:
-    repo = FakeRepository(membership=Membership("wrk_1", "admin"))
+    repo = FakeRepository(
+        membership=MembershipRecord(
+            workspace_id="wrk_1", role="admin",
+            workspace_name="W", workspace_slug="w",
+        )
+    )
     past = datetime.now(UTC) - timedelta(seconds=1)
     _seed(repo, "raw-old", expires_at=past)
     service = AuthService(repository=repo)

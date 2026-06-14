@@ -1,12 +1,12 @@
 """Auth data access (the only place auth SQL lives).
 
-Pre-tenant lookups (resolve API key by hash, resolve user by email) run on a
-service-role session *before* any workspace context exists, so they use the
-global tables directly. All queries are parameterized — never string-built.
-
-Per-endpoint queries (signup, refresh rotation, OAuth state) are added by the
-sibling endpoint tickets; this module holds the shared primitives the auth
-plumbing needs today.
+Pre-tenant lookups (resolve API key by hash, resolve user by email, find the
+caller's primary workspace) run on a service-role session *before* any workspace
+context exists, so they read the global tables directly. ``users`` enforces
+FORCE row-level security with no INSERT policy and a SELECT policy gated on
+tenant context, so these reads/writes rely on the privileged service-role
+session bypassing RLS — the same path the API-key resolver already uses.
+``refresh_tokens`` has no RLS. All queries are parameterized — never string-built.
 """
 from __future__ import annotations
 
@@ -37,15 +37,116 @@ class RefreshTokenRow:
 
 
 @dataclass(frozen=True)
-class Membership:
-    """A user's active workspace membership, used to mint access-token claims."""
+class UserRecord:
+    """A row from the global ``users`` table, projected for auth responses."""
+
+    id: str
+    email: str
+    name: str | None
+
+
+@dataclass(frozen=True)
+class MembershipRecord:
+    """A user's active workspace membership, joined with workspace display data."""
 
     workspace_id: str
     role: str
+    workspace_name: str
+    workspace_slug: str
 
 
 class AuthRepository:
     """Stateless repository; methods take the session they run in."""
+
+    # ── user lookups / writes (pre-tenant) ──────────────────────────────────────
+    async def find_user_by_email(
+        self,
+        session: AsyncSession,
+        email: str,
+    ) -> UserRecord | None:
+        """Return the user matching ``email`` (case-insensitive), or ``None``.
+
+        Matches the ``lower(email)`` unique index; ``email`` is expected already
+        normalized to lowercase by the service.
+        """
+        row = (
+            await session.execute(
+                text(
+                    "SELECT id, email, name FROM users WHERE lower(email) = :email"
+                ).bindparams(email=email),
+            )
+        ).first()
+        if row is None:
+            return None
+        return UserRecord(id=row.id, email=row.email, name=row.name)
+
+    async def create_user(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        email: str,
+    ) -> UserRecord:
+        """Insert a new user and return it. Caller commits the transaction."""
+        row = (
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO users (id, email)
+                    VALUES (:id, :email)
+                    RETURNING id, email, name
+                    """
+                ).bindparams(id=user_id, email=email),
+            )
+        ).one()
+        return UserRecord(id=row.id, email=row.email, name=row.name)
+
+    async def find_primary_membership(
+        self,
+        session: AsyncSession,
+        user_id: str,
+    ) -> MembershipRecord | None:
+        """Return the user's primary active workspace membership, or ``None``.
+
+        Primary = admin membership if the user has one, otherwise the earliest
+        joined; ties are broken by ``workspace_id`` so the choice is stable across
+        sign-ins. Soft-deleted workspaces are excluded.
+        """
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT m.workspace_id,
+                           m.role,
+                           w.name AS workspace_name,
+                           w.slug AS workspace_slug
+                    FROM workspace_members m
+                    JOIN workspaces w ON w.id = m.workspace_id
+                    WHERE m.user_id = :user_id
+                      AND m.is_active = TRUE
+                      AND w.deleted_at IS NULL
+                    ORDER BY (m.role = 'admin') DESC, m.joined_at ASC, m.workspace_id ASC
+                    LIMIT 1
+                    """
+                ).bindparams(user_id=user_id),
+            )
+        ).first()
+        if row is None:
+            return None
+        return MembershipRecord(
+            workspace_id=row.workspace_id,
+            role=row.role,
+            workspace_name=row.workspace_name,
+            workspace_slug=row.workspace_slug,
+        )
+
+    async def touch_last_login(self, session: AsyncSession, user_id: str) -> None:
+        """Stamp ``last_login_at`` (and ``updated_at``) to now. Caller commits."""
+        await session.execute(
+            text(
+                "UPDATE users SET last_login_at = now(), updated_at = now() "
+                "WHERE id = :id"
+            ).bindparams(id=user_id),
+        )
 
     async def resolve_api_key_by_hash(
         self,
@@ -203,43 +304,3 @@ class AuthRepository:
                 """
             ).bindparams(family_id=family_id),
         )
-
-    async def find_active_membership(
-        self,
-        session: AsyncSession,
-        user_id: str,
-    ) -> Membership | None:
-        """Return the user's active membership for access-token claims.
-
-        Prefers an ``admin`` workspace, then the earliest-joined one. Returns
-        ``None`` for a user who has not completed onboarding yet (no workspace).
-
-        ``workspace_members`` has FORCE row-level security, so this pre-tenant
-        read sets the ``app.current_user_id`` GUC (transaction-local) first: the
-        ``members_self_select`` policy (migration 0009) lets a user read only
-        their own membership rows. This makes the lookup correct whether or not
-        the backend's connection bypasses RLS — it does not depend on a
-        privileged role (BACKEND_BEST_PRACTICES.md §8).
-        """
-        await session.execute(
-            text(
-                "SELECT set_config('app.current_user_id', :user_id, true)"
-            ).bindparams(user_id=user_id),
-        )
-        row = (
-            await session.execute(
-                text(
-                    """
-                    SELECT workspace_id, role
-                    FROM workspace_members
-                    WHERE user_id = :user_id
-                      AND is_active = TRUE
-                    ORDER BY (role = 'admin') DESC, joined_at ASC
-                    LIMIT 1
-                    """
-                ).bindparams(user_id=user_id),
-            )
-        ).first()
-        if row is None:
-            return None
-        return Membership(workspace_id=row.workspace_id, role=str(row.role))

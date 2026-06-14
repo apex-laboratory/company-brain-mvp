@@ -1,19 +1,30 @@
 """Auth router.
 
-Mounted under ``/api/v1/auth`` by ``main.py``. Owns the auth surface; this
-module currently implements refresh-token rotation and logout (KAN-50). The
-remaining Auth/Onboarding routes are added by the sibling endpoint tickets.
+Mounted under ``/api/v1/auth`` by ``main.py``. Owns the passwordless email
+endpoints (KAN-49) and refresh-token rotation + logout (KAN-50); the remaining
+Auth/Onboarding routes (OAuth) are added by sibling endpoint tickets.
+
+Every route is rate limited to ``AUTH_LIMIT`` (10/min) keyed on client IP — the
+limiter's default ``key_func`` is ``get_remote_address`` — to blunt email
+enumeration and token-minting/brute-force abuse.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, Request, Response
+from fastapi.responses import JSONResponse
 
 from app.config.database import get_session
 from app.config.settings import settings
-from app.modules.auth.schemas import LogoutRequest, RefreshRequest, TokenPairOut
+from app.modules.auth.schemas import (
+    EmailSigninRequest,
+    EmailSignupRequest,
+    LogoutRequest,
+    RefreshRequest,
+    TokenPairOut,
+)
 from app.modules.auth.service import AuthService
 from app.shared.errors.app_error import UnauthorizedError
-from app.shared.http.respond import error_response, no_content, ok
+from app.shared.http.respond import created, error_response, no_content, ok
 from app.shared.logger import get_logger
 from app.shared.middleware.rate_limit import AUTH_LIMIT, limiter
 
@@ -70,6 +81,36 @@ def _refresh_failed(request: Request, exc: UnauthorizedError) -> Response:
     return response
 
 
+@router.post("/signup", status_code=201)
+@limiter.limit(AUTH_LIMIT)
+async def signup(
+    request: Request,
+    body: EmailSignupRequest,
+    service: AuthService = Depends(get_auth_service),
+) -> JSONResponse:
+    session = await service.signup(
+        body,
+        user_agent=request.headers.get("user-agent"),
+        ip=_client_ip(request),
+    )
+    return created(request, session.model_dump(by_alias=True))
+
+
+@router.post("/signin")
+@limiter.limit(AUTH_LIMIT)
+async def signin(
+    request: Request,
+    body: EmailSigninRequest,
+    service: AuthService = Depends(get_auth_service),
+) -> JSONResponse:
+    session = await service.signin(
+        body,
+        user_agent=request.headers.get("user-agent"),
+        ip=_client_ip(request),
+    )
+    return ok(request, session.model_dump(by_alias=True))
+
+
 @router.post("/refresh")
 @limiter.limit(AUTH_LIMIT)
 async def refresh(
@@ -93,7 +134,7 @@ async def refresh(
                 session,
                 raw_token=raw_token,
                 user_agent=request.headers.get("user-agent"),
-                ip_address=_client_ip(request),
+                ip=_client_ip(request),
             )
         except UnauthorizedError as exc:
             return _refresh_failed(request, exc)

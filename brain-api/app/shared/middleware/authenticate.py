@@ -35,9 +35,13 @@ _repository = AuthRepository()
 
 @dataclass(frozen=True)
 class AuthContext:
+    # ``workspace_id``/``role`` are ``None`` for a freshly signed-up user who has
+    # no workspace yet (their JWT carries null claims). API-key contexts always
+    # carry both. Consumers must treat the no-workspace case explicitly:
+    # ``require_role`` denies it (rank 0) and tenant-scoped queries must not run.
     user_id: str
-    workspace_id: str
-    role: str
+    workspace_id: str | None
+    role: str | None
     scopes: list[str] = field(default_factory=list)
     kind: Literal["jwt", "api_key"] = "jwt"
 
