@@ -82,7 +82,7 @@ class _FakeAuthRepository(AuthRepository):
     async def touch_last_login(self, session: Any, user_id: str) -> None:
         self.last_login_user_id = user_id
 
-    async def create_refresh_token(
+    async def insert_refresh_token(
         self,
         session: Any,
         *,
@@ -92,7 +92,7 @@ class _FakeAuthRepository(AuthRepository):
         expires_at: Any,
         user_agent: str | None,
         ip_address: str | None,
-    ) -> None:
+    ) -> str:
         self.refresh_tokens.append(
             {
                 "user_id": user_id,
@@ -103,6 +103,7 @@ class _FakeAuthRepository(AuthRepository):
                 "ip_address": ip_address,
             }
         )
+        return f"rt-uuid-{len(self.refresh_tokens)}"
 
 
 @pytest.fixture(autouse=True)

@@ -6,30 +6,15 @@ never leaking stack traces, SQL, or provider payloads to the client.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.shared.errors.app_error import AppError
+from app.shared.http.respond import error_response
 from app.shared.logger import get_logger
 
 log = get_logger()
-
-
-def _request_id(request: Request) -> str | None:
-    rid = getattr(request.state, "request_id", None)
-    return rid if isinstance(rid, str) else None
-
-
-def _error_body(
-    code: str, message: str, request_id: str | None, details: Any = None
-) -> dict[str, Any]:
-    return {
-        "error": {"code": code, "message": message, "details": details},
-        "meta": {"requestId": request_id},
-    }
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -41,11 +26,12 @@ def register_exception_handlers(app: FastAPI) -> None:
             {"path": ".".join(str(p) for p in e["loc"]), "message": e["msg"]}
             for e in exc.errors()
         ]
-        return JSONResponse(
-            status_code=422,
-            content=_error_body(
-                "validation_error", "Request is invalid.", _request_id(request), details
-            ),
+        return error_response(
+            request,
+            status=422,
+            code="validation_error",
+            message="Request is invalid.",
+            details=details,
         )
 
     @app.exception_handler(AppError)
@@ -59,16 +45,21 @@ def register_exception_handlers(app: FastAPI) -> None:
             retry = exc.details.get("retryAfterSeconds")
             if isinstance(retry, int):
                 headers["Retry-After"] = str(retry)
-        return JSONResponse(
-            status_code=exc.status,
-            content=_error_body(exc.code, exc.message, _request_id(request), exc.details),
+        return error_response(
+            request,
+            status=exc.status,
+            code=exc.code,
+            message=exc.message,
+            details=exc.details,
             headers=headers,
         )
 
     @app.exception_handler(Exception)
     async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
         log.exception("unhandled_error")
-        return JSONResponse(
-            status_code=500,
-            content=_error_body("internal_error", "Internal Server Error", _request_id(request)),
+        return error_response(
+            request,
+            status=500,
+            code="internal_error",
+            message="Internal Server Error",
         )

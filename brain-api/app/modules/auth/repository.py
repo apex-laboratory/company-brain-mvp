@@ -26,6 +26,17 @@ class ResolvedApiKey:
 
 
 @dataclass(frozen=True)
+class RefreshTokenRow:
+    """The columns of ``refresh_tokens`` the rotation flow reasons about."""
+
+    id: str
+    user_id: str
+    family_id: str
+    expires_at: datetime
+    revoked_at: datetime | None
+
+
+@dataclass(frozen=True)
 class UserRecord:
     """A row from the global ``users`` table, projected for auth responses."""
 
@@ -137,42 +148,6 @@ class AuthRepository:
             ).bindparams(id=user_id),
         )
 
-    # ── refresh tokens ──────────────────────────────────────────────────────────
-    async def create_refresh_token(
-        self,
-        session: AsyncSession,
-        *,
-        user_id: str,
-        token_hash: bytes,
-        family_id: str,
-        expires_at: datetime,
-        user_agent: str | None,
-        ip_address: str | None,
-    ) -> None:
-        """Persist a refresh token by its SHA-256 hash. Caller commits.
-
-        The raw token is never stored — only ``token_hash``. ``family_id`` groups
-        a rotation chain so a replayed (revoked) token can revoke the whole family.
-        ``id`` is assigned by the DB (gen_random_uuid()).
-        """
-        await session.execute(
-            text(
-                """
-                INSERT INTO refresh_tokens
-                    (user_id, token_hash, family_id, expires_at, user_agent, ip_address)
-                VALUES
-                    (:user_id, :token_hash, :family_id, :expires_at, :user_agent, :ip_address)
-                """
-            ).bindparams(
-                user_id=user_id,
-                token_hash=token_hash,
-                family_id=family_id,
-                expires_at=expires_at,
-                user_agent=user_agent,
-                ip_address=ip_address,
-            ),
-        )
-
     async def resolve_api_key_by_hash(
         self,
         session: AsyncSession,
@@ -214,4 +189,118 @@ class AuthRepository:
             workspace_id=row.workspace_id,
             created_by=row.created_by,
             scopes=list(row.scopes or []),
+        )
+
+    # ── refresh-token rotation (pre-tenant; refresh_tokens is a global table) ──
+    async def find_by_token_hash(
+        self,
+        session: AsyncSession,
+        token_hash: bytes,
+        *,
+        for_update: bool = False,
+    ) -> RefreshTokenRow | None:
+        """Look up a refresh token by its sha256 hash.
+
+        The match is a parameterized ``token_hash = :h`` comparison in Postgres,
+        so it is constant-time at the column level — the raw token is never
+        compared in Python.
+
+        ``for_update=True`` takes a row lock for the duration of the caller's
+        transaction so concurrent rotations of the same token serialize: the
+        first wins, the rest observe it revoked (reuse) instead of racing into a
+        forked family with two live tokens.
+        """
+        sql = """
+            SELECT id, user_id, family_id, expires_at, revoked_at
+            FROM refresh_tokens
+            WHERE token_hash = :token_hash
+        """
+        if for_update:
+            sql += " FOR UPDATE"
+        row = (
+            await session.execute(
+                text(sql).bindparams(token_hash=token_hash),
+            )
+        ).first()
+        if row is None:
+            return None
+        return RefreshTokenRow(
+            id=str(row.id),
+            user_id=row.user_id,
+            family_id=row.family_id,
+            expires_at=row.expires_at,
+            revoked_at=row.revoked_at,
+        )
+
+    async def insert_refresh_token(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: str,
+        token_hash: bytes,
+        family_id: str,
+        expires_at: datetime,
+        user_agent: str | None,
+        ip_address: str | None,
+    ) -> str:
+        """Persist a new refresh-token row; the DB assigns the UUID id."""
+        row = (
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO refresh_tokens
+                        (user_id, token_hash, family_id, expires_at, user_agent, ip_address)
+                    VALUES
+                        (:user_id, :token_hash, :family_id, :expires_at,
+                         :user_agent, CAST(:ip_address AS inet))
+                    RETURNING id
+                    """
+                ).bindparams(
+                    user_id=user_id,
+                    token_hash=token_hash,
+                    family_id=family_id,
+                    expires_at=expires_at,
+                    user_agent=user_agent,
+                    ip_address=ip_address,
+                ),
+            )
+        ).first()
+        assert row is not None  # RETURNING always yields a row on INSERT
+        return str(row.id)
+
+    async def revoke_token(
+        self,
+        session: AsyncSession,
+        *,
+        token_id: str,
+        replaced_by: str | None = None,
+    ) -> None:
+        """Revoke a single token by id (idempotent — only affects live rows).
+
+        ``replaced_by`` links the rotation chain on a successful refresh; it is
+        left ``NULL`` for logout.
+        """
+        await session.execute(
+            text(
+                """
+                UPDATE refresh_tokens
+                SET revoked_at = now(),
+                    replaced_by = CAST(:replaced_by AS uuid)
+                WHERE id = CAST(:token_id AS uuid)
+                  AND revoked_at IS NULL
+                """
+            ).bindparams(token_id=token_id, replaced_by=replaced_by),
+        )
+
+    async def revoke_family(self, session: AsyncSession, family_id: str) -> None:
+        """Revoke every still-live token in a rotation family (theft response)."""
+        await session.execute(
+            text(
+                """
+                UPDATE refresh_tokens
+                SET revoked_at = now()
+                WHERE family_id = :family_id
+                  AND revoked_at IS NULL
+                """
+            ).bindparams(family_id=family_id),
         )

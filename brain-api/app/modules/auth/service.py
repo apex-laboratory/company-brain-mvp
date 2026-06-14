@@ -1,30 +1,25 @@
 """Auth business logic (BACKEND_BEST_PRACTICES.md §2 layering, §7 tokens).
 
-The service orchestrates the repository and owns the token-issuance logic. It is
+The service orchestrates the repository and owns token issuance. It is
 framework-agnostic (no ``Request``/``Response``): the router passes the request
 metadata it needs (``user_agent``, ``ip``) as plain values.
 
-Implements KAN-49: passwordless email ``signup`` and ``signin``. Both create a
-user session — an access token (short-lived JWT) plus a refresh token (stored
-hashed) — and compute the ``next_step`` the frontend redirects to.
+Covers passwordless email ``signup``/``signin`` (KAN-49) and refresh-token
+rotation + ``logout`` (KAN-50). All four go through one token-minting path
+(:meth:`_persist_session_tokens`), so access-token claims and refresh-token
+storage stay consistent across login and rotation.
 """
 from __future__ import annotations
 
-import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
-from jose import jwt
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.config.settings import settings
-from app.modules.auth.repository import (
-    AuthRepository,
-    MembershipRecord,
-    UserRecord,
-)
+from app.modules.auth.repository import AuthRepository, MembershipRecord, UserRecord
 from app.modules.auth.schemas import (
     AuthSessionOut,
     EmailSigninRequest,
@@ -32,15 +27,28 @@ from app.modules.auth.schemas import (
     UserOut,
     WorkspaceOut,
 )
-from app.shared.errors.app_error import ConflictError, NotFoundError
+from app.modules.auth.tokens import generate_refresh_token, mint_access_token
+from app.shared.errors.app_error import ConflictError, NotFoundError, UnauthorizedError
 from app.shared.helpers.crypto import sha256_hash
 from app.shared.helpers.ids import generate_id
+from app.shared.logger import get_logger
+
+log = get_logger()
+
+
+@dataclass(frozen=True)
+class IssuedTokens:
+    """A freshly minted access + refresh token pair (raw values)."""
+
+    access_token: str
+    refresh_token: str
 
 
 class AuthService:
     def __init__(self, repository: AuthRepository | None = None) -> None:
         self._repository = repository or AuthRepository()
 
+    # ── passwordless email auth (KAN-49) ──────────────────────────────────────
     async def signup(
         self,
         request: EmailSignupRequest,
@@ -156,6 +164,7 @@ class AuthService:
             next_step="dashboard" if membership is not None else "onboarding",
         )
 
+    # ── shared issuance ───────────────────────────────────────────────────────
     async def issue_token_pair(
         self,
         session: AsyncSession,
@@ -166,50 +175,126 @@ class AuthService:
         user_agent: str | None,
         ip: str | None,
     ) -> tuple[str, str]:
-        """Mint an access + refresh token pair, persisting the refresh hash.
+        """Start a brand-new session in a fresh rotation family. Caller commits.
 
-        The access token is a stateless HS256 JWT (15 min). The refresh token is
-        a 48-byte URL-safe random string returned to the caller but stored only as
-        a SHA-256 hash, so a DB read can never recover a usable credential.
+        Used by signup/signin (and OAuth/workspace-creation in sibling tickets).
+        Refresh rotation reuses the same family via :meth:`refresh`.
         """
-        now = datetime.now(UTC)
-        access_token = self._encode_access_token(user_id, workspace_id, role, now)
-
-        raw_refresh_token = secrets.token_urlsafe(48)
-        await self._repository.create_refresh_token(
+        family_id = generate_id("refresh_token")
+        access_token, raw_refresh, _ = await self._persist_session_tokens(
             session,
             user_id=user_id,
-            token_hash=sha256_hash(raw_refresh_token),
-            family_id=generate_id("refresh_token"),
-            expires_at=now + timedelta(seconds=settings.refresh_token_ttl_seconds),
+            workspace_id=workspace_id,
+            role=role,
+            family_id=family_id,
             user_agent=user_agent,
-            ip_address=ip,
+            ip=ip,
         )
-        return access_token, raw_refresh_token
+        return access_token, raw_refresh
 
-    @staticmethod
-    def _encode_access_token(
+    # ── refresh rotation (KAN-50) ──────────────────────────────────────────────
+    async def refresh(
+        self,
+        session: AsyncSession,
+        *,
+        raw_token: str,
+        user_agent: str | None = None,
+        ip: str | None = None,
+    ) -> IssuedTokens:
+        """Rotate a refresh token, returning a new pair.
+
+        Enforces, in order: existence, family reuse detection, expiry. On
+        success the presented token is revoked and linked to its replacement.
+        Every failure surfaces as a generic 401 so the response never reveals
+        which check failed.
+        """
+        # Lock the row so concurrent rotations of the same token serialize.
+        row = await self._repository.find_by_token_hash(
+            session, sha256_hash(raw_token), for_update=True
+        )
+
+        if row is None:
+            raise UnauthorizedError("Invalid refresh token")
+
+        if row.revoked_at is not None:
+            # A revoked token was replayed — treat the whole family as compromised.
+            await self.revoke_family(session, row.family_id)
+            await session.commit()
+            log.warning(
+                "refresh_token_reuse_detected",
+                user_id=row.user_id,
+                family_id=row.family_id,
+            )
+            raise UnauthorizedError(
+                "Session invalidated due to token reuse. Please sign in again."
+            )
+
+        if row.expires_at < datetime.now(UTC):
+            raise UnauthorizedError("Refresh token expired")
+
+        # Claims reflect the user's *current* membership, so role changes take
+        # effect on the next refresh. None before onboarding.
+        membership = await self._repository.find_primary_membership(session, row.user_id)
+        access_token, raw_refresh, new_token_id = await self._persist_session_tokens(
+            session,
+            user_id=row.user_id,
+            workspace_id=membership.workspace_id if membership else None,
+            role=membership.role if membership else None,
+            family_id=row.family_id,
+            user_agent=user_agent,
+            ip=ip,
+        )
+        await self._repository.revoke_token(
+            session, token_id=row.id, replaced_by=new_token_id
+        )
+        await session.commit()
+        return IssuedTokens(access_token=access_token, refresh_token=raw_refresh)
+
+    # ── logout (KAN-50) ────────────────────────────────────────────────────────
+    async def logout(self, session: AsyncSession, *, raw_token: str) -> None:
+        """Revoke the presented refresh token. Idempotent: an unknown or
+        already-revoked token silently succeeds (no token-probing oracle)."""
+        row = await self._repository.find_by_token_hash(session, sha256_hash(raw_token))
+        if row is not None and row.revoked_at is None:
+            await self._repository.revoke_token(session, token_id=row.id)
+        await session.commit()
+
+    async def revoke_family(self, session: AsyncSession, family_id: str) -> None:
+        """Revoke every live token in a rotation family."""
+        await self._repository.revoke_family(session, family_id)
+
+    # ── internals ─────────────────────────────────────────────────────────────
+    async def _persist_session_tokens(
+        self,
+        session: AsyncSession,
+        *,
         user_id: str,
         workspace_id: str | None,
         role: str | None,
-        now: datetime,
-    ) -> str:
-        """Sign the dashboard access token (claims per BACKEND_BEST_PRACTICES §7).
+        family_id: str,
+        user_agent: str | None,
+        ip: str | None,
+    ) -> tuple[str, str, str]:
+        """Mint an access token and persist a new refresh-token row (hashed).
 
-        ``workspace_id``/``role`` are ``None`` for a freshly signed-up user who has
-        no workspace yet. The claims are always emitted (as JSON null), and
-        ``AuthContext`` models both as optional, so the middleware accepts the
-        token and simply leaves tenant scoping unset until the user joins or
-        creates a workspace.
+        Returns ``(access_token, raw_refresh_token, refresh_token_id)``. The id
+        lets the rotation caller link the old row's ``replaced_by``. Does not
+        commit or revoke anything.
         """
-        expires_at = now + timedelta(seconds=settings.access_token_ttl_seconds)
-        payload: dict[str, Any] = {
-            "sub": user_id,
-            "workspace_id": workspace_id,
-            "role": role,
-            "scopes": [],
-            "iat": int(now.timestamp()),
-            "exp": int(expires_at.timestamp()),
-        }
-        token: str = jwt.encode(payload, settings.jwt_access_secret, algorithm="HS256")
-        return token
+        access_token = mint_access_token(
+            user_id=user_id, workspace_id=workspace_id, role=role
+        )
+        raw_refresh = generate_refresh_token()
+        expires_at = datetime.now(UTC) + timedelta(
+            seconds=settings.refresh_token_ttl_seconds
+        )
+        token_id = await self._repository.insert_refresh_token(
+            session,
+            user_id=user_id,
+            token_hash=sha256_hash(raw_refresh),
+            family_id=family_id,
+            expires_at=expires_at,
+            user_agent=user_agent,
+            ip_address=ip,
+        )
+        return access_token, raw_refresh, token_id
