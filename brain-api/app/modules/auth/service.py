@@ -13,22 +13,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlencode
 
+import httpx
+from jose import JWTError, jwt
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.config.settings import settings
+from app.integrations import OAuthProfile
+from app.integrations import google_oauth, github_oauth
 from app.modules.auth.repository import AuthRepository, MembershipRecord, UserRecord
 from app.modules.auth.schemas import (
     AuthSessionOut,
     EmailSigninRequest,
     EmailSignupRequest,
+    OAuthStartOut,
     UserOut,
     WorkspaceOut,
 )
 from app.modules.auth.tokens import generate_refresh_token, mint_access_token
-from app.shared.errors.app_error import ConflictError, NotFoundError, UnauthorizedError
+from app.shared.errors.app_error import AppError, ConflictError, NotFoundError, UnauthorizedError
 from app.shared.helpers.crypto import sha256_hash
 from app.shared.helpers.ids import generate_id
 from app.shared.logger import get_logger
@@ -263,6 +269,161 @@ class AuthService:
         """Revoke every live token in a rotation family."""
         await self._repository.revoke_family(session, family_id)
 
+    # ── OAuth start (KAN-40) ──────────────────────────────────────────────────
+    async def start_oauth(
+        self,
+        *,
+        provider: str,
+        mode: str,
+        user_id: str | None,
+        workspace_id: str | None,
+    ) -> OAuthStartOut:
+        """Generate a signed state, persist it, and return the provider's auth URL.
+
+        SAML is not yet supported and raises 501. ``user_id``/``workspace_id``
+        come from the caller's current JWT if they are already authenticated
+        (account-linking flow); both are ``None`` for sign-up/sign-in flows.
+        """
+        if provider == "saml":
+            raise AppError(501, "not_implemented", "SAML is not yet supported.")
+
+        redirect_uri = (
+            f"{settings.oauth_redirect_base_url}"
+            f"/api/v1/auth/oauth/{provider}/callback"
+        )
+
+        now = datetime.now(UTC)
+        state_payload: dict[str, object] = {
+            "user_id": user_id,
+            "workspace_id": workspace_id,
+            "provider": provider,
+            "redirect_uri": redirect_uri,
+            "mode": mode,
+            "exp": int(
+                (now + timedelta(seconds=settings.oauth_state_ttl_seconds)).timestamp()
+            ),
+        }
+        state_raw: str = jwt.encode(
+            state_payload, settings.jwt_access_secret, algorithm="HS256"
+        )
+        state_hash = sha256_hash(state_raw)
+        expires_at = now + timedelta(seconds=settings.oauth_state_ttl_seconds)
+
+        async with get_session() as session:
+            await self._repository.create_oauth_state(
+                session,
+                state_hash=state_hash,
+                provider=provider,
+                redirect_uri=redirect_uri,
+                expires_at=expires_at,
+                user_id=user_id,
+                workspace_id=workspace_id,
+            )
+            await session.commit()
+
+        auth_url = _build_auth_url(provider, state_raw, redirect_uri)
+        return OAuthStartOut(authorization_url=auth_url, state=state_raw)
+
+    # ── OAuth callback (KAN-40) ───────────────────────────────────────────────
+    async def handle_oauth_callback(
+        self,
+        *,
+        provider: str,
+        code: str,
+        state: str,
+        current_user_id: str | None,
+        user_agent: str | None,
+        ip: str | None,
+    ) -> AuthSessionOut:
+        """Verify state, exchange code, upsert user, issue tokens.
+
+        All six state-validation checks must pass; any failure raises a generic
+        401 so callers cannot enumerate which check failed.
+        """
+        # Checks 1 & 2: JWT signature valid + exp not in the past.
+        try:
+            state_claims: dict[str, object] = jwt.decode(
+                state,
+                settings.jwt_access_secret,
+                algorithms=["HS256"],
+                options={"require_exp": True},
+            )
+        except JWTError:
+            raise UnauthorizedError("Invalid OAuth state")
+
+        state_hash = sha256_hash(state)
+
+        async with get_session() as session:
+            # Check 3: row exists by sha256(state).
+            row = await self._repository.find_oauth_state(
+                session, state_hash, for_update=True
+            )
+            if row is None:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Check 4: not already consumed (single-use).
+            if row.consumed_at is not None:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Check 5: provider in state matches :provider path param.
+            if state_claims.get("provider") != provider:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Check 6: redirect_uri in state matches the stored value.
+            if state_claims.get("redirect_uri") != row.redirect_uri:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Check 7: if user_id present in state, it must match the
+            # currently authenticated user (if any).
+            state_user_id = state_claims.get("user_id")
+            if (
+                state_user_id is not None
+                and current_user_id is not None
+                and state_user_id != current_user_id
+            ):
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Mark consumed before the provider round-trip so a concurrent
+            # replay cannot race through the same state.
+            await self._repository.mark_oauth_state_consumed(session, row.id)
+
+            # Exchange code + fetch user profile from the provider.
+            try:
+                profile = await _fetch_profile(provider, code, row.redirect_uri)
+            except httpx.HTTPError as exc:
+                log.warning("oauth_provider_error", provider=provider, error=str(exc))
+                raise AppError(502, "provider_error", "OAuth provider request failed.")
+
+            # Upsert the user row (no duplicate users for the same email).
+            new_user_id = generate_id("user")
+            user = await self._repository.upsert_oauth_user(
+                session,
+                user_id=new_user_id,
+                email=profile.email.lower(),
+                name=profile.name,
+            )
+
+            membership = await self._repository.find_primary_membership(
+                session, user.id
+            )
+            access_token, refresh_token = await self.issue_token_pair(
+                session,
+                user_id=user.id,
+                workspace_id=membership.workspace_id if membership else None,
+                role=membership.role if membership else None,
+                user_agent=user_agent,
+                ip=ip,
+            )
+            await self._repository.touch_last_login(session, user.id)
+            await session.commit()
+
+        return self._session_response(
+            user,
+            membership=membership,
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
+
     # ── internals ─────────────────────────────────────────────────────────────
     async def _persist_session_tokens(
         self,
@@ -298,3 +459,49 @@ class AuthService:
             ip_address=ip,
         )
         return access_token, raw_refresh, token_id
+
+
+# ── module-level helpers ───────────────────────────────────────────────────────
+
+def _build_auth_url(provider: str, state_raw: str, redirect_uri: str) -> str:
+    """Construct the provider's authorization URL with required query params."""
+    if provider == "google":
+        params = {
+            "client_id": settings.google_client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state_raw,
+            "access_type": "online",
+        }
+        return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+    # github
+    params = {
+        "client_id": settings.github_client_id,
+        "redirect_uri": redirect_uri,
+        "scope": "user:email",
+        "state": state_raw,
+    }
+    return f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+
+
+async def _fetch_profile(
+    provider: str, code: str, redirect_uri: str
+) -> OAuthProfile:
+    """Dispatch code exchange + profile fetch to the correct provider module."""
+    if provider == "google":
+        token = await google_oauth.exchange_code(
+            code=code,
+            redirect_uri=redirect_uri,
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+        )
+        return await google_oauth.fetch_profile(token)
+    # github
+    token = await github_oauth.exchange_code(
+        code=code,
+        redirect_uri=redirect_uri,
+        client_id=settings.github_client_id,
+        client_secret=settings.github_client_secret,
+    )
+    return await github_oauth.fetch_profile(token)

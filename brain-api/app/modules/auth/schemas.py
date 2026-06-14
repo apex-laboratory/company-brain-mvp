@@ -73,3 +73,8 @@ class AuthSessionOut(_Response):
 class TokenPairOut(_Response):
     access_token: str
     refresh_token: str
+
+
+class OAuthStartOut(_Response):
+    authorization_url: str
+    state: str

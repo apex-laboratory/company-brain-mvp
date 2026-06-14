@@ -18,6 +18,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @dataclass(frozen=True)
+class OAuthStateRow:
+    """Columns of ``oauth_states`` needed by the callback validation flow."""
+
+    id: str
+    user_id: str | None
+    workspace_id: str | None
+    provider: str
+    redirect_uri: str
+    expires_at: datetime
+    consumed_at: datetime | None
+
+
+@dataclass(frozen=True)
 class ResolvedApiKey:
     id: str
     workspace_id: str
@@ -304,3 +317,120 @@ class AuthRepository:
                 """
             ).bindparams(family_id=family_id),
         )
+
+    # ── oauth_states (pre-tenant; looked up before workspace context exists) ───
+    async def create_oauth_state(
+        self,
+        session: AsyncSession,
+        *,
+        state_hash: bytes,
+        provider: str,
+        redirect_uri: str,
+        expires_at: datetime,
+        user_id: str | None,
+        workspace_id: str | None,
+    ) -> None:
+        """Persist a new oauth_states row. Caller commits."""
+        await session.execute(
+            text(
+                """
+                INSERT INTO oauth_states
+                    (user_id, workspace_id, provider, redirect_uri,
+                     state_hash, expires_at)
+                VALUES
+                    (:user_id, :workspace_id, :provider, :redirect_uri,
+                     :state_hash, :expires_at)
+                """
+            ).bindparams(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                provider=provider,
+                redirect_uri=redirect_uri,
+                state_hash=state_hash,
+                expires_at=expires_at,
+            ),
+        )
+
+    async def find_oauth_state(
+        self,
+        session: AsyncSession,
+        state_hash: bytes,
+        *,
+        for_update: bool = False,
+    ) -> OAuthStateRow | None:
+        """Look up an oauth_states row by its SHA-256 hash.
+
+        ``for_update=True`` serialises concurrent callback requests for the same
+        state so only the first can set ``consumed_at`` (single-use enforcement).
+        """
+        sql = """
+            SELECT id, user_id, workspace_id, provider, redirect_uri,
+                   expires_at, consumed_at
+            FROM oauth_states
+            WHERE state_hash = :state_hash
+        """
+        if for_update:
+            sql += " FOR UPDATE"
+        row = (
+            await session.execute(
+                text(sql).bindparams(state_hash=state_hash),
+            )
+        ).first()
+        if row is None:
+            return None
+        return OAuthStateRow(
+            id=str(row.id),
+            user_id=row.user_id,
+            workspace_id=row.workspace_id,
+            provider=row.provider,
+            redirect_uri=row.redirect_uri,
+            expires_at=row.expires_at,
+            consumed_at=row.consumed_at,
+        )
+
+    async def mark_oauth_state_consumed(
+        self,
+        session: AsyncSession,
+        state_id: str,
+    ) -> None:
+        """Stamp ``consumed_at`` to enforce single-use. Caller commits."""
+        await session.execute(
+            text(
+                """
+                UPDATE oauth_states
+                SET consumed_at = now()
+                WHERE id = CAST(:id AS uuid)
+                  AND consumed_at IS NULL
+                """
+            ).bindparams(id=state_id),
+        )
+
+    async def upsert_oauth_user(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: str,
+        email: str,
+        name: str | None,
+    ) -> UserRecord:
+        """Find or create a user by email, back-filling name only when missing.
+
+        Uses ``ON CONFLICT ((lower(email)))`` against the functional unique index
+        created in migration 0003. If the email already exists the row is
+        returned as-is, with ``name`` set only when the current value is NULL.
+        """
+        row = (
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO users (id, email, name)
+                    VALUES (:id, :email, :name)
+                    ON CONFLICT ((lower(email))) DO UPDATE
+                        SET name       = COALESCE(users.name, EXCLUDED.name),
+                            updated_at = now()
+                    RETURNING id, email, name
+                    """
+                ).bindparams(id=user_id, email=email, name=name),
+            )
+        ).one()
+        return UserRecord(id=row.id, email=row.email, name=row.name)
