@@ -38,9 +38,10 @@ def user_key(request: Request) -> str:
 
 
 def workspace_key(request: Request) -> str:
-    """Key by workspace, falling back to IP before auth resolves."""
+    """Key by workspace, falling back to IP before auth resolves or when the
+    caller has no workspace yet (pre-onboarding tokens have workspace_id=None)."""
     auth = getattr(request.state, "auth", None)
-    if auth is not None:
+    if auth is not None and auth.workspace_id is not None:
         return f"workspace:{auth.workspace_id}"
     return get_remote_address(request)
 

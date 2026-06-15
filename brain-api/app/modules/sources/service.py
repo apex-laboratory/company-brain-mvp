@@ -38,6 +38,22 @@ def _callback_uri(provider: str) -> str:
     return f"{settings.oauth_redirect_base_url}/api/v1/sources/{provider}/callback"
 
 
+def _require_workspace(auth: AuthContext) -> tuple[str, str]:
+    """Narrow auth to a workspace-scoped context, asserting both fields are set.
+
+    All connector routes are protected by ``require_role("admin")``, which rejects
+    any token whose role is None (rank 0) before the service is reached. This
+    assertion makes that invariant explicit and satisfies the type checker so
+    ``run_in_tenant`` callers pass ``str``, not ``str | None``.
+    """
+    if auth.workspace_id is None or auth.role is None:
+        raise RuntimeError(
+            "BUG: connector service called without workspace context — "
+            "ensure require_role is declared on this route"
+        )
+    return auth.workspace_id, auth.role
+
+
 class SourcesService:
     def __init__(self, repository: SourcesRepository | None = None) -> None:
         self._repo = repository or SourcesRepository()
@@ -50,6 +66,7 @@ class SourcesService:
 
     # ── OAuth start ──────────────────────────────────────────────────────────────
     async def start_authorization(self, auth: AuthContext, provider: str) -> AuthorizeStartOut:
+        workspace_id, _ = _require_workspace(auth)
         self._require_known(provider)
         integration = get_integration(provider)
 
@@ -65,7 +82,7 @@ class SourcesService:
                 provider=provider,
                 redirect_uri=redirect_uri,
                 user_id=auth.user_id,
-                workspace_id=auth.workspace_id,
+                workspace_id=workspace_id,
                 expires_at=expires_at,
             )
 
@@ -125,14 +142,16 @@ class SourcesService:
 
     # ── connections ──────────────────────────────────────────────────────────────
     async def list_connections(self, auth: AuthContext) -> list[SourceConnectionOut]:
+        workspace_id, role = _require_workspace(auth)
         async with get_session() as session:
-            async with run_in_tenant(session, auth.workspace_id, auth.user_id, auth.role):
+            async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 rows = await self._repo.list_connections(session)
         return [SourceConnectionOut(**row) for row in rows]
 
     async def disconnect(self, auth: AuthContext, source_id: str) -> None:
+        workspace_id, role = _require_workspace(auth)
         async with get_session() as session:
-            async with run_in_tenant(session, auth.workspace_id, auth.user_id, auth.role):
+            async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 secrets_row = await self._repo.get_connection_secrets(session, source_id)
                 if secrets_row is None:
                     raise NotFoundError("Source connection")
@@ -148,8 +167,9 @@ class SourcesService:
     # ── channels ───────────────────────────────────────────────────────────────
     async def list_channels(self, auth: AuthContext, source_id: str) -> list[ChannelOut]:
         """Merge provider-discovered channels with persisted selection state."""
+        workspace_id, role = _require_workspace(auth)
         async with get_session() as session:
-            async with run_in_tenant(session, auth.workspace_id, auth.user_id, auth.role):
+            async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 secrets_row = await self._repo.get_connection_secrets(session, source_id)
                 if secrets_row is None:
                     raise NotFoundError("Source connection")
@@ -176,8 +196,9 @@ class SourcesService:
     async def select_channels(
         self, auth: AuthContext, source_id: str, req: ChannelSelectRequest
     ) -> list[ChannelOut]:
+        workspace_id, role = _require_workspace(auth)
         async with get_session() as session:
-            async with run_in_tenant(session, auth.workspace_id, auth.user_id, auth.role):
+            async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 provider = await self._repo.get_connection_provider(session, source_id)
                 if provider is None:
                     raise NotFoundError("Source connection")
@@ -185,7 +206,7 @@ class SourcesService:
                     await self._repo.upsert_channel(
                         session,
                         channel_id=generate_id("channel"),
-                        workspace_id=auth.workspace_id,
+                        workspace_id=workspace_id,
                         source_id=source_id,
                         provider=provider,
                         external_id=ch.external_id,
