@@ -147,18 +147,13 @@ class _FakeRepo(DashboardRepository):
 
 @pytest.fixture(autouse=True)
 def _stub_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace the DB session + tenant context with no-ops (no Postgres)."""
+    """Replace the tenant-scoped session with a no-op (no Postgres)."""
 
     @contextlib.asynccontextmanager
-    async def _fake_get_session() -> AsyncIterator[object]:
+    async def _fake_tenant_session(*_args: Any, **_kwargs: Any) -> AsyncIterator[object]:
         yield object()
 
-    @contextlib.asynccontextmanager
-    async def _fake_run_in_tenant(*_args: Any, **_kwargs: Any) -> AsyncIterator[object]:
-        yield object()
-
-    monkeypatch.setattr(service_module, "get_session", _fake_get_session)
-    monkeypatch.setattr(service_module, "run_in_tenant", _fake_run_in_tenant)
+    monkeypatch.setattr(service_module, "tenant_session", _fake_tenant_session)
 
 
 # ── authorization ────────────────────────────────────────────────────────────

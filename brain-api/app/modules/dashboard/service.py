@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.config.database import get_session
 from app.modules.dashboard.repository import (
     KPI_SPECS,
     ActivityRow,
@@ -31,9 +30,10 @@ from app.modules.dashboard.schemas import (
     SyncState,
     WorkspaceSummary,
 )
-from app.shared.errors.app_error import ForbiddenError, NotFoundError
+from app.shared.errors.app_error import NotFoundError
 from app.shared.middleware.authenticate import AuthContext
-from app.shared.middleware.with_tenant import run_in_tenant
+from app.shared.middleware.authorize import assert_workspace_member
+from app.shared.middleware.with_tenant import tenant_session
 
 # Overview list sizes (kept small — the home screen shows previews, not full lists).
 _RECENT_QUESTIONS = 3
@@ -59,31 +59,14 @@ class DashboardService:
     def __init__(self, repository: DashboardRepository | None = None) -> None:
         self._repository = repository or DashboardRepository()
 
-    # ── authorization ─────────────────────────────────────────────────────────
-    @staticmethod
-    def _require_member(auth: AuthContext, workspace_id: str) -> str:
-        """Return the caller's workspace, or 403 if they aren't a member of the
-        one in the path.
-
-        The JWT/API-key context carries the single workspace the caller belongs
-        to; a request for any other ``workspace_id`` is not theirs to read. We
-        also drive RLS from the auth context (never the path), so a mismatch
-        could not be served anyway — failing closed here makes that explicit.
-        """
-        if auth.workspace_id is None or workspace_id != auth.workspace_id:
-            raise ForbiddenError("You are not a member of this workspace.")
-        return auth.workspace_id
-
     # ── overview ──────────────────────────────────────────────────────────────
     async def get_overview(
         self, auth: AuthContext, workspace_id: str
     ) -> OverviewResponse:
-        workspace_id = self._require_member(auth, workspace_id)
+        workspace_id = assert_workspace_member(auth, workspace_id)
         repo = self._repository
 
-        async with get_session() as session, run_in_tenant(
-            session, workspace_id, auth.user_id, auth.role or "viewer"
-        ):
+        async with tenant_session(auth, workspace_id) as session:
             workspace = await repo.get_workspace(session, workspace_id)
             if workspace is None:
                 raise NotFoundError("Workspace")
@@ -130,11 +113,9 @@ class DashboardService:
     async def get_activity(
         self, auth: AuthContext, workspace_id: str, query: ActivityQuery
     ) -> ActivityPage:
-        workspace_id = self._require_member(auth, workspace_id)
+        workspace_id = assert_workspace_member(auth, workspace_id)
 
-        async with get_session() as session, run_in_tenant(
-            session, workspace_id, auth.user_id, auth.role or "viewer"
-        ):
+        async with tenant_session(auth, workspace_id) as session:
             # Fetch one extra row to know whether another page exists.
             rows = await self._repository.activity(
                 session,

@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     resend_api_key: str
     default_from_email: str = "Brainite <founders@brainites.com>"
 
+    # Base domain for per-workspace MCP/brain endpoints. The workspace settings
+    # endpoint advertises ``https://{slug}.{mcp_base_domain}/mcp`` to clients.
+    mcp_base_domain: str = "brainites.com"
+
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes
     refresh_token_ttl_seconds: int = 30 * 24 * 60 * 60  # 30 days
