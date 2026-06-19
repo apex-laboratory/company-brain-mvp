@@ -182,20 +182,41 @@ class DashboardRepository:
                     date_trunc('day', now()),
                     interval '1 day'
                 ) AS day
+            ),
+            -- One scan of t for every count: total + the two trend windows + the
+            -- cumulative base (everything created before the 7-day spark window).
+            agg AS (
+                SELECT
+                    count(*) AS total,
+                    count(*) FILTER (
+                        WHERE created_at >= now() - interval '7 days') AS recent,
+                    count(*) FILTER (
+                        WHERE created_at >= now() - interval '14 days'
+                          AND created_at <  now() - interval '7 days') AS prior,
+                    count(*) FILTER (
+                        WHERE created_at <  date_trunc('day', now())
+                                            - interval '6 days') AS base
+                FROM t
+            ),
+            -- One grouped scan of t for the per-day buckets inside the window.
+            daily AS (
+                SELECT date_trunc('day', created_at) AS day, count(*) AS c
+                FROM t
+                WHERE created_at >= date_trunc('day', now()) - interval '6 days'
+                GROUP BY 1
             )
             SELECT
-                (SELECT count(*) FROM t) AS total,
-                (SELECT count(*) FROM t
-                    WHERE created_at >= now() - interval '7 days') AS recent,
-                (SELECT count(*) FROM t
-                    WHERE created_at >= now() - interval '14 days'
-                      AND created_at <  now() - interval '7 days') AS prior,
-                (SELECT array_agg(c ORDER BY day) FROM (
+                a.total, a.recent, a.prior,
+                (SELECT array_agg(cum ORDER BY day) FROM (
+                    -- cumulative total at each day-end: the base plus the running
+                    -- sum of that day's new items, oldest first.
                     SELECT d.day,
-                           (SELECT count(*) FROM t
-                              WHERE t.created_at < d.day + interval '1 day') AS c
+                           a.base + sum(COALESCE(dd.c, 0))
+                               OVER (ORDER BY d.day) AS cum
                     FROM days d
+                    LEFT JOIN daily dd ON dd.day = d.day
                 ) s) AS spark
+            FROM agg a
         """  # table/predicate are trusted module constants, never request input
 
         row = (
@@ -218,12 +239,14 @@ class DashboardRepository:
                     """
                     SELECT
                         max(last_synced_at) AS last_synced_at,
-                        bool_or(sync_status = 'error')   AS any_error,
+                        bool_or(sync_status = 'error' OR status = 'error')
+                            AS any_error,
                         bool_or(sync_status = 'syncing') AS any_syncing,
-                        bool_or(sync_status = 'pending') AS any_pending,
+                        bool_or(sync_status = 'pending' OR status = 'pending')
+                            AS any_pending,
                         count(*) AS connected_count
                     FROM source_connections
-                    WHERE workspace_id = :workspace_id AND status = 'connected'
+                    WHERE workspace_id = :workspace_id AND status <> 'disconnected'
                     """
                 ).bindparams(workspace_id=workspace_id),
             )
@@ -341,7 +364,19 @@ class DashboardRepository:
                         sc.last_synced_at, sc.health,
                         COALESCE(ev.pending, 0)        AS pending_items,
                         COALESCE(ch.active_channels, 0) AS active_channel_count,
-                        COALESCE(dc.decisions, 0)       AS decisions_count
+                        -- Decisions are attributed by provider (no per-connection
+                        -- FK on decisions). When a provider has more than one
+                        -- connection, show the provider's total once — on its
+                        -- oldest connection — and 0 on the rest, so the per-card
+                        -- counts never sum to more than the true total.
+                        CASE
+                            WHEN row_number() OVER (
+                                PARTITION BY sc.provider
+                                ORDER BY sc.created_at ASC, sc.id ASC
+                            ) = 1
+                            THEN COALESCE(dc.decisions, 0)
+                            ELSE 0
+                        END AS decisions_count
                     FROM source_connections sc
                     LEFT JOIN LATERAL (
                         SELECT count(*) AS pending FROM source_events e
@@ -393,9 +428,11 @@ class DashboardRepository:
 
         Keyset pagination on the ``act_`` ULID id: ids embed creation time and
         sort lexicographically, so ``id < :cursor ORDER BY id DESC`` returns the
-        page after ``cursor`` — consistent with ``created_at`` ordering without a
-        cursor-row lookup. The caller fetches ``limit + 1`` rows to detect a next
-        page.
+        page after ``cursor``. The sort key (``id``) is exactly the column the
+        cursor predicate bounds — ordering by ``created_at`` instead would let a
+        page boundary skip or duplicate rows whenever the app-clock ULID and the
+        DB ``now()`` ``created_at`` disagree (clock skew, batched inserts). The
+        caller fetches ``limit + 1`` rows to detect a next page.
         """
         params: dict[str, object] = {"workspace_id": workspace_id, "limit": limit}
         cursor_clause = ""
@@ -409,7 +446,7 @@ class DashboardRepository:
                     SELECT id, type, title, detail, source_provider, created_at
                     FROM activity_events
                     WHERE workspace_id = :workspace_id {cursor_clause}
-                    ORDER BY created_at DESC, id DESC
+                    ORDER BY id DESC
                     LIMIT :limit
                     """
                 ).bindparams(**params),
