@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"
     notion_client_id: str = ""
     notion_client_secret: str = ""
+    # GitHub App (KAN-7). Auth is App-JWT (RS256) → per-installation tokens, so no
+    # OAuth client id/secret. The private key is a PEM stored \n-escaped on one line.
+    github_app_id: str = ""
+    github_app_private_key: str = ""
+    github_app_slug: str = ""  # used to build the install URL
+    github_webhook_secret: str = ""  # shared secret for X-Hub-Signature-256
 
     # Base domain for per-workspace MCP/brain endpoints.
     mcp_base_domain: str = "brainites.com"

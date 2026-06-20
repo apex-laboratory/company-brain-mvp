@@ -43,7 +43,12 @@ async def webhook_ingest(ctx: dict, provider: str, payload: dict) -> dict:
     _source_id, workspace_id = resolved
 
     item = RawItem(external_id=str(payload.get("id", "")), payload=payload)
-    event = integration.normalize(item)
+    try:
+        event = integration.normalize(item)
+    except ValueError:
+        # Non-content delivery (e.g. a GitHub `ping`) — acknowledged, nothing to store.
+        log.info("webhook_ingest: %s payload has no ingestible content — skipping", provider)
+        return {"inserted": 0, "skipped": "unsupported_event"}
 
     # Re-open under tenant context to satisfy RLS on the insert.
     async with get_session() as session:
@@ -56,6 +61,10 @@ async def webhook_ingest(ctx: dict, provider: str, payload: dict) -> dict:
 
 def _account_of(provider: str, payload: dict) -> str | None:
     """Extract the provider account id used to route the event to a connection."""
-    # Per-provider extraction lands with each connector (e.g. Slack team_id,
-    # GitHub installation id). Default to a top-level field if present.
+    if provider == "github":
+        # GitHub App deliveries always carry installation.id, which we stored as the
+        # connection's external_account_id.
+        installation = payload.get("installation") or {}
+        return str(installation["id"]) if installation.get("id") is not None else None
+    # Default top-level fields (e.g. Slack team_id).
     return payload.get("team_id") or payload.get("account_id")

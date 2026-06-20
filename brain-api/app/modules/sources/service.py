@@ -89,9 +89,18 @@ class SourcesService:
         return AuthorizeStartOut(authorize_url=integration.authorize_url(state, redirect_uri))
 
     # ── OAuth callback ───────────────────────────────────────────────────────────
-    async def handle_callback(self, provider: str, code: str, state: str) -> str:
+    async def handle_callback(
+        self,
+        provider: str,
+        *,
+        state: str,
+        code: str | None = None,
+        installation_id: str | None = None,
+    ) -> str:
         """Verify state, exchange the code, persist the connection, enqueue a sync.
 
+        ``code`` and ``installation_id`` are provider-specific: code-exchange providers
+        (Notion) carry a ``code``; a GitHub App install carries an ``installation_id``.
         Returns the workspace's dashboard URL to redirect the browser to.
         """
         self._require_known(provider)
@@ -112,9 +121,12 @@ class SourcesService:
         if resolved is None:
             raise UnauthorizedError("OAuth state is expired, already used, or unknown.")
 
-        # 3. Exchange the code for tokens (uses the redirect_uri bound to the state).
+        # 3. Exchange the code/installation for tokens (uses the redirect_uri bound to
+        # the state). ``code`` may be None for installation-based providers (GitHub App).
         integration = get_integration(provider)
-        tokens = await integration.exchange_code(code, resolved.redirect_uri)
+        tokens = await integration.exchange_code(
+            code or "", resolved.redirect_uri, installation_id=installation_id
+        )
 
         # 4. Encrypt + persist under the resolving workspace (admin-managed table).
         connection_id = generate_id("source")

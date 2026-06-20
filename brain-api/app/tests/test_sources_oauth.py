@@ -22,7 +22,7 @@ def _valid_state() -> str:
 async def test_callback_rejects_unknown_provider() -> None:
     service = SourcesService()
     with pytest.raises(ValidationError):
-        await service.handle_callback("dropbox", "code", _valid_state())
+        await service.handle_callback("dropbox", code="code", state=_valid_state())
 
 
 async def test_callback_rejects_tampered_signature() -> None:
@@ -30,13 +30,13 @@ async def test_callback_rejects_tampered_signature() -> None:
     # Valid format but the nonce no longer matches the signature.
     bad = f"tampered.{hmac_sign('nonce-abc', settings.jwt_access_secret)}"
     with pytest.raises(UnauthorizedError):
-        await service.handle_callback("notion", "code", bad)
+        await service.handle_callback("notion", code="code", state=bad)
 
 
 async def test_callback_rejects_state_without_signature() -> None:
     service = SourcesService()
     with pytest.raises(UnauthorizedError):
-        await service.handle_callback("notion", "code", "no-dot-here")
+        await service.handle_callback("notion", code="code", state="no-dot-here")
 
 
 class _NoStateRepo:
@@ -49,7 +49,7 @@ class _NoStateRepo:
 async def test_callback_rejects_valid_signature_but_missing_state() -> None:
     service = SourcesService(repository=_NoStateRepo())  # type: ignore[arg-type]
     with pytest.raises(UnauthorizedError):
-        await service.handle_callback("notion", "code", _valid_state())
+        await service.handle_callback("notion", code="code", state=_valid_state())
 
 
 def test_start_authorization_builds_signed_state_indirectly() -> None:

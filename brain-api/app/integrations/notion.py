@@ -89,7 +89,10 @@ class NotionIntegration:
         )
         return f"{_AUTH_URL}?{query}"
 
-    async def exchange_code(self, code: str, redirect_uri: str) -> OAuthTokens:
+    async def exchange_code(
+        self, code: str, redirect_uri: str, installation_id: str | None = None
+    ) -> OAuthTokens:
+        # ``installation_id`` is unused — Notion is a pure code-exchange provider.
         # Notion uses HTTP Basic auth (client_id:client_secret) on the token call.
         basic = base64.b64encode(
             f"{settings.notion_client_id}:{settings.notion_client_secret}".encode()

@@ -43,9 +43,21 @@ async def authorize(
 
 @router.get("/{provider}/callback")
 @limiter.limit(OAUTH_CALLBACK_LIMIT)
-async def callback(provider: str, request: Request, code: str, state: str):
-    """OAuth redirect target: exchange the code, store the connection, bounce to the dashboard."""
-    redirect_to = await _service.handle_callback(provider, code, state)
+async def callback(
+    provider: str,
+    request: Request,
+    state: str,
+    code: str | None = None,
+    installation_id: str | None = None,
+):
+    """OAuth redirect target: exchange the code, store the connection, bounce to the dashboard.
+
+    ``code`` is optional because a pure GitHub App install redirects here with an
+    ``installation_id`` and no ``code``.
+    """
+    redirect_to = await _service.handle_callback(
+        provider, state=state, code=code, installation_id=installation_id
+    )
     return RedirectResponse(url=redirect_to, status_code=302)
 
 

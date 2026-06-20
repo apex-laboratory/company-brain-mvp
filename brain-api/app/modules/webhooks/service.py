@@ -15,9 +15,21 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+from app.config.settings import settings
 from app.integrations import get_integration
 from app.jobs.queue import enqueue
 from app.shared.errors.app_error import NotFoundError, UnauthorizedError, ValidationError
+
+
+def _secret_for(provider: str) -> str:
+    """Resolve the signing secret for a provider's webhook verification.
+
+    App-level secrets come from settings (GitHub's shared App webhook secret).
+    Providers whose ``verify_webhook`` ignores the secret (e.g. Notion, which has no
+    webhooks) get ``""``. Per-subscription secrets (``webhook_subscriptions.secret_enc``)
+    can be threaded here when a provider needs them.
+    """
+    return {"github": settings.github_webhook_secret}.get(provider, "")
 
 
 class WebhooksService:
@@ -27,10 +39,7 @@ class WebhooksService:
         except KeyError:
             raise NotFoundError("Webhook provider")
 
-        # Secret resolution lands per provider; "" is correct for providers whose
-        # verify_webhook ignores it (and a hard reject for those that don't).
-        secret = ""
-        if not integration.verify_webhook(headers, raw_body, secret):
+        if not integration.verify_webhook(headers, raw_body, _secret_for(provider)):
             raise UnauthorizedError("Webhook signature verification failed.")
 
         try:

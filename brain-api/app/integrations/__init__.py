@@ -13,12 +13,14 @@ from app.integrations.base import (
     RawItem,
     SourceIntegration,
 )
+from app.integrations.github import GitHubIntegration
 from app.integrations.notion import NotionIntegration
 
 # Provider → integration instance. The sources/webhooks layers and the sync jobs
 # resolve providers through this registry only.
 REGISTRY: dict[str, SourceIntegration] = {
     "notion": NotionIntegration(),
+    "github": GitHubIntegration(),
 }
 
 
@@ -34,6 +36,7 @@ __all__ = [
     "RawItem",
     "SourceIntegration",
     "NotionIntegration",
+    "GitHubIntegration",
     "REGISTRY",
     "get_integration",
 ]

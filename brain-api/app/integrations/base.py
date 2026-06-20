@@ -98,8 +98,15 @@ class SourceIntegration(Protocol):
         """Build the provider consent URL for the start of the OAuth flow."""
         ...
 
-    async def exchange_code(self, code: str, redirect_uri: str) -> OAuthTokens:
-        """Exchange an authorization ``code`` for tokens."""
+    async def exchange_code(
+        self, code: str, redirect_uri: str, installation_id: str | None = None
+    ) -> OAuthTokens:
+        """Exchange an authorization ``code`` for tokens.
+
+        ``installation_id`` is provided by providers whose callback carries one
+        instead of (or alongside) a ``code`` — e.g. a GitHub App install. Code-based
+        providers (Notion) ignore it.
+        """
         ...
 
     async def refresh(self, refresh_token: str) -> OAuthTokens:
