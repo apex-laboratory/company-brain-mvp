@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from urllib.parse import urlencode
 
+import httpx
 from jose import jwt
 
 from app.config.settings import settings
@@ -37,6 +39,8 @@ from app.integrations.base import (
     http_client,
 )
 from app.shared.helpers.crypto import constant_time_compare
+
+log = logging.getLogger(__name__)
 
 _API_BASE = "https://api.github.com"
 _INSTALL_BASE = "https://github.com/apps"
@@ -53,6 +57,20 @@ def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _is_rate_limited(response: httpx.Response) -> bool:
+    """True when a 403/429 is a rate limit (vs a genuine permission error).
+
+    GitHub overloads 403 for both rate limiting and missing permissions; it signals
+    the rate-limit case with an exhausted ``x-ratelimit-remaining`` or a ``retry-after``
+    header. httpx header keys are case-insensitive.
+    """
+    return (
+        response.status_code == 429
+        or response.headers.get("x-ratelimit-remaining") == "0"
+        or "retry-after" in response.headers
+    )
 
 
 def _header(headers: Mapping[str, str], name: str) -> str | None:
@@ -169,6 +187,35 @@ class GitHubIntegration:
             page += 1
         return channels
 
+    async def _fetch_repo_issues(
+        self, access_token: str, full_name: str, cursor: str | None
+    ) -> list[RawItem]:
+        """Fetch every issue/PR page for one repo updated since ``cursor``."""
+        items: list[RawItem] = []
+        page = 1
+        while True:
+            params: dict = {
+                "state": "all",
+                "sort": "updated",
+                "direction": "desc",
+                "per_page": _PER_PAGE,
+                "page": page,
+            }
+            if cursor:
+                params["since"] = cursor
+            resp = await http_client().get(
+                f"{_API_BASE}/repos/{full_name}/issues",
+                headers=self._headers(access_token),
+                params=params,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            items.extend(RawItem(external_id=str(o["id"]), payload=o) for o in batch)
+            if len(batch) < _PER_PAGE:
+                break
+            page += 1
+        return items
+
     async def fetch_since(
         self,
         access_token: str,
@@ -181,40 +228,60 @@ class GitHubIntegration:
         is ignored — GitHub enumerates its own repos. Dedupe is handled downstream by
         the ``source_events`` unique constraint, so we collect everything the ``since``
         filter returns and advance the cursor to the newest ``updated_at`` seen.
+
+        Per-repo errors are isolated so one bad repo can't fail the whole sweep, but
+        because the cursor is connection-level we must not advance past a repo we
+        skipped transiently (that would lose its items). Failures are classified:
+
+        * ``401`` — re-raised; the token is broken, so ``source_sync`` marks the
+          connection ``error`` (re-auth needed).
+        * ``404`` / ``410`` / permission ``403`` — skipped *permanently* (issues
+          disabled, archived, or not granted); these repos have nothing to give, so
+          the cursor still advances.
+        * ``429`` / rate-limit ``403`` / ``5xx`` — *transient*; the cursor is held so
+          the next sync retries. Idempotent inserts make re-fetching succeeded repos
+          harmless.
         """
         items: list[RawItem] = []
         newest = _parse_ts(cursor)
+        incomplete = False  # a transient failure means "don't advance the cursor"
 
         for repo in await self.list_channels(access_token):
-            page = 1
-            while True:
-                params: dict = {
-                    "state": "all",
-                    "sort": "updated",
-                    "direction": "desc",
-                    "per_page": _PER_PAGE,
-                    "page": page,
-                }
-                if cursor:
-                    params["since"] = cursor
-                resp = await http_client().get(
-                    f"{_API_BASE}/repos/{repo.external_id}/issues",
-                    headers=self._headers(access_token),
-                    params=params,
+            try:
+                repo_items = await self._fetch_repo_issues(
+                    access_token, repo.external_id, cursor
                 )
-                resp.raise_for_status()
-                batch = resp.json()
-                for obj in batch:
-                    items.append(RawItem(external_id=str(obj["id"]), payload=obj))
-                    edited = _parse_ts(obj.get("updated_at"))
-                    if edited is not None and (newest is None or edited > newest):
-                        newest = edited
-                if len(batch) < _PER_PAGE:
-                    break
-                page += 1
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status == 401:
+                    raise  # whole-connection auth failure — let source_sync handle it
+                if status == 429 or (status == 403 and _is_rate_limited(exc.response)):
+                    log.warning("github fetch: rate limited on %s — will retry", repo.external_id)
+                    incomplete = True
+                elif status in (403, 404, 410):
+                    log.warning(
+                        "github fetch: skipping %s (%s — disabled/archived/no access)",
+                        repo.external_id, status,
+                    )
+                elif 500 <= status < 600:
+                    log.warning(
+                        "github fetch: server error on %s (%s) — will retry",
+                        repo.external_id, status,
+                    )
+                    incomplete = True
+                else:
+                    raise  # unexpected status — surface it
+                continue
 
-        next_cursor = newest.isoformat() if newest else cursor
-        return items, next_cursor
+            for item in repo_items:
+                items.append(item)
+                edited = _parse_ts(item.payload.get("updated_at"))
+                if edited is not None and (newest is None or edited > newest):
+                    newest = edited
+
+        if incomplete:
+            return items, cursor  # hold the cursor; next sync re-fetches everything
+        return items, (newest.isoformat() if newest else cursor)
 
     # ── webhooks ───────────────────────────────────────────────────────────────
     def verify_webhook(self, headers: Mapping[str, str], raw_body: bytes, secret: str) -> bool:

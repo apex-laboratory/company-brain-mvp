@@ -125,6 +125,60 @@ async def test_fetch_since_enumerates_repos_and_advances_cursor(
     assert next_cursor == "2026-06-13T10:00:00+00:00"
 
 
+def _two_repo_handler(good_issues: list[dict], bad_status: int):
+    """Transport handler: ``acme/good`` returns issues, ``acme/bad`` returns an error."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={"repositories": [{"full_name": "acme/good"}, {"full_name": "acme/bad"}]},
+            )
+        if request.url.path == "/repos/acme/good/issues":
+            return httpx.Response(200, json=good_issues)
+        return httpx.Response(bad_status, json={"message": "nope"})
+
+    return handler
+
+
+async def test_fetch_since_skips_permanent_repo_error_and_advances(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A 410 (issues disabled) on one repo is skipped permanently; the good repo's
+    # items still come through and the cursor advances.
+    issues = [_issue(2, "2026-06-12T10:00:00Z", "Good")]
+    _install_transport(monkeypatch, _two_repo_handler(issues, 410))
+    channel = base.ChannelRef(external_id="inst-1", name="workspace")
+    items, next_cursor = await github.fetch_since("tok", channel, None)
+    assert {i.external_id for i in items} == {"2"}
+    assert next_cursor == "2026-06-12T10:00:00+00:00"
+
+
+async def test_fetch_since_holds_cursor_on_transient_repo_error(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A 500 on one repo is transient: good items still ingest, but the cursor is
+    # held at its prior value so the next sync retries the failed repo.
+    issues = [_issue(2, "2026-06-12T10:00:00Z", "Good")]
+    _install_transport(monkeypatch, _two_repo_handler(issues, 500))
+    channel = base.ChannelRef(external_id="inst-1", name="workspace")
+    prior = "2026-06-01T00:00:00+00:00"
+    items, next_cursor = await github.fetch_since("tok", channel, prior)
+    assert {i.external_id for i in items} == {"2"}
+    assert next_cursor == prior  # held, not advanced
+
+
+async def test_fetch_since_reraises_on_401(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A 401 is a whole-connection auth failure — it must propagate so source_sync
+    # can mark the connection in error.
+    _install_transport(monkeypatch, _two_repo_handler([], 401))
+    channel = base.ChannelRef(external_id="inst-1", name="workspace")
+    with pytest.raises(httpx.HTTPStatusError):
+        await github.fetch_since("tok", channel, None)
+
+
 def test_normalize_maps_bare_issue(github: GitHubIntegration) -> None:
     item = base.RawItem(external_id="2", payload=_issue(2, "2026-06-12T10:00:00Z", "Hi"))
     event = github.normalize(item)
