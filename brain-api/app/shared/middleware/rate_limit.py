@@ -17,6 +17,9 @@ from app.shared.errors.app_error import RateLimitError
 AUTH_LIMIT = "10/minute"
 OAUTH_CALLBACK_LIMIT = "20/minute"
 DASHBOARD_LIMIT = "300/minute"
+# API-key creation is expensive and security-sensitive (each mints a live
+# credential); cap it per admin (API_DOCUMENTATION.md §Rate Limits).
+API_KEY_CREATE_LIMIT = "5/hour"
 
 # AUTH_LIMIT expressed as raw numbers for the manual API-key check below.
 _API_KEY_LIMIT = 10

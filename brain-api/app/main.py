@@ -19,7 +19,10 @@ from sqlalchemy import text
 from app.config.database import close_db_pool, get_session
 from app.config.redis import close_redis, get_redis, init_redis
 from app.config.settings import settings
+from app.modules.api_keys.router import router as api_keys_router
 from app.modules.auth.router import router as auth_router
+from app.modules.dashboard.router import router as dashboard_router
+from app.modules.workspaces.router import router as workspaces_router
 from app.shared.middleware.error_handler import register_exception_handlers
 from app.shared.middleware.rate_limit import limiter
 from app.shared.middleware.request_context import RequestContextMiddleware
@@ -61,6 +64,9 @@ app.add_exception_handler(RateLimitExceeded, cast(Any, _rate_limit_exceeded_hand
 register_exception_handlers(app)
 
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(dashboard_router, prefix="/api/v1")
+app.include_router(workspaces_router, prefix="/api/v1")
+app.include_router(api_keys_router, prefix="/api/v1")
 
 
 @app.get("/health")

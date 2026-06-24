@@ -18,12 +18,26 @@ from app.shared.middleware.authenticate import AuthContext, get_auth_context
 _ROLE_RANK: dict[str, int] = {"viewer": 1, "editor": 2, "admin": 3}
 
 
+def assert_workspace_member(auth: AuthContext, workspace_id: str) -> str:
+    """Return the caller's workspace, or 403 if it isn't the one in the path.
+
+    The JWT/API-key context carries the single workspace the caller belongs to;
+    a request for any other ``workspace_id`` is not theirs to act on. RLS is also
+    driven from the auth context (never the path), so a mismatch could not be
+    served anyway — failing closed here makes that explicit. Services call this
+    before opening a tenant-scoped transaction.
+    """
+    if auth.workspace_id is None or workspace_id != auth.workspace_id:
+        raise ForbiddenError("You are not a member of this workspace.")
+    return auth.workspace_id
+
+
 def require_role(minimum: str) -> Callable[[AuthContext], Awaitable[None]]:
     """Require the caller's role to be ``minimum`` or higher in the hierarchy."""
     required_rank = _ROLE_RANK[minimum]
 
     async def dependency(auth: AuthContext = Depends(get_auth_context)) -> None:
-        if _ROLE_RANK.get(auth.role, 0) < required_rank:
+        if _ROLE_RANK.get(auth.role or "", 0) < required_rank:
             raise ForbiddenError()
 
     return dependency
