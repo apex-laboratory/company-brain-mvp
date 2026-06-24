@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     resend_api_key: str
     default_from_email: str = "Brainite <founders@brainites.com>"
 
+    # Base domain for per-workspace MCP/brain endpoints.
+    mcp_base_domain: str = "brainites.com"
+
     # ── OAuth providers ───────────────────────────────────────────────────────
     google_client_id: str = ""
     google_client_secret: str = ""
