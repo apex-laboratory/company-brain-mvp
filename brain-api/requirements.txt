@@ -24,3 +24,4 @@ structlog>=24.1.0                  # structured JSON logging + redaction
 slowapi>=0.1.9                     # Redis-backed rate limiting
 ulid-py>=1.1.0                     # prefixed ULID id generation
 email-validator>=2.1.0            # pydantic EmailStr validation
+pytest-asyncio>=0.23.0            # async test support
