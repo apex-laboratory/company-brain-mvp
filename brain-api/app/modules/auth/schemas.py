@@ -11,6 +11,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr
 from pydantic.alias_generators import to_camel
 
+# Response schemas share the camelCase serialization base used API-wide.
+from app.shared.schemas import CamelModel as _Response
+
 
 class _Request(BaseModel):
     # Accept camelCase request bodies (the API contract uses camelCase JSON
@@ -21,10 +24,6 @@ class _Request(BaseModel):
         alias_generator=to_camel,
         populate_by_name=True,
     )
-
-
-class _Response(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 # ── requests ──────────────────────────────────────────────────────────────────

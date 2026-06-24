@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     resend_api_key: str
     default_from_email: str = "Brainite <founders@brainites.com>"
 
-    # Base domain for per-workspace MCP/brain endpoints.
+    # Base domain for per-workspace MCP/brain endpoints. The workspace settings
+    # endpoint advertises ``https://{slug}.{mcp_base_domain}/mcp`` to clients.
     mcp_base_domain: str = "brainites.com"
 
     # ── OAuth providers ───────────────────────────────────────────────────────
