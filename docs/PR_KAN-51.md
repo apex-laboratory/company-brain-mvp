@@ -38,7 +38,6 @@ Rate limit: 10 req/min per IP on all auth endpoints.
   and `schema.sql` mount (file does not exist)
 - `brain-api/requirements.txt`: added `pytest-asyncio` (was missing, breaks CI)
 - `docs/POSTMAN_SETUP.md`: rewritten with accurate startup steps and working examples
-- `scripts/oauth_exchange.sh`: local helper for OAuth code exchange during testing
 
 ## Notes
 
