@@ -15,12 +15,14 @@ from app.integrations.base import (
 )
 from app.integrations.github import GitHubIntegration
 from app.integrations.notion import NotionIntegration
+from app.integrations.slack import SlackIntegration
 
 # Provider → integration instance. The sources/webhooks layers and the sync jobs
 # resolve providers through this registry only.
 REGISTRY: dict[str, SourceIntegration] = {
     "notion": NotionIntegration(),
     "github": GitHubIntegration(),
+    "slack": SlackIntegration(),
 }
 
 
@@ -37,6 +39,7 @@ __all__ = [
     "SourceIntegration",
     "NotionIntegration",
     "GitHubIntegration",
+    "SlackIntegration",
     "REGISTRY",
     "get_integration",
 ]

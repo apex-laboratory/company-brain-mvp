@@ -29,7 +29,10 @@ def _secret_for(provider: str) -> str:
     webhooks) get ``""``. Per-subscription secrets (``webhook_subscriptions.secret_enc``)
     can be threaded here when a provider needs them.
     """
-    return {"github": settings.github_webhook_secret}.get(provider, "")
+    return {
+        "github": settings.github_webhook_secret,
+        "slack": settings.slack_signing_secret,
+    }.get(provider, "")
 
 
 class WebhooksService:
