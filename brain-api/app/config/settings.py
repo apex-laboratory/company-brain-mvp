@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # endpoint advertises ``https://{slug}.{mcp_base_domain}/mcp`` to clients.
     mcp_base_domain: str = "brainites.com"
 
+    # ── OAuth providers ───────────────────────────────────────────────────────
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    # Base URL used to construct the redirect_uri sent to providers.
+    # Must match a redirect registered in each provider's app config.
+    oauth_redirect_base_url: str = "http://localhost:4000"
+
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes
     refresh_token_ttl_seconds: int = 30 * 24 * 60 * 60  # 30 days
