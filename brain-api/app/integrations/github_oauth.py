@@ -14,7 +14,6 @@ import httpx
 from app.integrations import OAuthError, OAuthProfile
 
 _AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
-
 _TOKEN_URL = "https://github.com/login/oauth/access_token"
 _USER_URL = "https://api.github.com/user"
 _EMAILS_URL = "https://api.github.com/user/emails"
@@ -82,13 +81,19 @@ async def fetch_profile(access_token: str) -> OAuthProfile:
 
 
 def _primary_email(entries: object) -> str:
-    """Return the primary verified email; fall back to primary; then first entry."""
+    """Return the primary verified email, else any verified email.
+
+    Only verified emails are trusted: the callback resolves the user by email, so
+    returning an unverified address would let an attacker who added (but never
+    confirmed) a victim's email to their GitHub account take over that account.
+    Raises ``OAuthError`` when no verified email is available.
+    """
     if not isinstance(entries, list) or not entries:
         raise OAuthError("GitHub returned no email addresses for the account.")
     for e in entries:
         if e.get("primary") and e.get("verified"):
             return str(e["email"])
     for e in entries:
-        if e.get("primary"):
+        if e.get("verified"):
             return str(e["email"])
-    return str(entries[0]["email"])
+    raise OAuthError("GitHub returned no verified email for this account.")

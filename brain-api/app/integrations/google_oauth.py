@@ -69,5 +69,16 @@ async def fetch_profile(access_token: str) -> OAuthProfile:
         data = resp.json()
     email = data.get("email") if isinstance(data, dict) else None
     if not email:
-        raise OAuthError("Google userinfo response did not include an email.")
+        raise OAuthError("Google returned no email for this account.")
+    # ``email_verified`` may arrive as a bool or the string "true"; only an
+    # affirmatively-verified email is trustworthy. Skipping this check lets a
+    # caller with an unverified Google email matching an existing account take
+    # it over (the callback resolves the user by email).
+    verified = data.get("email_verified")
+    if verified not in (True, "true"):
+        raise OAuthError(
+            "Your Google email is not verified.",
+            status=403,
+            code="oauth_email_unverified",
+        )
     return OAuthProfile(email=str(email), name=data.get("name"))

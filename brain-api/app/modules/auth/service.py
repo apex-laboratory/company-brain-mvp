@@ -356,11 +356,20 @@ class AuthService:
                 algorithms=["HS256"],
                 options={"require_exp": True},
             )
-        except JWTError:
-            raise UnauthorizedError("Invalid OAuth state")
+        except JWTError as exc:
+            raise UnauthorizedError("Invalid OAuth state") from exc
 
         state_hash = sha256_hash(state)
 
+        # ── Phase 1: validate + consume the state (short transaction) ──────────
+        # The state is consumed and committed here, before the provider round-trip,
+        # so we never hold a DB connection or the ``FOR UPDATE`` row lock across an
+        # external HTTP call (which can take up to ~20s for GitHub). The lock still
+        # serialises concurrent callbacks for the same state: the second request
+        # blocks on the SELECT FOR UPDATE until this commits, then sees
+        # ``consumed_at`` set and fails check 4. A failed exchange afterwards leaves
+        # the state burned (codes are single-use at the provider anyway).
+        state_user_id = state_claims.get("user_id")
         async with get_session() as session:
             # Check 3: row exists by sha256(state).
             row = await self._repository.find_oauth_state(
@@ -383,7 +392,6 @@ class AuthService:
 
             # Check 7: if user_id present in state, it must match the
             # currently authenticated user (if any).
-            state_user_id = state_claims.get("user_id")
             if (
                 state_user_id is not None
                 and current_user_id is not None
@@ -391,21 +399,26 @@ class AuthService:
             ):
                 raise UnauthorizedError("Invalid OAuth state")
 
-            # Mark consumed inside the row's FOR UPDATE lock so a *concurrent*
-            # replay of the same state blocks here and then fails check 4. The
-            # consume only persists if the whole flow commits — a transient
-            # provider failure below rolls it back, allowing a legitimate retry.
+            redirect_uri = row.redirect_uri
             await self._repository.mark_oauth_state_consumed(session, row.id)
+            await session.commit()
 
-            # Exchange code + fetch user profile from the provider. ``OAuthError``
-            # covers 200-with-error bodies / missing fields that raise_for_status
-            # does not catch; ``httpx.HTTPError`` covers network/status failures.
-            try:
-                profile = await _fetch_profile(provider, code, row.redirect_uri)
-            except (httpx.HTTPError, OAuthError) as exc:
-                log.warning("oauth_provider_error", provider=provider, error=str(exc))
-                raise AppError(502, "provider_error", "OAuth provider request failed.")
+        # ── Phase 2: provider round-trip (no DB connection held) ───────────────
+        try:
+            profile = await _fetch_profile(provider, code, redirect_uri)
+        except httpx.HTTPError as exc:
+            log.warning("oauth_provider_error", provider=provider, error=str(exc))
+            raise AppError(
+                502, "provider_error", "OAuth provider request failed."
+            ) from exc
+        except OAuthError as exc:
+            # HTTP succeeded but the payload is unusable (error body, unverified or
+            # missing email). Surface the provider-supplied status/code, not a 500.
+            log.warning("oauth_profile_error", provider=provider, error=str(exc))
+            raise AppError(exc.status, exc.code, exc.message) from exc
 
+        # ── Phase 3: upsert user + issue tokens (second transaction) ───────────
+        async with get_session() as session:
             # Upsert the user row (no duplicate users for the same email).
             new_user_id = generate_id("user")
             user = await self._repository.upsert_oauth_user(
@@ -414,6 +427,16 @@ class AuthService:
                 email=profile.email.lower(),
                 name=profile.name,
             )
+
+            # Account-linking guard: if the state was minted for an authenticated
+            # user (``state_user_id``), the provider email must resolve to that same
+            # user. Without this, a linking attempt whose provider email differs
+            # would silently log the caller into (or create) a *different* account.
+            # Proper cross-email linking needs a provider-identity table; until then
+            # we fail closed rather than switch identity. The rollback undoes the
+            # throwaway upsert when the emails don't match.
+            if state_user_id is not None and user.id != state_user_id:
+                raise UnauthorizedError("Invalid OAuth state")
 
             membership = await self._repository.find_primary_membership(
                 session, user.id
