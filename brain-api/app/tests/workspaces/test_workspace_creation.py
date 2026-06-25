@@ -68,9 +68,23 @@ class _FakeSession:
         pass
 
 
+# Realistic asyncpg-style messages: production discriminates slug collisions
+# from other constraint violations by the constraint name carried in ``orig``.
+_SLUG_VIOLATION = Exception(
+    'duplicate key value violates unique constraint "workspaces_slug_key"'
+)
+_FK_VIOLATION = Exception(
+    'insert or update on table "workspaces" violates foreign key constraint '
+    '"workspaces_created_by_fkey"'
+)
+
+
 class _FakeWorkspaceRepository(WorkspaceRepository):
-    def __init__(self, *, fail_first: bool = False) -> None:
+    def __init__(
+        self, *, fail_first: bool = False, fail_orig: Exception = _SLUG_VIOLATION
+    ) -> None:
         self._fail_first = fail_first
+        self._fail_orig = fail_orig
         self._create_call_count = 0
         self.created_workspace: WorkspaceRecord | None = None
         self.created_member: dict[str, Any] | None = None
@@ -88,7 +102,7 @@ class _FakeWorkspaceRepository(WorkspaceRepository):
     ) -> WorkspaceRecord:
         self._create_call_count += 1
         if self._fail_first and self._create_call_count == 1:
-            raise IntegrityError("slug", {}, Exception("unique"))
+            raise IntegrityError("INSERT INTO workspaces ...", {}, self._fail_orig)
         self.created_workspace = WorkspaceRecord(id=id, name=name, slug=slug, plan="trial")
         return self.created_workspace
 
@@ -192,6 +206,21 @@ async def test_slug_conflict_retried_with_suffix() -> None:
     # After suffix: "riverline-xxxx" where xxxx is 4 alphanumeric chars.
     assert result.workspace.slug.startswith("riverline-")
     assert len(result.workspace.slug) == len("riverline-") + 4
+
+
+@pytest.mark.asyncio
+async def test_non_slug_integrity_error_propagates() -> None:
+    """A non-slug constraint violation must not be retried or mislabelled as a
+    slug conflict — it propagates as-is rather than a misleading 409."""
+    repo = _FakeWorkspaceRepository(fail_first=True, fail_orig=_FK_VIOLATION)
+    service = WorkspaceService(repository=repo)
+
+    with pytest.raises(IntegrityError):
+        await service.create_workspace(
+            _request(company_name="Riverline"), user_id="usr_1", user_agent=None, ip=None
+        )
+    # Not retried with a suffixed slug — it isn't a slug collision.
+    assert repo._create_call_count == 1
 
 
 # ── router: contract ─────────────────────────────────────────────────────────────

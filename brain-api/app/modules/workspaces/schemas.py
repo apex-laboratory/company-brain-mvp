@@ -10,17 +10,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.shared.schemas import CamelModel as _CamelModel
-
-
-class _Request(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid",
-        alias_generator=lambda s: "".join(
-            w.capitalize() if i else w for i, w in enumerate(s.split("_"))
-        ),
-        populate_by_name=True,
-    )
-
+from app.shared.schemas import CamelRequestModel as _Request
 
 _TeamSize = Literal["1-10", "11-50", "51-200", "200+"]
 _UseCase = Literal["support", "ops", "eng", "agents"]
@@ -41,6 +31,11 @@ class OnboardingPatchRequest(_Request):
     company_name: str | None = Field(default=None, max_length=100)
     team_size: _TeamSize | None = None
     primary_use_case: _UseCase | None = None
+    # Accepted per the documented contract (API_DOCUMENTATION.md §Save Onboarding
+    # Progress) so the wizard can PATCH its whole step payload. These three are
+    # NOT persisted here — provider/channel/scope selection is owned by the
+    # Source Integrations API (`/workspaces/:id/sources/...`); this endpoint only
+    # records workspace-level onboarding progress (step + company fields).
     connected_providers: list[str] | None = None
     time_range: _TimeRange | None = None
     channels: dict[str, list[str]] | None = None

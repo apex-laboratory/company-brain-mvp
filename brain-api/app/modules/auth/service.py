@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urlencode
 
 import httpx
 from jose import JWTError, jwt
@@ -22,8 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.config.settings import settings
-from app.integrations import OAuthProfile
-from app.integrations import google_oauth, github_oauth
+from app.integrations import OAuthError, OAuthProfile, github_oauth, google_oauth
 from app.modules.auth.repository import AuthRepository, MembershipRecord, UserRecord
 from app.modules.auth.schemas import (
     AuthSessionOut,
@@ -40,6 +38,16 @@ from app.shared.helpers.ids import generate_id
 from app.shared.logger import get_logger
 
 log = get_logger()
+
+# Single source of truth for the OAuth providers wired into the code-exchange
+# flow. Adding a provider is one entry here; the router derives its allow-list
+# from this set, so the URL builder, profile fetch, and validation never drift.
+_PROVIDERS = {"google": google_oauth, "github": github_oauth}
+OAUTH_PROVIDERS: frozenset[str] = frozenset(_PROVIDERS)
+_PROVIDER_CRED_ATTRS: dict[str, tuple[str, str]] = {
+    "google": ("google_client_id", "google_client_secret"),
+    "github": ("github_client_id", "github_client_secret"),
+}
 
 
 @dataclass(frozen=True)
@@ -383,14 +391,18 @@ class AuthService:
             ):
                 raise UnauthorizedError("Invalid OAuth state")
 
-            # Mark consumed before the provider round-trip so a concurrent
-            # replay cannot race through the same state.
+            # Mark consumed inside the row's FOR UPDATE lock so a *concurrent*
+            # replay of the same state blocks here and then fails check 4. The
+            # consume only persists if the whole flow commits — a transient
+            # provider failure below rolls it back, allowing a legitimate retry.
             await self._repository.mark_oauth_state_consumed(session, row.id)
 
-            # Exchange code + fetch user profile from the provider.
+            # Exchange code + fetch user profile from the provider. ``OAuthError``
+            # covers 200-with-error bodies / missing fields that raise_for_status
+            # does not catch; ``httpx.HTTPError`` covers network/status failures.
             try:
                 profile = await _fetch_profile(provider, code, row.redirect_uri)
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, OAuthError) as exc:
                 log.warning("oauth_provider_error", provider=provider, error=str(exc))
                 raise AppError(502, "provider_error", "OAuth provider request failed.")
 
@@ -463,45 +475,30 @@ class AuthService:
 
 # ── module-level helpers ───────────────────────────────────────────────────────
 
+def _provider_credentials(provider: str) -> tuple[str, str]:
+    """Resolve ``(client_id, client_secret)`` from settings for a provider."""
+    id_attr, secret_attr = _PROVIDER_CRED_ATTRS[provider]
+    return getattr(settings, id_attr), getattr(settings, secret_attr)
+
+
 def _build_auth_url(provider: str, state_raw: str, redirect_uri: str) -> str:
     """Construct the provider's authorization URL with required query params."""
-    if provider == "google":
-        params = {
-            "client_id": settings.google_client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": "openid email profile",
-            "state": state_raw,
-            "access_type": "online",
-        }
-        return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
-    # github
-    params = {
-        "client_id": settings.github_client_id,
-        "redirect_uri": redirect_uri,
-        "scope": "user:email",
-        "state": state_raw,
-    }
-    return f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+    client_id, _ = _provider_credentials(provider)
+    return _PROVIDERS[provider].build_authorize_url(
+        client_id=client_id, redirect_uri=redirect_uri, state=state_raw
+    )
 
 
 async def _fetch_profile(
     provider: str, code: str, redirect_uri: str
 ) -> OAuthProfile:
     """Dispatch code exchange + profile fetch to the correct provider module."""
-    if provider == "google":
-        token = await google_oauth.exchange_code(
-            code=code,
-            redirect_uri=redirect_uri,
-            client_id=settings.google_client_id,
-            client_secret=settings.google_client_secret,
-        )
-        return await google_oauth.fetch_profile(token)
-    # github
-    token = await github_oauth.exchange_code(
+    module = _PROVIDERS[provider]
+    client_id, client_secret = _provider_credentials(provider)
+    token = await module.exchange_code(
         code=code,
         redirect_uri=redirect_uri,
-        client_id=settings.github_client_id,
-        client_secret=settings.github_client_secret,
+        client_id=client_id,
+        client_secret=client_secret,
     )
-    return await github_oauth.fetch_profile(token)
+    return await module.fetch_profile(token)

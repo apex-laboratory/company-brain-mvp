@@ -57,6 +57,15 @@ def _slug_with_suffix(base_slug: str) -> str:
     return f"{base_slug}-{suffix}"
 
 
+def _is_slug_conflict(exc: IntegrityError) -> bool:
+    """True only when the IntegrityError is the workspaces.slug UNIQUE violation.
+
+    Any other constraint (FK, PK, role cast) must not be mislabelled as a slug
+    collision, so we don't retry it or report it as "slug already taken".
+    """
+    return "slug" in str(getattr(exc, "orig", exc)).lower()
+
+
 def _brain_endpoint(slug: str) -> str:
     return f"https://{slug}.{settings.mcp_base_domain}/mcp"
 
@@ -76,24 +85,18 @@ class WorkspaceService:
         ip: str | None,
     ) -> CreateWorkspaceOut:
         """Create a workspace, seed the admin member, and issue a scoped token."""
-        slug = _generate_slug(request.company_name)
+        base_slug = _generate_slug(request.company_name)
         workspace_id = generate_id("workspace")
         member_id = generate_id("member")
 
+        # Try the clean slug first, then one suffixed variant on a slug
+        # collision. A non-slug IntegrityError is re-raised as-is (an honest 500)
+        # rather than mislabelled as a slug conflict.
+        candidate_slugs = [base_slug, _slug_with_suffix(base_slug)]
+
         async with get_session() as session:
-            try:
-                workspace = await self._repository.create_workspace(
-                    session,
-                    id=workspace_id,
-                    name=request.company_name,
-                    slug=slug,
-                    team_size=request.team_size,
-                    primary_use_case=request.primary_use_case,
-                    created_by=user_id,
-                )
-            except IntegrityError:
-                await session.rollback()
-                slug = _slug_with_suffix(slug)
+            workspace = None
+            for attempt, slug in enumerate(candidate_slugs):
                 try:
                     workspace = await self._repository.create_workspace(
                         session,
@@ -104,11 +107,18 @@ class WorkspaceService:
                         primary_use_case=request.primary_use_case,
                         created_by=user_id,
                     )
+                    break
                 except IntegrityError as exc:
                     await session.rollback()
-                    raise ConflictError(
-                        "Workspace slug already taken. Please try a different company name."
-                    ) from exc
+                    if not _is_slug_conflict(exc):
+                        raise
+                    if attempt == len(candidate_slugs) - 1:
+                        raise ConflictError(
+                            "Workspace slug already taken. Please try a different "
+                            "company name."
+                        ) from exc
+
+            assert workspace is not None  # loop breaks with a row or raises above
 
             await self._repository.create_member(
                 session,
@@ -143,7 +153,13 @@ class WorkspaceService:
         role: str,
         request: OnboardingPatchRequest,
     ) -> OnboardingOut:
-        """Persist onboarding progress and return the next step."""
+        """Persist onboarding progress and return the next step.
+
+        Only workspace-level fields (step + company info) are written here.
+        ``connected_providers``/``time_range``/``channels`` are accepted for the
+        documented contract but persisted by the Source Integrations API, not by
+        this endpoint.
+        """
         async with get_session() as session:
             async with run_in_tenant(session, workspace_id, user_id, role):
                 await self._repository.update_onboarding(
