@@ -6,12 +6,15 @@ for network failures and ``httpx.HTTPStatusError`` for provider-side errors.
 """
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 import httpx
 
 from app.integrations import OAuthError, OAuthProfile
 
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 
 
 async def exchange_code(
@@ -34,7 +37,25 @@ async def exchange_code(
             },
         )
         resp.raise_for_status()
-        return str(resp.json()["access_token"])
+        payload = resp.json()
+        token = payload.get("access_token") if isinstance(payload, dict) else None
+        if not token:
+            error = payload.get("error") if isinstance(payload, dict) else None
+            raise OAuthError(f"Google token exchange failed: {error or 'no access_token'}")
+        return str(token)
+
+
+def build_authorize_url(*, client_id: str, redirect_uri: str, state: str) -> str:
+    """Build Google's authorization URL with the required query params."""
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "online",
+    }
+    return f"{_AUTHORIZE_URL}?{urlencode(params)}"
 
 
 async def fetch_profile(access_token: str) -> OAuthProfile:
@@ -46,8 +67,7 @@ async def fetch_profile(access_token: str) -> OAuthProfile:
         )
         resp.raise_for_status()
         data = resp.json()
-
-    email = data.get("email")
+    email = data.get("email") if isinstance(data, dict) else None
     if not email:
         raise OAuthError("Google returned no email for this account.")
     # ``email_verified`` may arrive as a bool or the string "true"; only an
@@ -61,4 +81,4 @@ async def fetch_profile(access_token: str) -> OAuthProfile:
             status=403,
             code="oauth_email_unverified",
         )
-    return OAuthProfile(email=email, name=data.get("name"))
+    return OAuthProfile(email=str(email), name=data.get("name"))

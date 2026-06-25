@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urlencode
 
 import httpx
 from jose import JWTError, jwt
@@ -39,6 +38,16 @@ from app.shared.helpers.ids import generate_id
 from app.shared.logger import get_logger
 
 log = get_logger()
+
+# Single source of truth for the OAuth providers wired into the code-exchange
+# flow. Adding a provider is one entry here; the router derives its allow-list
+# from this set, so the URL builder, profile fetch, and validation never drift.
+_PROVIDERS = {"google": google_oauth, "github": github_oauth}
+OAUTH_PROVIDERS: frozenset[str] = frozenset(_PROVIDERS)
+_PROVIDER_CRED_ATTRS: dict[str, tuple[str, str]] = {
+    "google": ("google_client_id", "google_client_secret"),
+    "github": ("github_client_id", "github_client_secret"),
+}
 
 
 @dataclass(frozen=True)
@@ -489,50 +498,30 @@ class AuthService:
 
 # ── module-level helpers ───────────────────────────────────────────────────────
 
+def _provider_credentials(provider: str) -> tuple[str, str]:
+    """Resolve ``(client_id, client_secret)`` from settings for a provider."""
+    id_attr, secret_attr = _PROVIDER_CRED_ATTRS[provider]
+    return getattr(settings, id_attr), getattr(settings, secret_attr)
+
+
 def _build_auth_url(provider: str, state_raw: str, redirect_uri: str) -> str:
     """Construct the provider's authorization URL with required query params."""
-    if provider == "google":
-        params = {
-            "client_id": settings.google_client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": "openid email profile",
-            "state": state_raw,
-            "access_type": "online",
-        }
-        return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
-    if provider == "github":
-        params = {
-            "client_id": settings.github_client_id,
-            "redirect_uri": redirect_uri,
-            "scope": "user:email",
-            "state": state_raw,
-        }
-        return f"https://github.com/login/oauth/authorize?{urlencode(params)}"
-    # Explicit: a provider in _VALID_PROVIDERS without a builder here is a bug, not
-    # a silent fall-through to GitHub.
-    raise AppError(501, "not_implemented", f"Unsupported OAuth provider: {provider}")
+    client_id, _ = _provider_credentials(provider)
+    return _PROVIDERS[provider].build_authorize_url(
+        client_id=client_id, redirect_uri=redirect_uri, state=state_raw
+    )
 
 
 async def _fetch_profile(
     provider: str, code: str, redirect_uri: str
 ) -> OAuthProfile:
     """Dispatch code exchange + profile fetch to the correct provider module."""
-    if provider == "google":
-        token = await google_oauth.exchange_code(
-            code=code,
-            redirect_uri=redirect_uri,
-            client_id=settings.google_client_id,
-            client_secret=settings.google_client_secret,
-        )
-        return await google_oauth.fetch_profile(token)
-    if provider == "github":
-        token = await github_oauth.exchange_code(
-            code=code,
-            redirect_uri=redirect_uri,
-            client_id=settings.github_client_id,
-            client_secret=settings.github_client_secret,
-        )
-        return await github_oauth.fetch_profile(token)
-    # Explicit: never silently treat an unknown provider as GitHub.
-    raise AppError(501, "not_implemented", f"Unsupported OAuth provider: {provider}")
+    module = _PROVIDERS[provider]
+    client_id, client_secret = _provider_credentials(provider)
+    token = await module.exchange_code(
+        code=code,
+        redirect_uri=redirect_uri,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    return await module.fetch_profile(token)

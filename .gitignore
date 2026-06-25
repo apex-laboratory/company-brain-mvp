@@ -51,4 +51,6 @@ htmlcov/
 .agents
 .claude
 .mcp.json
-skills-lock.json
+skills-lock.jsonmy_notes/
+
+my_notes/

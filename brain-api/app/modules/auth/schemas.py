@@ -8,22 +8,11 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr
-from pydantic.alias_generators import to_camel
+from pydantic import EmailStr
 
-# Response schemas share the camelCase serialization base used API-wide.
+# Request/response schemas share the camelCase bases used API-wide.
 from app.shared.schemas import CamelModel as _Response
-
-
-class _Request(BaseModel):
-    # Accept camelCase request bodies (the API contract uses camelCase JSON
-    # fields, e.g. ``refreshToken``) while still allowing the snake_case field
-    # name; reject any unexpected key (mass-assignment defense).
-    model_config = ConfigDict(
-        extra="forbid",
-        alias_generator=to_camel,
-        populate_by_name=True,
-    )
+from app.shared.schemas import CamelRequestModel as _Request
 
 
 # ── requests ──────────────────────────────────────────────────────────────────

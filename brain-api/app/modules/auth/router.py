@@ -26,20 +26,40 @@ from app.modules.auth.schemas import (
     RefreshRequest,
     TokenPairOut,
 )
-from app.modules.auth.service import AuthService
+from app.modules.auth.service import OAUTH_PROVIDERS, AuthService
 from app.shared.errors.app_error import UnauthorizedError
-from app.shared.helpers.crypto import sha256_hash
 from app.shared.http.respond import created, error_response, no_content, ok
 from app.shared.logger import get_logger
-from app.shared.middleware.authenticate import _from_jwt
+from app.shared.middleware.authenticate import AuthContext, _from_jwt
 from app.shared.middleware.rate_limit import AUTH_LIMIT, OAUTH_CALLBACK_LIMIT, limiter, user_key
 
 log = get_logger()
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-_VALID_PROVIDERS = frozenset({"google", "github", "saml"})
+# OAuth providers wired into the code-exchange flow, plus SAML (accepted here
+# but answered 501 by the service until it is implemented). Derived from the
+# service registry so the two never drift.
+_VALID_PROVIDERS = OAUTH_PROVIDERS | {"saml"}
 _bearer = HTTPBearer(auto_error=False)
+
+
+def _optional_auth(
+    credentials: HTTPAuthorizationCredentials | None,
+) -> AuthContext | None:
+    """Resolve an optional Bearer token for the account-linking flow.
+
+    Returns ``None`` when no token is supplied (anonymous sign-up/sign-in). A
+    token that is *present but invalid/expired* is rejected with a 401 rather
+    than silently downgraded to anonymous — otherwise an expired session would
+    drop the intended account link without any signal to the caller.
+    """
+    if credentials is None:
+        return None
+    auth = _from_jwt(credentials.credentials)
+    if auth is None:
+        raise UnauthorizedError("Invalid or expired access token")
+    return auth
 
 # The raw refresh token is delivered as an httpOnly, secure, samesite=strict
 # cookie (BACKEND_BEST_PRACTICES.md §7) so it is never readable by JS. Scoped to
@@ -198,7 +218,7 @@ async def oauth_start(
             message="Provider must be google, github, or saml.",
         )
 
-    auth = _from_jwt(credentials.credentials) if credentials else None
+    auth = _optional_auth(credentials)
     result = await service.start_oauth(
         provider=provider,
         mode=mode,
@@ -228,7 +248,7 @@ async def oauth_callback(
             message="Provider must be google, github, or saml.",
         )
 
-    auth = _from_jwt(credentials.credentials) if credentials else None
+    auth = _optional_auth(credentials)
     session_out = await service.handle_oauth_callback(
         provider=provider,
         code=body.code,
