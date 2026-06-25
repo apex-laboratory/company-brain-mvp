@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import httpx
 
-from app.integrations import OAuthProfile
+from app.integrations import OAuthError, OAuthProfile
 
 _TOKEN_URL = "https://github.com/login/oauth/access_token"
 _USER_URL = "https://api.github.com/user"
@@ -35,7 +35,17 @@ async def exchange_code(
             headers={"Accept": "application/json"},
         )
         resp.raise_for_status()
-        return str(resp.json()["access_token"])
+        # GitHub signals token errors (bad/expired code) with HTTP 200 and a body
+        # like ``{"error": "bad_verification_code"}`` — raise_for_status passes, so
+        # a missing access_token must be handled explicitly rather than KeyError'ing
+        # into an unhandled 500.
+        payload = resp.json()
+        token = payload.get("access_token")
+        if not token:
+            raise OAuthError(
+                f"GitHub token exchange failed: {payload.get('error', 'unknown')}"
+            )
+        return str(token)
 
 
 async def fetch_profile(access_token: str) -> OAuthProfile:
@@ -56,11 +66,17 @@ async def fetch_profile(access_token: str) -> OAuthProfile:
 
 
 def _primary_email(entries: list[dict[str, object]]) -> str:
-    """Return the primary verified email; fall back to primary; then first entry."""
+    """Return the primary verified email, else any verified email.
+
+    Only verified emails are trusted: the callback resolves the user by email, so
+    returning an unverified address would let an attacker who added (but never
+    confirmed) a victim's email to their GitHub account take over that account.
+    Raises ``OAuthError`` when no verified email is available.
+    """
     for e in entries:
         if e.get("primary") and e.get("verified"):
             return str(e["email"])
     for e in entries:
-        if e.get("primary"):
+        if e.get("verified"):
             return str(e["email"])
-    return str(entries[0]["email"])
+    raise OAuthError("GitHub returned no verified email for this account.")

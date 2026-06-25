@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import httpx
 
-from app.integrations import OAuthProfile
+from app.integrations import OAuthError, OAuthProfile
 
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
@@ -46,4 +46,19 @@ async def fetch_profile(access_token: str) -> OAuthProfile:
         )
         resp.raise_for_status()
         data = resp.json()
-    return OAuthProfile(email=data["email"], name=data.get("name"))
+
+    email = data.get("email")
+    if not email:
+        raise OAuthError("Google returned no email for this account.")
+    # ``email_verified`` may arrive as a bool or the string "true"; only an
+    # affirmatively-verified email is trustworthy. Skipping this check lets a
+    # caller with an unverified Google email matching an existing account take
+    # it over (the callback resolves the user by email).
+    verified = data.get("email_verified")
+    if verified not in (True, "true"):
+        raise OAuthError(
+            "Your Google email is not verified.",
+            status=403,
+            code="oauth_email_unverified",
+        )
+    return OAuthProfile(email=email, name=data.get("name"))

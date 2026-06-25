@@ -22,8 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.config.settings import settings
-from app.integrations import OAuthProfile
-from app.integrations import google_oauth, github_oauth
+from app.integrations import OAuthError, OAuthProfile, github_oauth, google_oauth
 from app.modules.auth.repository import AuthRepository, MembershipRecord, UserRecord
 from app.modules.auth.schemas import (
     AuthSessionOut,
@@ -348,11 +347,20 @@ class AuthService:
                 algorithms=["HS256"],
                 options={"require_exp": True},
             )
-        except JWTError:
-            raise UnauthorizedError("Invalid OAuth state")
+        except JWTError as exc:
+            raise UnauthorizedError("Invalid OAuth state") from exc
 
         state_hash = sha256_hash(state)
 
+        # ── Phase 1: validate + consume the state (short transaction) ──────────
+        # The state is consumed and committed here, before the provider round-trip,
+        # so we never hold a DB connection or the ``FOR UPDATE`` row lock across an
+        # external HTTP call (which can take up to ~20s for GitHub). The lock still
+        # serialises concurrent callbacks for the same state: the second request
+        # blocks on the SELECT FOR UPDATE until this commits, then sees
+        # ``consumed_at`` set and fails check 4. A failed exchange afterwards leaves
+        # the state burned (codes are single-use at the provider anyway).
+        state_user_id = state_claims.get("user_id")
         async with get_session() as session:
             # Check 3: row exists by sha256(state).
             row = await self._repository.find_oauth_state(
@@ -375,7 +383,6 @@ class AuthService:
 
             # Check 7: if user_id present in state, it must match the
             # currently authenticated user (if any).
-            state_user_id = state_claims.get("user_id")
             if (
                 state_user_id is not None
                 and current_user_id is not None
@@ -383,17 +390,26 @@ class AuthService:
             ):
                 raise UnauthorizedError("Invalid OAuth state")
 
-            # Mark consumed before the provider round-trip so a concurrent
-            # replay cannot race through the same state.
+            redirect_uri = row.redirect_uri
             await self._repository.mark_oauth_state_consumed(session, row.id)
+            await session.commit()
 
-            # Exchange code + fetch user profile from the provider.
-            try:
-                profile = await _fetch_profile(provider, code, row.redirect_uri)
-            except httpx.HTTPError as exc:
-                log.warning("oauth_provider_error", provider=provider, error=str(exc))
-                raise AppError(502, "provider_error", "OAuth provider request failed.")
+        # ── Phase 2: provider round-trip (no DB connection held) ───────────────
+        try:
+            profile = await _fetch_profile(provider, code, redirect_uri)
+        except httpx.HTTPError as exc:
+            log.warning("oauth_provider_error", provider=provider, error=str(exc))
+            raise AppError(
+                502, "provider_error", "OAuth provider request failed."
+            ) from exc
+        except OAuthError as exc:
+            # HTTP succeeded but the payload is unusable (error body, unverified or
+            # missing email). Surface the provider-supplied status/code, not a 500.
+            log.warning("oauth_profile_error", provider=provider, error=str(exc))
+            raise AppError(exc.status, exc.code, exc.message) from exc
 
+        # ── Phase 3: upsert user + issue tokens (second transaction) ───────────
+        async with get_session() as session:
             # Upsert the user row (no duplicate users for the same email).
             new_user_id = generate_id("user")
             user = await self._repository.upsert_oauth_user(
@@ -402,6 +418,16 @@ class AuthService:
                 email=profile.email.lower(),
                 name=profile.name,
             )
+
+            # Account-linking guard: if the state was minted for an authenticated
+            # user (``state_user_id``), the provider email must resolve to that same
+            # user. Without this, a linking attempt whose provider email differs
+            # would silently log the caller into (or create) a *different* account.
+            # Proper cross-email linking needs a provider-identity table; until then
+            # we fail closed rather than switch identity. The rollback undoes the
+            # throwaway upsert when the emails don't match.
+            if state_user_id is not None and user.id != state_user_id:
+                raise UnauthorizedError("Invalid OAuth state")
 
             membership = await self._repository.find_primary_membership(
                 session, user.id
@@ -475,14 +501,17 @@ def _build_auth_url(provider: str, state_raw: str, redirect_uri: str) -> str:
             "access_type": "online",
         }
         return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
-    # github
-    params = {
-        "client_id": settings.github_client_id,
-        "redirect_uri": redirect_uri,
-        "scope": "user:email",
-        "state": state_raw,
-    }
-    return f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+    if provider == "github":
+        params = {
+            "client_id": settings.github_client_id,
+            "redirect_uri": redirect_uri,
+            "scope": "user:email",
+            "state": state_raw,
+        }
+        return f"https://github.com/login/oauth/authorize?{urlencode(params)}"
+    # Explicit: a provider in _VALID_PROVIDERS without a builder here is a bug, not
+    # a silent fall-through to GitHub.
+    raise AppError(501, "not_implemented", f"Unsupported OAuth provider: {provider}")
 
 
 async def _fetch_profile(
@@ -497,11 +526,13 @@ async def _fetch_profile(
             client_secret=settings.google_client_secret,
         )
         return await google_oauth.fetch_profile(token)
-    # github
-    token = await github_oauth.exchange_code(
-        code=code,
-        redirect_uri=redirect_uri,
-        client_id=settings.github_client_id,
-        client_secret=settings.github_client_secret,
-    )
-    return await github_oauth.fetch_profile(token)
+    if provider == "github":
+        token = await github_oauth.exchange_code(
+            code=code,
+            redirect_uri=redirect_uri,
+            client_id=settings.github_client_id,
+            client_secret=settings.github_client_secret,
+        )
+        return await github_oauth.fetch_profile(token)
+    # Explicit: never silently treat an unknown provider as GitHub.
+    raise AppError(501, "not_implemented", f"Unsupported OAuth provider: {provider}")

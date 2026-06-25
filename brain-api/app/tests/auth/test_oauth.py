@@ -5,28 +5,27 @@ in-memory fake. No database or Redis required.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from jose import jwt
 
 from app.config.settings import settings
-from app.integrations import OAuthProfile
+from app.integrations import OAuthError, OAuthProfile
+from app.integrations.github_oauth import _primary_email
 from app.modules.auth.repository import (
     AuthRepository,
     MembershipRecord,
     OAuthStateRow,
-    RefreshTokenRow,
     UserRecord,
 )
 from app.modules.auth.service import AuthService
 from app.shared.errors.app_error import AppError, UnauthorizedError
 from app.shared.helpers.crypto import sha256_hash
-from app.shared.helpers.ids import generate_id
-
 
 # ── fake session ──────────────────────────────────────────────────────────────
 
@@ -549,38 +548,107 @@ async def test_callback_user_id_in_state_none_skips_check(
     assert out.user.email == "alice@example.com"
 
 
+# ── provider profile validation ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_callback_maps_oauth_error_to_provider_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An OAuthError from the provider leg (e.g. unverified email) becomes a clean
+    AppError with the provider-supplied status — never an unhandled 500."""
+    repo = FakeRepo()
+    service = AuthService(repository=repo)
+    state_raw = _make_state(provider="google")
+    _seed_state(repo, state_raw, provider="google")
+
+    async def _raise_unverified(provider: str, code: str, redirect_uri: str) -> OAuthProfile:
+        raise OAuthError(
+            "Your Google email is not verified.",
+            status=403,
+            code="oauth_email_unverified",
+        )
+
+    monkeypatch.setattr("app.modules.auth.service.get_session", _fake_session_ctx)
+    monkeypatch.setattr("app.modules.auth.service._fetch_profile", _raise_unverified)
+
+    with pytest.raises(AppError) as exc:
+        await service.handle_oauth_callback(
+            provider="google",
+            code="code",
+            state=state_raw,
+            current_user_id=None,
+            user_agent=None,
+            ip=None,
+        )
+    assert exc.value.status == 403
+    assert exc.value.code == "oauth_email_unverified"
+    # The state was still consumed in phase 1 (single-use), even though the
+    # provider leg failed.
+    assert repo.state_rows[0].consumed_at is not None
+
+
+def test_primary_email_requires_verified() -> None:
+    # Primary + verified wins.
+    assert (
+        _primary_email(
+            [
+                {"email": "old@x.com", "primary": False, "verified": True},
+                {"email": "main@x.com", "primary": True, "verified": True},
+            ]
+        )
+        == "main@x.com"
+    )
+    # No verified primary → first verified non-primary.
+    assert (
+        _primary_email(
+            [
+                {"email": "main@x.com", "primary": True, "verified": False},
+                {"email": "alt@x.com", "primary": False, "verified": True},
+            ]
+        )
+        == "alt@x.com"
+    )
+    # No verified email at all → reject rather than trust an unverified address.
+    with pytest.raises(OAuthError):
+        _primary_email([{"email": "main@x.com", "primary": True, "verified": False}])
+    # Empty list → reject (no IndexError).
+    with pytest.raises(OAuthError):
+        _primary_email([])
+
+
 # ── failure messages are generic (no enumeration) ─────────────────────────────
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "exc_factory",
-    [
-        lambda: _raise_wrong_sig(),
-        lambda: _raise_consumed(),
-    ],
-)
+@pytest.mark.parametrize("scenario", ["wrong_signature", "consumed"])
 async def test_all_state_failures_return_same_message(
     monkeypatch: pytest.MonkeyPatch,
-    exc_factory: Any,
+    scenario: str,
 ) -> None:
-    """Every state-validation error surface the same generic 401 message."""
-    # Tested individually above; this just confirms the message string is stable.
-    # We test wrong-sig (check 1/2) and consumed (check 4) as representatives.
-    pass  # covered by individual parametrized tests above
+    """Distinct state-validation failures surface the same generic 401 message,
+    so a caller cannot enumerate which check failed."""
+    repo = FakeRepo()
+    service = AuthService(repository=repo)
+    monkeypatch.setattr("app.modules.auth.service.get_session", _fake_session_ctx)
 
+    if scenario == "wrong_signature":
+        # check 1/2: not a valid signed JWT.
+        state = "not.a.jwt"
+    else:
+        # check 4: a real, signed state whose row is already consumed.
+        state = _make_state(provider="google")
+        _seed_state(repo, state, provider="google", consumed=True)
 
-# ── helpers used by tests ─────────────────────────────────────────────────────
-
-def _raise_wrong_sig() -> None:
-    raise UnauthorizedError("Invalid OAuth state")
-
-
-def _raise_consumed() -> None:
-    raise UnauthorizedError("Invalid OAuth state")
-
-
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+    with pytest.raises(UnauthorizedError) as exc:
+        await service.handle_oauth_callback(
+            provider="google",
+            code="code",
+            state=state,
+            current_user_id=None,
+            user_agent=None,
+            ip=None,
+        )
+    assert exc.value.status == 401
+    assert exc.value.message == "Invalid OAuth state"
 
 
 @asynccontextmanager
