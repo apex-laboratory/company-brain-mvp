@@ -28,7 +28,6 @@ from app.modules.auth.schemas import (
 )
 from app.modules.auth.service import OAUTH_PROVIDERS, AuthService
 from app.shared.errors.app_error import UnauthorizedError
-from app.shared.helpers.crypto import sha256_hash
 from app.shared.http.respond import created, error_response, no_content, ok
 from app.shared.logger import get_logger
 from app.shared.middleware.authenticate import AuthContext, _from_jwt
