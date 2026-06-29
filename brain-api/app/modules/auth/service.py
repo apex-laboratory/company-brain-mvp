@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from jose import JWTError, jwt
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +34,7 @@ from app.modules.auth.tokens import generate_refresh_token, mint_access_token
 from app.shared.errors.app_error import AppError, ConflictError, NotFoundError, UnauthorizedError
 from app.shared.helpers.crypto import sha256_hash
 from app.shared.helpers.ids import generate_id
+from app.shared.helpers.oauth_state import decode_state, encode_state
 from app.shared.logger import get_logger
 
 log = get_logger()
@@ -300,22 +300,18 @@ class AuthService:
             f"/api/v1/auth/oauth/{provider}/callback"
         )
 
-        now = datetime.now(UTC)
-        state_payload: dict[str, object] = {
-            "user_id": user_id,
-            "workspace_id": workspace_id,
-            "provider": provider,
-            "redirect_uri": redirect_uri,
-            "mode": mode,
-            "exp": int(
-                (now + timedelta(seconds=settings.oauth_state_ttl_seconds)).timestamp()
-            ),
-        }
-        state_raw: str = jwt.encode(
-            state_payload, settings.jwt_access_secret, algorithm="HS256"
+        expires_at = datetime.now(UTC) + timedelta(
+            seconds=settings.oauth_state_ttl_seconds
+        )
+        state_raw = encode_state(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            provider=provider,
+            redirect_uri=redirect_uri,
+            mode=mode,
+            expires_at=expires_at,
         )
         state_hash = sha256_hash(state_raw)
-        expires_at = now + timedelta(seconds=settings.oauth_state_ttl_seconds)
 
         async with get_session() as session:
             await self._repository.create_oauth_state(
@@ -348,16 +344,8 @@ class AuthService:
         All six state-validation checks must pass; any failure raises a generic
         401 so callers cannot enumerate which check failed.
         """
-        # Checks 1 & 2: JWT signature valid + exp not in the past.
-        try:
-            state_claims: dict[str, object] = jwt.decode(
-                state,
-                settings.jwt_access_secret,
-                algorithms=["HS256"],
-                options={"require_exp": True},
-            )
-        except JWTError as exc:
-            raise UnauthorizedError("Invalid OAuth state") from exc
+        # Checks 1 & 2: JWT signature valid + exp not in the past (shared helper).
+        state_claims = decode_state(state)
 
         state_hash = sha256_hash(state)
 

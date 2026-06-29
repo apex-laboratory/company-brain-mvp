@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # endpoint advertises ``https://{slug}.{mcp_base_domain}/mcp`` to clients.
     mcp_base_domain: str = "brainites.com"
 
-    # ── OAuth providers ───────────────────────────────────────────────────────
+    # ── OAuth providers (login SSO) ───────────────────────────────────────────
     google_client_id: str = ""
     google_client_secret: str = ""
     github_client_id: str = ""
@@ -60,6 +60,21 @@ class Settings(BaseSettings):
     # Base URL used to construct the redirect_uri sent to providers.
     # Must match a redirect registered in each provider's app config.
     oauth_redirect_base_url: str = "http://localhost:4000"
+
+    # ── Source-connection OAuth providers ─────────────────────────────────────
+    # Read-only knowledge-source connectors. Each empty by default so the app
+    # boots unconfigured; connecting an unconfigured provider returns 501.
+    # GitHub reuses github_client_id/github_client_secret above.
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    notion_client_id: str = ""
+    notion_client_secret: str = ""
+    jira_client_id: str = ""
+    jira_client_secret: str = ""
+    zendesk_client_id: str = ""
+    zendesk_client_secret: str = ""
+    # Zendesk OAuth is per-account: its URLs are {subdomain}.zendesk.com.
+    zendesk_subdomain: str = ""
 
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes
