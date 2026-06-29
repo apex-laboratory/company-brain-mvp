@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     resend_api_key: str
     default_from_email: str = "Brainite <founders@brainites.com>"
 
+    # Public dashboard origin used to build links in transactional emails
+    # (e.g. the member-invite acceptance URL). Frontend base, not the API host.
+    app_base_url: str = "http://localhost:3000"
+
     # Base domain for per-workspace MCP/brain endpoints. The workspace settings
     # endpoint advertises ``https://{slug}.{mcp_base_domain}/mcp`` to clients.
     mcp_base_domain: str = "brainites.com"
