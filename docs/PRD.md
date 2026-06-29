@@ -1,8 +1,8 @@
 # Company Brain — Product Specification
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Status:** Active  
-**Last updated:** May 2026
+**Last updated:** June 2026
 
 ---
 
@@ -30,7 +30,7 @@
 
 Company Brain is the missing layer between raw company data and reliable AI automation.
 
-Every company runs on operational knowledge that exists nowhere a machine can read — in Slack threads, Notion pages, Zendesk ticket resolutions, GitHub pull request discussions, and people's heads. AI agents fail on company-specific tasks not because the models are weak but because this knowledge is inaccessible to them.
+Every company runs on operational knowledge that exists nowhere a machine can read — in Slack threads, Notion pages, Google Drive documents, Zendesk ticket resolutions, GitHub pull request discussions, and people's heads. AI agents fail on company-specific tasks not because the models are weak but because this knowledge is inaccessible to them.
 
 Company Brain solves this by connecting to every source that knowledge lives in, extracting it into structured executable skills, keeping those skills current as the company evolves, and serving them to any AI agent through a standard interface.
 
@@ -48,6 +48,7 @@ It lives in:
 
 - Slack threads from 14 months ago where a policy decision was made in message 47 of a 50-message chain
 - Notion pages that describe how things worked before the last three policy revisions
+- Google Drive documents — the SOPs, policy decks, and process runbooks shared across the company but never wired into any system an agent can read
 - Zendesk ticket resolutions that collectively encode how edge cases are actually handled, but are buried in thousands of tickets
 - GitHub pull request review comments where engineering exceptions and rollback decisions were debated
 - Jira tickets whose comment history captures how incidents are actually routed
@@ -72,7 +73,7 @@ These decisions reflect deliberate choices to keep the MVP shippable and the pro
 | ExIde two-stage extraction                  | Replaced by a cleaner two-pass extraction design with better separation of concerns.                                                                            |
 | Multi-tenant PII redaction                  | Required before external enterprise customers. Not for internal prototype.                                                                                      |
 | Fine-tuned content classifier               | Claude Haiku via prompt handles classification at MVP scale.                                                                                                    |
-| Salesforce, HubSpot, Gmail, Gong connectors | Post-MVP. Five sources are sufficient to prove the extraction pipeline.                                                                                         |
+| Salesforce, HubSpot, Gmail, Gong connectors | Post-MVP. Six sources are sufficient to prove the extraction pipeline.                                                                                         |
 
 ---
 
@@ -101,7 +102,7 @@ Company Brain is organized into three layers. The onboarding sweep populates the
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  SOURCES                                                        │
-│  Slack · Notion · GitHub · Jira · Zendesk                       │
+│  Slack · Notion · Google Drive · GitHub · Jira · Zendesk        │
 │  Connected via MCP clients + webhook subscriptions              │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
@@ -133,7 +134,7 @@ Company Brain is organized into three layers. The onboarding sweep populates the
 
 ### Living Currency
 
-Every source connected during onboarding also has a webhook subscription created for ongoing monitoring. When a relevant event occurs in a monitored Slack channel, Notion space, or Jira project, the extraction engine re-processes only the affected content. Updated skills publish within five minutes of the source event.
+Every source connected during onboarding also has a webhook subscription created for ongoing monitoring. When a relevant event occurs in a monitored Slack channel, Notion space, Google Drive folder, or Jira project, the extraction engine re-processes only the affected content. Updated skills publish within five minutes of the source event.
 
 ### Hybrid Retrieval
 
@@ -307,9 +308,9 @@ Log of every incoming webhook event. Used for sweep resume, audit trail, and deb
 CREATE TABLE source_events (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   source       VARCHAR(50),
-  -- slack | notion | github | jira | zendesk
+  -- slack | notion | google_drive | github | jira | zendesk
   event_type   VARCHAR(50),
-  -- message | page_update | pr_merged | issue_closed | ticket_resolved | etc
+  -- message | page_update | file_update | pr_merged | issue_closed | ticket_resolved | etc
   source_id    VARCHAR(255),
   payload      JSONB,
   processed    BOOLEAN DEFAULT FALSE,
@@ -372,7 +373,7 @@ OAuth token storage and monitored channel/space/project configuration. Created d
 CREATE TABLE source_connections (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   source           VARCHAR(50) UNIQUE NOT NULL,
-  -- slack | notion | github | jira | zendesk
+  -- slack | notion | google_drive | github | jira | zendesk
   status           VARCHAR(20) DEFAULT 'connected',
   -- connected | disconnected | error
   access_token     TEXT,
@@ -392,6 +393,8 @@ CREATE INDEX ON source_connections (source, status);
 
 Tracks every active webhook subscription created during onboarding. Required for lifecycle management: when a source is disconnected or a monitored channel is removed, subscriptions must be explicitly revoked. Without this table there is no way to know what to un-subscribe.
 
+**Note on Google Drive:** Drive delivers events via push-notification channels (watch on a folder/file via the Changes API) that **expire** (max ~7 days) and must be renewed. The `expires_at` column below drives a renewal job; the other sources' subscriptions do not expire and leave it null.
+
 ```sql
 CREATE TABLE webhook_subscriptions (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -401,11 +404,14 @@ CREATE TABLE webhook_subscriptions (
   target_id       VARCHAR(255),
   -- channel/space/project being monitored
   status          VARCHAR(20) DEFAULT 'active',
-  -- active | revoked
+  -- active | revoked | expired
+  expires_at      TIMESTAMP,
+  -- set for sources with expiring channels (Google Drive); null otherwise
   created_at      TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX ON webhook_subscriptions (source, status);
+CREATE INDEX ON webhook_subscriptions (expires_at);
 ```
 
 ---
@@ -425,6 +431,8 @@ tiers:
     sources:
       - type: notion
         signals: [designated_policy_page, owner_edited]
+      - type: google_drive
+        signals: [designated_policy_folder, owner_edited]
       - type: github
         signals: [path_prefix=/docs, path_prefix=/runbooks]
       - type: jira
@@ -443,6 +451,8 @@ tiers:
     sources:
       - type: slack
         signals: []
+      - type: google_drive
+        signals: [outside_designated_folder]
       - type: github
         signals: [content_type=comment]
       - type: jira
@@ -455,7 +465,7 @@ routing:
   # below 0.70 → draft, not surfaced to reviewers
 
 sweep:
-  processing_order: [notion, github, jira, slack, zendesk]
+  processing_order: [notion, google_drive, github, jira, slack, zendesk]
   rate_per_minute: 10    # items processed per source per minute
   semaphore_limit: 5     # concurrent LLM calls
   auto_publish_during_sweep: false
@@ -477,6 +487,7 @@ Supported event types per source:
 | ------- | ----------------------------------------------------------------------------- |
 | Slack   | `message` in monitored channels, `message_changed` (edits), `pin_added`       |
 | Notion  | `page.updated`, `page.created` in monitored spaces                            |
+| Google Drive | `file.created`, `file.updated` (via Drive changes/push notifications) in monitored folders |
 | GitHub  | `pull_request.closed` (merged), `issue.closed`, `push` to monitored paths     |
 | Jira    | `issue.updated` (status transitions), `comment.created` on monitored projects |
 | Zendesk | `ticket.updated` (solved), `ticket.tagged` with monitored tags                |
@@ -488,6 +499,7 @@ One expander per source. Each knows how to fetch full surrounding context for an
 | ------- | -------------------------------------------------------------------- |
 | Slack   | Full thread from the message ID, including all replies and reactions |
 | Notion  | Full page body + parent page title + linked page titles and excerpts |
+| Google Drive | Full document text (Docs/Sheets/Slides exported to text) + parent folder name + document comments |
 | GitHub  | PR description + all review comments + body of linked issues         |
 | Jira    | Ticket body + all comments + linked tickets + transition log         |
 | Zendesk | Ticket + all comments + tags + resolution note                       |
@@ -656,7 +668,7 @@ Response schema:
 **Feature 16 — Query-driven extraction**
 When `query_brain` finds no match (max similarity < 0.70), instead of returning empty:
 
-1. Use the situation string as a search query against source MCPs (Notion, Slack designated channels, Zendesk)
+1. Use the situation string as a search query against source MCPs (Notion, Google Drive designated folders, Slack designated channels, Zendesk)
 2. Fetch top results from connected sources
 3. Run full extraction pipeline on combined results (same as event-driven)
 4. Return the extracted skill to the agent immediately, flagged as `match_type: query_driven`
@@ -721,7 +733,7 @@ During and after the onboarding sweep, the review queue will contain many `sweep
 ### Onboarding
 
 **Feature 24 — Source connector setup**
-OAuth connection flow for each source. Slack, Notion, GitHub, Jira, and Zendesk each have their own OAuth screen. Connection credentials are stored and used for both the onboarding sweep and ongoing webhook subscriptions.
+OAuth connection flow for each source. Slack, Notion, Google Drive, GitHub, Jira, and Zendesk each have their own OAuth screen. Google Drive uses Google OAuth with the `drive.readonly` scope. Connection credentials are stored and used for both the onboarding sweep and ongoing webhook subscriptions.
 
 **Feature 25 — Onboarding configuration UI**
 Channel, space, and project picker with time window selector. The user explicitly chooses which sources contain operational knowledge. This configuration:
@@ -733,7 +745,7 @@ Channel, space, and project picker with time window selector. The user explicitl
 **Feature 26 — Sweep worker**
 Background job that processes historical content in authority-priority order with rate limiting. Resumable: if the job fails, it picks up from the last processed item using the `source_events.sweep_id` field. Progress is tracked per source in the `sweeps` table.
 
-Processing order: Notion → GitHub → Jira → Slack → Zendesk
+Processing order: Notion → Google Drive → GitHub → Jira → Slack → Zendesk
 
 ```python
 async def run_sweep(sweep_id: str):
@@ -843,7 +855,7 @@ Source event received
   [PASS 1 — DECISION MOMENT IDENTIFICATION — Haiku]
   → For threaded sources: extract authoritative decision moments
   → Output: [{message_id, author, timestamp, decision_text, signals}]
-  → For non-threaded sources (Notion pages, GitHub files): skip to Pass 2
+  → For non-threaded sources (Notion pages, Google Drive documents, GitHub files): skip to Pass 2
 
   [PASS 2 — SKILL EXTRACTION — Sonnet]
   → Input: decision moments + authority-annotated context
@@ -896,7 +908,7 @@ User completes onboarding config
   → Set up webhook subscriptions for all selected sources
 
   [SWEEP WORKER — background job]
-  → For each source in authority order (Notion → GitHub → Jira → Slack → Zendesk):
+  → For each source in authority order (Notion → Google Drive → GitHub → Jira → Slack → Zendesk):
       → Fetch historical items within configured time window
       → For each batch of 10:
           → Run full extraction pipeline (Process 1 steps)
@@ -949,6 +961,7 @@ max_similarity < 0.70 (no match found in Process 3)
   [LIVE SOURCE SEARCH]
   → Use situation string as search query
   → Search Notion designated spaces
+  → Search Google Drive designated folders
   → Search Slack monitored channels
   → Search Zendesk resolved tickets
   → Fetch top 5 results across all sources
@@ -1060,7 +1073,7 @@ Reviewer opens item card
 
 ### Step 1 — Connect Sources
 
-User sees a source connection screen. Each source has a Connect button that initiates OAuth. User can connect any subset of the five sources — doesn't have to be all five.
+User sees a source connection screen. Each source has a Connect button that initiates OAuth. User can connect any subset of the six sources — doesn't have to be all six.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -1068,11 +1081,12 @@ User sees a source connection screen. Each source has a Connect button that init
 ├─────────────────────────────────────────────────────────┤
 │ ○ Slack          [Connect →]                           │
 │ ○ Notion         [Connect →]                           │
+│ ○ Google Drive   [Connect →]                           │
 │ ○ GitHub         [Connect →]                           │
 │ ○ Jira           [Connect →]                           │
 │ ○ Zendesk        [Connect →]                           │
 ├─────────────────────────────────────────────────────────┤
-│ Connected: 0 of 5                                       │
+│ Connected: 0 of 6                                       │
 │                        [Continue with connected →]      │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -1093,6 +1107,11 @@ User explicitly selects which channels, spaces, and projects contain operational
 │ NOTION — select spaces                                  │
 │ ☑ Operations         ☑ Engineering Runbooks            │
 │ ☐ Marketing          ☐ People & Culture                │
+├─────────────────────────────────────────────────────────┤
+│ GOOGLE DRIVE — select folders                           │
+│ ☑ Company Policies   ☑ SOPs & Runbooks                 │
+│ ☐ Sales Decks        ☐ Personal                        │
+│ How far back?  [Last 6 months ▼]                       │
 ├─────────────────────────────────────────────────────────┤
 │ GITHUB — paths included automatically                   │
 │ /docs  /runbooks  /.github/workflows                   │
@@ -1213,7 +1232,7 @@ async def query_brain(situation: str) -> dict:
 
 **Deliverables:**
 
-- OAuth flows for all five sources
+- OAuth flows for all six sources
 - Onboarding config UI (channel/space picker + time window)
 - Sweep worker with priority ordering and rate limiting
 - `GET /ingest/sweep/{id}/status` with per-source progress
@@ -1224,7 +1243,7 @@ async def query_brain(situation: str) -> dict:
 
 **Acceptance:**
 
-- User can complete OAuth for all five sources
+- User can complete OAuth for all six sources
 - After onboarding config, sweep worker starts and processes items in authority order
 - `GET /ingest/sweep/{id}/status` shows real-time per-source progress
 - `source_events` table populates during sweep
