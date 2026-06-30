@@ -64,7 +64,8 @@ class Settings(BaseSettings):
     # ── Source-connection OAuth providers ─────────────────────────────────────
     # Read-only knowledge-source connectors. Each empty by default so the app
     # boots unconfigured; connecting an unconfigured provider returns 501.
-    # GitHub reuses github_client_id/github_client_secret above.
+    # GitHub reuses github_client_id/github_client_secret above; Google Drive
+    # reuses google_client_id/google_client_secret above.
     slack_client_id: str = ""
     slack_client_secret: str = ""
     notion_client_id: str = ""

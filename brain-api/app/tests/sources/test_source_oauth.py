@@ -36,12 +36,14 @@ def _set_creds(monkeypatch: pytest.MonkeyPatch, **creds: str) -> None:
         "zendesk_client_id": "",
         "zendesk_client_secret": "",
         "zendesk_subdomain": "",
+        "google_client_id": "",
+        "google_client_secret": "",
     }
     base.update(creds)
     monkeypatch.setattr(source_oauth, "settings", SimpleNamespace(**base))
 
 
-def test_catalog_lists_all_five_read_only_providers() -> None:
+def test_catalog_lists_all_read_only_providers() -> None:
     catalog = source_oauth.provider_catalog()
     assert {p["provider"] for p in catalog} == {
         "slack",
@@ -49,6 +51,7 @@ def test_catalog_lists_all_five_read_only_providers() -> None:
         "github",
         "jira",
         "zendesk",
+        "google_drive",
     }
     assert all(p["readOnly"] is True for p in catalog)
 
@@ -153,6 +156,57 @@ async def test_exchange_code_slack_ok_false_raises(
         await source_oauth.exchange_code(
             provider="slack", code="c", redirect_uri="https://cb", scopes=[]
         )
+
+
+def test_build_authorize_url_google_drive_forces_offline_consent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Drive reuses the Google login-SSO client credentials.
+    _set_creds(monkeypatch, google_client_id="gid", google_client_secret="gsec")
+
+    url = source_oauth.build_authorize_url(
+        provider="google_drive",
+        redirect_uri="https://app.example/cb",
+        state="st_g",
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    assert parsed.netloc == "accounts.google.com"
+    assert qs["client_id"] == ["gid"]
+    # offline + consent are what make Google return a refresh token.
+    assert qs["access_type"] == ["offline"]
+    assert qs["prompt"] == ["consent"]
+
+
+@pytest.mark.asyncio
+async def test_exchange_code_google_drive_uses_form_auth_and_static_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_creds(monkeypatch, google_client_id="gid", google_client_secret="gsec")
+    capture: dict[str, Any] = {}
+    payload = {
+        "access_token": "ya29-token",
+        "refresh_token": "1//refresh",
+        "expires_in": 3599,
+        "scope": "https://www.googleapis.com/auth/drive.readonly",
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kw: _FakeClient(payload, capture))
+
+    token = await source_oauth.exchange_code(
+        provider="google_drive",
+        code="c",
+        redirect_uri="https://cb",
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    assert token.access_token == "ya29-token"
+    assert token.refresh_token == "1//refresh"
+    assert token.expires_in == 3599
+    # No account identity in the token response → static name, default account.
+    assert token.external_account_id is None
+    assert token.account_name == "Google Drive"
+    # Google accepts client creds in the form body (form auth style).
+    assert "data" in capture["kwargs"] and "auth" not in capture["kwargs"]
 
 
 @pytest.mark.asyncio

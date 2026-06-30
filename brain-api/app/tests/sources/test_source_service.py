@@ -185,6 +185,7 @@ def test_list_providers_returns_catalog() -> None:
         "github",
         "jira",
         "zendesk",
+        "google_drive",
     }
 
 

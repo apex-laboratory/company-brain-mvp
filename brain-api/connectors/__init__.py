@@ -3,6 +3,7 @@ from .notion import NotionConnector
 from .github import GitHubConnector
 from .jira import JiraConnector
 from .zendesk import ZendeskConnector
+from .google_drive import GoogleDriveConnector
 
 __all__ = [
     "SlackConnector",
@@ -10,4 +11,5 @@ __all__ = [
     "GitHubConnector",
     "JiraConnector",
     "ZendeskConnector",
+    "GoogleDriveConnector",
 ]

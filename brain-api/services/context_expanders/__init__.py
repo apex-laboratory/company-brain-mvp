@@ -5,6 +5,7 @@ from .notion import expand as _expand_notion
 from .github import expand as _expand_github
 from .jira import expand as _expand_jira
 from .zendesk import expand as _expand_zendesk
+from .google_drive import expand as _expand_google_drive
 
 
 @dataclass
@@ -22,6 +23,7 @@ _EXPANDERS = {
     "github": _expand_github,
     "jira": _expand_jira,
     "zendesk": _expand_zendesk,
+    "google_drive": _expand_google_drive,
 }
 
 

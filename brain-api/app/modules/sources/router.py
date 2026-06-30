@@ -35,7 +35,10 @@ from app.shared.middleware.rate_limit import (
 catalog_router = APIRouter(prefix="/sources", tags=["sources"])
 router = APIRouter(prefix="/workspaces", tags=["sources"])
 
-_INVALID_PROVIDER = "Provider must be one of: slack, notion, github, jira, zendesk."
+
+_INVALID_PROVIDER = (
+    "Provider must be one of: slack, notion, github, jira, zendesk, google_drive."
+)
 
 
 def get_source_service() -> SourceService:
