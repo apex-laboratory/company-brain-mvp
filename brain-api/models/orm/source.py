@@ -6,9 +6,8 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
+from .enums import source_provider_enum as _source_provider
 
-_source_provider = Enum("slack", "notion", "github", "jira", "zendesk",
-                         name="source_provider", create_type=False)
 _source_status = Enum("connected", "disconnected", "error", "pending",
                        name="source_status", create_type=False)
 _sync_status = Enum("healthy", "pending", "syncing", "error",

@@ -14,7 +14,7 @@ from pydantic import Field
 from app.shared.schemas import CamelModel as _Response
 from app.shared.schemas import CamelRequestModel as _Request
 
-SourceProvider = Literal["slack", "notion", "github", "jira", "zendesk"]
+SourceProvider = Literal["slack", "notion", "github", "jira", "zendesk", "google_drive"]
 # Sweep/ingestion lookback window (API_DOCUMENTATION.md §Configure Source Scope).
 TimeRange = Literal["30d", "90d", "6mo", "all"]
 

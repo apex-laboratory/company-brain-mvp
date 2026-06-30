@@ -1,9 +1,9 @@
 """Read-only source-connection OAuth (BACKEND_BEST_PRACTICES.md §1, §12).
 
 One generic OAuth2 authorization-code connector driven by a per-provider config
-table, rather than five near-identical modules — adding/adjusting a provider is a
-single ``_PROVIDERS`` entry. Covers Slack, Notion, GitHub, Jira (Atlassian), and
-Zendesk. All HTTP uses a 10-second timeout.
+table, rather than six near-identical modules — adding/adjusting a provider is a
+single ``_PROVIDERS`` entry. Covers Slack, Notion, GitHub, Jira (Atlassian),
+Zendesk, and Google Drive. All HTTP uses a 10-second timeout.
 
 The token exchange returns a normalized :class:`SourceToken` (access/refresh
 token, expiry, and the provider account id + display name) so the service layer
@@ -22,7 +22,7 @@ import httpx
 
 from app.config.settings import settings
 
-SourceProvider = Literal["slack", "notion", "github", "jira", "zendesk"]
+SourceProvider = Literal["slack", "notion", "github", "jira", "zendesk", "google_drive"]
 _TIMEOUT = httpx.Timeout(10.0)
 
 # Token-endpoint authentication styles across providers:
@@ -144,6 +144,24 @@ _PROVIDERS: dict[str, _ProviderConfig] = {
         cred_attrs=("zendesk_client_id", "zendesk_client_secret"),
         parse_account=lambda _d: (settings.zendesk_subdomain or None, "Zendesk"),
         extra_authorize_params={},
+    ),
+    "google_drive": _ProviderConfig(
+        display_name="Google Drive",
+        tag="SOPs & runbooks",
+        authorize_url=lambda: "https://accounts.google.com/o/oauth2/v2/auth",
+        token_url=lambda: "https://oauth2.googleapis.com/token",
+        default_scopes=("https://www.googleapis.com/auth/drive.readonly",),
+        auth_style="form",
+        # Drive source connections reuse the Google login-SSO OAuth client
+        # (same precedent as GitHub reusing its login credentials).
+        cred_attrs=("google_client_id", "google_client_secret"),
+        # The token response carries no Drive account identity; like GitHub/Jira
+        # we record a static display name and fall back to the default account.
+        parse_account=lambda _d: (None, "Google Drive"),
+        # Drive access tokens expire in ~1h; access_type=offline + prompt=consent
+        # force Google to return a refresh token so the sweep/webhook jobs can
+        # keep the connection alive without re-prompting the admin.
+        extra_authorize_params={"access_type": "offline", "prompt": "consent"},
     ),
 }
 
