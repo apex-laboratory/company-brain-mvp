@@ -15,6 +15,8 @@ from app.integrations.base import (
     SourceIntegration,
 )
 from app.integrations.github import GitHubIntegration
+from app.integrations.gmail import GmailIntegration
+from app.integrations.google_drive import GoogleDriveIntegration
 from app.integrations.notion import NotionIntegration
 from app.integrations.slack import SlackIntegration
 
@@ -24,6 +26,8 @@ REGISTRY: dict[str, SourceIntegration] = {
     "notion": NotionIntegration(),
     "github": GitHubIntegration(),
     "slack": SlackIntegration(),
+    "google_drive": GoogleDriveIntegration(),
+    "gmail": GmailIntegration(),
 }
 
 
@@ -42,6 +46,8 @@ __all__ = [
     "NotionIntegration",
     "GitHubIntegration",
     "SlackIntegration",
+    "GoogleDriveIntegration",
+    "GmailIntegration",
     "REGISTRY",
     "get_integration",
 ]

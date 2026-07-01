@@ -23,10 +23,14 @@ async def receive(provider: str, request: Request):
     """Receive, verify, and enqueue a provider webhook; respond 200 immediately.
 
     Slack's ``url_verification`` handshake returns a challenge that must be echoed
-    verbatim so the endpoint can be registered in the Slack app console.
+    verbatim so the endpoint can be registered in the Slack app console. Google push
+    (Drive/Gmail) is content-free and identifies the delivery via request headers /
+    query params, so both are passed to the service.
     """
     raw_body = await request.body()
-    challenge = await _service.receive(provider, request.headers, raw_body)
-    if challenge is not None:
-        return JSONResponse({"challenge": challenge})
-    return ok(request, {"status": "accepted"})
+    result = await _service.receive(
+        provider, request.headers, raw_body, dict(request.query_params)
+    )
+    if isinstance(result, str):
+        return JSONResponse({"challenge": result})
+    return ok(request, result or {"status": "accepted"})

@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     github_app_private_key: str = ""
     github_app_slug: str = ""  # used to build the install URL
     github_webhook_secret: str = ""  # shared secret for X-Hub-Signature-256
+    # Google (Drive + Gmail) share one OAuth client (web-server flow). The consent
+    # screen is kept in "Testing" status (<=100 users) to avoid Google verification.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    # Gmail push: the Cloud Pub/Sub topic users.watch publishes to, and a shared token
+    # embedded in the Pub/Sub push endpoint URL (?token=) used to verify deliveries.
+    google_pubsub_topic: str = ""  # projects/<project>/topics/<topic>
+    google_pubsub_verification_token: str = ""
 
     # Base domain for per-workspace MCP/brain endpoints.
     mcp_base_domain: str = "brainites.com"

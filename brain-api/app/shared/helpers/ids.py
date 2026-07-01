@@ -23,6 +23,7 @@ PREFIX_MAP: dict[str, str] = {
     "activity": "act",
     "member": "mem",
     "channel": "chn",
+    "webhook": "whs",
     "request": "req",
     "refresh_token": "rt",
     "oauth_state": "st",

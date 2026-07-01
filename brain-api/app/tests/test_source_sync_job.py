@@ -62,6 +62,7 @@ class _FakeRepo:
         self._state = state
         self._dup_ids = dup_ids or set()
         self.advanced_to: datetime | None = None
+        self.advanced_cursor: str | None = None
         self.error_marked = False
 
     async def get_sync_state(self, session, source_id):  # noqa: ANN001
@@ -70,8 +71,9 @@ class _FakeRepo:
     async def insert_event(self, session, workspace_id, event) -> bool:  # noqa: ANN001
         return event.source_id not in self._dup_ids
 
-    async def advance_sync(self, session, source_id, synced_at) -> None:  # noqa: ANN001
+    async def advance_sync(self, session, source_id, synced_at, sync_cursor=None) -> None:  # noqa: ANN001
         self.advanced_to = synced_at
+        self.advanced_cursor = sync_cursor
 
     async def mark_error(self, session, source_id, *, auth_broken) -> None:  # noqa: ANN001
         self.error_marked = True
@@ -136,6 +138,42 @@ async def test_sync_marks_auth_broken_on_401(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result == {"inserted": 0, "error": "auth_broken"}
     assert repo.error_marked is True
+
+
+class _OpaqueIntegration(_FakeIntegration):
+    """A token-cursor provider (like Google) whose cursor is an opaque string."""
+
+    opaque_cursor = True
+
+    async def fetch_since(self, token, channel, cursor):  # noqa: ANN001
+        # The incoming cursor is the stored opaque sync_cursor, not an ISO timestamp.
+        assert cursor == "pageTokenABC"
+        return self._items, "pageTokenXYZ"
+
+
+async def test_sync_roundtrips_opaque_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression guard: an opaque cursor (Drive pageToken / Gmail historyId) must be
+    # stored verbatim in sync_cursor — never passed through _parse_iso (which would
+    # crash on a non-timestamp string).
+    state = SyncState(
+        id="src_1",
+        provider="google_drive",
+        access_token_enc=encrypt("plain-token").encode(),
+        refresh_token_enc=None,
+        token_expires_at=None,
+        external_account_id="ada@acme.com",
+        last_synced_at=None,
+        sync_cursor="pageTokenABC",
+    )
+    items = [RawItem(external_id="f1", payload={})]
+    repo = _FakeRepo(state)
+    _wire(monkeypatch, _OpaqueIntegration(items, None), repo)
+
+    result = await job.source_sync({}, "wrk_1", "src_1")
+
+    assert result == {"inserted": 1}
+    assert repo.advanced_cursor == "pageTokenXYZ"  # stored opaque, not parsed
+    assert repo.advanced_to is not None  # last_synced_at still bumped for freshness
 
 
 async def test_sync_skips_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
