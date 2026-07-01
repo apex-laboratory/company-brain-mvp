@@ -25,6 +25,7 @@ class ResolvedState:
     user_id: str
     workspace_id: str
     redirect_uri: str
+    subdomain: str | None = None
 
 
 class SourcesRepository:
@@ -41,13 +42,16 @@ class SourcesRepository:
         user_id: str,
         workspace_id: str,
         expires_at: datetime,
+        subdomain: str | None = None,
     ) -> None:
         await session.execute(
             text(
                 """
                 INSERT INTO oauth_states
-                    (user_id, workspace_id, provider, redirect_uri, state_hash, expires_at)
-                VALUES (:user_id, :workspace_id, :provider, :redirect_uri, :state_hash, :expires_at)
+                    (user_id, workspace_id, provider, redirect_uri, state_hash,
+                     expires_at, subdomain)
+                VALUES (:user_id, :workspace_id, :provider, :redirect_uri, :state_hash,
+                        :expires_at, :subdomain)
                 """
             ).bindparams(
                 user_id=user_id,
@@ -56,6 +60,7 @@ class SourcesRepository:
                 redirect_uri=redirect_uri,
                 state_hash=state_hash,
                 expires_at=expires_at,
+                subdomain=subdomain,
             )
         )
         await session.commit()
@@ -83,7 +88,7 @@ class SourcesRepository:
                        AND provider = :provider
                        AND consumed_at IS NULL
                        AND expires_at > :now
-                    RETURNING id, user_id, workspace_id, redirect_uri
+                    RETURNING id, user_id, workspace_id, redirect_uri, subdomain
                     """
                 ).bindparams(state_hash=state_hash, provider=provider, now=now)
             )
@@ -96,6 +101,7 @@ class SourcesRepository:
             user_id=row.user_id,
             workspace_id=row.workspace_id,
             redirect_uri=row.redirect_uri,
+            subdomain=row.subdomain,
         )
 
     # ── source_connections (tenant, admin-only RLS) ──────────────────────────────

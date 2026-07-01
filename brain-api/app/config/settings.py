@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     github_app_private_key: str = ""
     github_app_slug: str = ""  # used to build the install URL
     github_webhook_secret: str = ""  # shared secret for X-Hub-Signature-256
+    # Zendesk OAuth (subdomain-scoped). One global OAuth client across all customer
+    # subdomains; the per-customer subdomain travels through the OAuth flow + connection.
+    zendesk_client_id: str = ""
+    zendesk_client_secret: str = ""
 
     # Base domain for per-workspace MCP/brain endpoints.
     mcp_base_domain: str = "brainites.com"

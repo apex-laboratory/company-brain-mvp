@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 
-from app.modules.sources.schemas import ChannelSelectRequest
+from app.modules.sources.schemas import AuthorizeStartRequest, ChannelSelectRequest
 from app.modules.sources.service import SourcesService
 from app.shared.http.respond import accepted, no_content, ok
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
@@ -34,10 +34,18 @@ async def list_sources(request: Request, auth: AuthContext = Depends(get_auth_co
 
 @router.post("/{provider}/authorize", dependencies=[Depends(require_role("admin"))])
 async def authorize(
-    provider: str, request: Request, auth: AuthContext = Depends(get_auth_context)
+    provider: str,
+    request: Request,
+    body: AuthorizeStartRequest | None = None,
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    """Begin the OAuth flow: return the provider consent URL to redirect the user to."""
-    result = await _service.start_authorization(auth, provider)
+    """Begin the OAuth flow: return the provider consent URL to redirect the user to.
+
+    Subdomain-scoped providers (Zendesk) pass ``{"subdomain": "acme"}`` in the body.
+    """
+    result = await _service.start_authorization(
+        auth, provider, subdomain=body.subdomain if body else None
+    )
     return accepted(request, result.model_dump(by_alias=True))
 
 

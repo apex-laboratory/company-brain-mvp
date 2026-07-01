@@ -74,8 +74,10 @@ class OAuthState(Base):
     workspace_id: Mapped[str | None] = mapped_column(
         Text, ForeignKey("workspaces.id", ondelete="CASCADE")
     )
-    provider: Mapped[str] = mapped_column(Text, nullable=False)          # google|github|saml|slack|…
+    provider: Mapped[str] = mapped_column(Text, nullable=False)  # google|github|slack|zendesk|…
     redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    # subdomain-scoped providers only (zendesk -> {subdomain}.zendesk.com); NULL otherwise
+    subdomain: Mapped[str | None] = mapped_column(Text)
     state_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
