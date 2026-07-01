@@ -27,6 +27,7 @@ class SyncState:
     external_account_id: str | None
     last_synced_at: datetime | None
     sync_cursor: str | None = None
+    lookback_days: int = 90
 
 
 class JobsRepository:
@@ -37,7 +38,7 @@ class JobsRepository:
                     """
                     SELECT id, provider, access_token_enc, refresh_token_enc,
                            token_expires_at, external_account_id, last_synced_at,
-                           sync_cursor
+                           sync_cursor, lookback_days
                       FROM source_connections
                      WHERE id = :id
                     """
@@ -260,3 +261,82 @@ class JobsRepository:
             )
         ).first()
         return (row.id, row.workspace_id) if row else None
+
+    # ── onboarding sweeps ──────────────────────────────────────────────────────────
+    async def list_connected_sources(self, session: AsyncSession) -> list[dict]:
+        """All connected connections in the tenant, oldest first (stable sweep order)."""
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, provider FROM source_connections
+                     WHERE status = 'connected'
+                     ORDER BY created_at
+                    """
+                )
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def selected_channel_ids(self, session: AsyncSession, source_id: str) -> list[str]:
+        """External ids of the channels selected for ingestion (empty = no selection)."""
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT external_id FROM source_channels
+                     WHERE source_id = :source_id
+                       AND selected
+                       AND external_id IS NOT NULL
+                    """
+                ).bindparams(source_id=source_id)
+            )
+        ).scalars().all()
+        return list(rows)
+
+    async def get_sweep(self, session: AsyncSession, sweep_id: str) -> dict | None:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, status, progress, skills_created, skills_queued,
+                           started_at, completed_at
+                      FROM sweeps
+                     WHERE id = CAST(:id AS uuid)
+                    """
+                ).bindparams(id=sweep_id)
+            )
+        ).mappings().first()
+        return dict(row) if row else None
+
+    async def set_sweep_status(
+        self, session: AsyncSession, sweep_id: str, status: str, *, completed: bool = False
+    ) -> None:
+        await session.execute(
+            text(
+                """
+                UPDATE sweeps
+                   SET status = :status,
+                       completed_at = CASE WHEN :completed THEN now() ELSE completed_at END
+                 WHERE id = CAST(:id AS uuid)
+                """
+            ).bindparams(id=sweep_id, status=status, completed=completed)
+        )
+
+    async def update_sweep_source_progress(
+        self, session: AsyncSession, sweep_id: str, provider: str, progress: dict
+    ) -> None:
+        """Write one provider's progress into ``sweeps.progress`` (keyed by provider)."""
+        await session.execute(
+            text(
+                """
+                UPDATE sweeps
+                   SET progress = jsonb_set(
+                           COALESCE(progress, '{}'::jsonb),
+                           ARRAY[:provider],
+                           CAST(:progress AS jsonb)
+                       )
+                 WHERE id = CAST(:id AS uuid)
+                """
+            ).bindparams(id=sweep_id, provider=provider, progress=json.dumps(progress))
+        )

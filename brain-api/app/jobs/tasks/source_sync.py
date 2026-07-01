@@ -87,7 +87,22 @@ async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
                     cursor = state.sync_cursor
                 else:
                     cursor = state.last_synced_at.isoformat() if state.last_synced_at else None
-                items, next_cursor = await integration.fetch_since(token, channel, cursor)
+                    if cursor is None and state.lookback_days:
+                        # First sync: seed the cursor from the connection's lookback
+                        # window (onboarding's "how far back?"). Opaque-cursor
+                        # providers bound their own bootstrap internally.
+                        cursor = (
+                            datetime.now(UTC) - timedelta(days=state.lookback_days)
+                        ).isoformat()
+
+                kwargs: dict = {}
+                if getattr(integration, "supports_channel_filter", False):
+                    # Channel-scoped providers (Slack) honor the onboarding picker:
+                    # sync only selected channels; no selection = all channels.
+                    selected = await _repo.selected_channel_ids(session, source_id)
+                    if selected:
+                        kwargs["allowed_channels"] = set(selected)
+                items, next_cursor = await integration.fetch_since(token, channel, cursor, **kwargs)
 
                 for item in items:
                     event = integration.normalize(item)

@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # Base domain for per-workspace MCP/brain endpoints.
     mcp_base_domain: str = "brainites.com"
 
+    # source_authority.yaml (sweep processing order etc.); lives at the repo root
+    # in dev. A missing file falls back to the built-in default order.
+    source_authority_path: str = "../source_authority.yaml"
+
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes
     refresh_token_ttl_seconds: int = 30 * 24 * 60 * 60  # 30 days

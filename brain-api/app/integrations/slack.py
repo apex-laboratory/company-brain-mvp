@@ -181,6 +181,9 @@ class SlackIntegration:
     """Slack channels + messages integration (OAuth v2 bot token)."""
 
     provider = "slack"
+    # ``source_sync`` passes the onboarding picker's selection as
+    # ``allowed_channels`` so unselected channels are never fetched.
+    supports_channel_filter = True
 
     def _headers(self, access_token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {access_token}"}
@@ -352,8 +355,12 @@ class SlackIntegration:
         access_token: str,
         channel: ChannelRef,
         cursor: str | None,
+        allowed_channels: set[str] | None = None,
     ) -> tuple[list[RawItem], str | None]:
-        """Fetch new messages across all readable channels since ``cursor``.
+        """Fetch new messages across readable channels since ``cursor``.
+
+        ``allowed_channels`` restricts the fetch to the given channel ids (the
+        onboarding picker's selection); ``None`` means all readable channels.
 
         ``cursor`` is an ISO-8601 timestamp (``source_sync``'s ``last_synced_at``). It is
         converted to a Slack ``ts`` for ``conversations.history``'s ``oldest`` param, and
@@ -395,6 +402,8 @@ class SlackIntegration:
             return [], cursor
 
         for ch in channels:
+            if allowed_channels is not None and ch.external_id not in allowed_channels:
+                continue
             try:
                 ch_items, ch_newest = await self._history(
                     access_token, ch.external_id, oldest, team

@@ -147,8 +147,9 @@ class SourcesService:
                 )
                 await session.commit()
 
-        # 5. Kick off the initial sweep (best-effort).
-        await enqueue("source_sync", resolved.workspace_id, connection_id)
+        # 5. No sync yet: the initial backfill is the onboarding sweep
+        #    (POST /sweeps after the user finishes the channel/lookback picker),
+        #    so we don't ingest channels the user is about to deselect.
 
         # 6. Google connectors register a push channel (Drive changes.watch /
         #    Gmail users.watch) so updates arrive in real time.

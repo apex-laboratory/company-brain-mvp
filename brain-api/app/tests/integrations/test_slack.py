@@ -194,6 +194,32 @@ async def test_fetch_since_collects_and_advances_cursor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_since_honors_allowed_channels() -> None:
+    """The onboarding picker's selection restricts which channels are fetched."""
+    integration = SlackIntegration()
+    channels = [
+        ChannelRef(external_id="C1", name="cs-escalations"),
+        ChannelRef(external_id="C2", name="random"),
+    ]
+    history = {
+        "ok": True,
+        "has_more": False,
+        "messages": [{"type": "message", "ts": "1700000002.0001", "user": "U1", "text": "hi"}],
+    }
+    patcher, mock_client = _mock_http("get", history)
+    synthetic = ChannelRef(external_id="T99", name="workspace")
+    with patcher, patch.object(integration, "list_channels", AsyncMock(return_value=channels)):
+        items, _ = await integration.fetch_since(
+            "xoxb-test", synthetic, None, allowed_channels={"C1"}
+        )
+
+    # Only the selected channel was fetched — C2's history was never requested.
+    assert all(i.payload["channel"] == "C1" for i in items)
+    requested = {c.kwargs.get("params", {}).get("channel") for c in mock_client.get.call_args_list}
+    assert requested == {"C1"}
+
+
+@pytest.mark.asyncio
 async def test_fetch_since_isolates_unreadable_channel() -> None:
     integration = SlackIntegration()
     channels = [

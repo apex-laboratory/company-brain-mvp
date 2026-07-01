@@ -37,13 +37,18 @@ def _state() -> MagicMock:
         last_synced_at=None,
         token_expires_at=None,
         refresh_token_enc=None,
+        lookback_days=90,
     )
 
 
 async def _run_with_fetch_error(error: Exception) -> tuple[dict, MagicMock]:
     session = MagicMock(commit=AsyncMock())
     repo = MagicMock(get_sync_state=AsyncMock(return_value=_state()), mark_error=AsyncMock())
-    integration = MagicMock(fetch_since=AsyncMock(side_effect=error))
+    integration = MagicMock(
+        fetch_since=AsyncMock(side_effect=error),
+        opaque_cursor=False,
+        supports_channel_filter=False,
+    )
     with patch.object(ss, "get_session", return_value=_AsyncCtx(session)), patch.object(
         ss, "run_in_tenant", return_value=_AsyncCtx(None)
     ), patch.object(ss, "_repo", repo), patch.object(
@@ -82,3 +87,63 @@ async def test_http_500_is_transient_not_auth_broken() -> None:
     )
     with pytest.raises(httpx.HTTPStatusError):
         await _run_with_fetch_error(err)
+
+
+# ── lookback seeding + channel scoping ────────────────────────────────────────
+async def _run_ok(
+    state: MagicMock, integration: MagicMock, selected: list[str] | None = None
+) -> MagicMock:
+    """Run a successful sync; return the integration mock for call inspection."""
+    session = MagicMock(commit=AsyncMock())
+    repo = MagicMock(
+        get_sync_state=AsyncMock(return_value=state),
+        advance_sync=AsyncMock(),
+        insert_event=AsyncMock(return_value=True),
+        selected_channel_ids=AsyncMock(return_value=selected or []),
+    )
+    with patch.object(ss, "get_session", return_value=_AsyncCtx(session)), patch.object(
+        ss, "run_in_tenant", return_value=_AsyncCtx(None)
+    ), patch.object(ss, "_repo", repo), patch.object(
+        ss, "get_integration", return_value=integration
+    ), patch.object(ss, "_resolve_token", AsyncMock(return_value="tok")):
+        await ss.source_sync({}, "wrk_1", "src_1")
+    return integration
+
+
+@pytest.mark.asyncio
+async def test_first_sync_seeds_cursor_from_lookback_days() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    state = _state()  # last_synced_at=None, lookback_days=90
+    integration = MagicMock(
+        fetch_since=AsyncMock(return_value=([], None)),
+        opaque_cursor=False,
+        supports_channel_filter=False,
+    )
+    integration = await _run_ok(state, integration)
+    cursor = integration.fetch_since.await_args.args[2]
+    seeded = datetime.fromisoformat(cursor)
+    expected = datetime.now(UTC) - timedelta(days=90)
+    assert abs((seeded - expected).total_seconds()) < 60
+
+
+@pytest.mark.asyncio
+async def test_selected_channels_passed_to_filtering_integration() -> None:
+    integration = MagicMock(
+        fetch_since=AsyncMock(return_value=([], None)),
+        opaque_cursor=False,
+        supports_channel_filter=True,
+    )
+    integration = await _run_ok(_state(), integration, selected=["C1", "C2"])
+    assert integration.fetch_since.await_args.kwargs["allowed_channels"] == {"C1", "C2"}
+
+
+@pytest.mark.asyncio
+async def test_no_selection_means_no_channel_filter() -> None:
+    integration = MagicMock(
+        fetch_since=AsyncMock(return_value=([], None)),
+        opaque_cursor=False,
+        supports_channel_filter=True,
+    )
+    integration = await _run_ok(_state(), integration, selected=[])
+    assert "allowed_channels" not in integration.fetch_since.await_args.kwargs
