@@ -33,7 +33,7 @@ import httpx
 
 from app.config.settings import settings
 from app.integrations import google_common
-from app.integrations.base import ChannelRef, OAuthTokens, RawEvent, RawItem, http_client
+from app.integrations.base import ChannelRef, OAuthTokens, RawEvent, RawItem
 
 _API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 _SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
@@ -97,19 +97,18 @@ class GmailIntegration:
         return []
 
     async def _get_message(self, access_token: str, message_id: str) -> RawItem:
-        resp = await http_client().get(
+        resp = await google_common.api_request(
+            "GET",
             f"{_API_BASE}/messages/{message_id}",
             headers=self._headers(access_token),
             params={"format": "full"},
         )
-        resp.raise_for_status()
         return RawItem(external_id=message_id, payload=resp.json())
 
     async def _profile_history_id(self, access_token: str) -> str:
-        resp = await http_client().get(
-            f"{_API_BASE}/profile", headers=self._headers(access_token)
+        resp = await google_common.api_request(
+            "GET", f"{_API_BASE}/profile", headers=self._headers(access_token)
         )
-        resp.raise_for_status()
         return str(resp.json()["historyId"])
 
     async def _bootstrap(self, access_token: str) -> tuple[list[RawItem], str]:
@@ -122,10 +121,9 @@ class GmailIntegration:
             params: dict[str, object] = {"q": f"after:{after}", "maxResults": _PAGE_SIZE}
             if page_token:
                 params["pageToken"] = page_token
-            resp = await http_client().get(
-                f"{_API_BASE}/messages", headers=self._headers(access_token), params=params
+            resp = await google_common.api_request(
+                "GET", f"{_API_BASE}/messages", headers=self._headers(access_token), params=params
             )
-            resp.raise_for_status()
             data = resp.json()
             for msg in data.get("messages", []):
                 items.append(await self._get_message(access_token, msg["id"]))
@@ -156,13 +154,15 @@ class GmailIntegration:
             }
             if page_token:
                 params["pageToken"] = page_token
-            resp = await http_client().get(
-                f"{_API_BASE}/history", headers=self._headers(access_token), params=params
-            )
-            if resp.status_code == 404:
-                # Stored historyId is too old — Gmail dropped it. Full resync.
-                return await self._bootstrap(access_token)
-            resp.raise_for_status()
+            try:
+                resp = await google_common.api_request(
+                    "GET", f"{_API_BASE}/history", headers=self._headers(access_token), params=params
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    # Stored historyId is too old — Gmail dropped it. Full resync.
+                    return await self._bootstrap(access_token)
+                raise
             data = resp.json()
             for record in data.get("history", []):
                 for added in record.get("messagesAdded", []):
@@ -188,12 +188,12 @@ class GmailIntegration:
         by the account email (``external_account_id``), so the subscription ref is just
         a marker.
         """
-        resp = await http_client().post(
+        resp = await google_common.api_request(
+            "POST",
             f"{_API_BASE}/watch",
             headers={**self._headers(access_token), "Content-Type": "application/json"},
             json={"topicName": settings.google_pubsub_topic, "labelIds": ["INBOX"]},
         )
-        resp.raise_for_status()
         return "gmail-watch", google_common.expiry_from_ms(resp.json().get("expiration"))
 
     # ── webhooks ───────────────────────────────────────────────────────────────────

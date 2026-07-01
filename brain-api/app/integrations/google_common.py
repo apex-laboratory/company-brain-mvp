@@ -15,6 +15,8 @@ scope, so the OAuth dance lives in one place.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
@@ -23,11 +25,100 @@ import httpx
 from app.config.settings import settings
 from app.integrations.base import OAuthTokens, http_client
 
+log = logging.getLogger(__name__)
+
 _AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 _USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 _OIDC_SCOPES = "openid email"
+
+
+class QuotaExceededError(Exception):
+    """Google reported a rate-limit/quota error (429, or 403 with a quota reason)
+    and retries were exhausted.
+
+    Deliberately **not** an ``httpx.HTTPStatusError``: ``source_sync`` classifies
+    401/403 status errors as broken auth (re-auth required), but a quota 403 is
+    transient — raising this instead lands in the generic-exception path, which
+    holds the cursor and lets ARQ retry the sweep later.
+    """
+
+
+_MAX_ATTEMPTS = 4  # one try + three retries on 429/quota-403/5xx
+_MAX_RETRY_AFTER = 30.0  # cap a single honored Retry-After sleep (seconds)
+# 403 reasons that mean "quota", not "permission denied":
+# https://developers.google.com/drive/api/guides/handle-errors
+_QUOTA_REASONS = frozenset(
+    {"userRateLimitExceeded", "rateLimitExceeded", "dailyLimitExceeded"}
+)
+
+
+def _is_quota_error(resp: httpx.Response) -> bool:
+    if resp.status_code == 429:
+        return True
+    if resp.status_code != 403:
+        return False
+    try:
+        error = resp.json().get("error") or {}
+    except ValueError:
+        return False
+    if error.get("status") == "RESOURCE_EXHAUSTED":
+        return True
+    reasons = {
+        e.get("reason") for e in error.get("errors", []) if isinstance(e, dict)
+    }
+    return bool(reasons & _QUOTA_REASONS)
+
+
+def _retry_delay(resp: httpx.Response, attempt: int) -> float:
+    """Honor Retry-After when present (clamped); otherwise exponential backoff."""
+    header = resp.headers.get("Retry-After")
+    if header:
+        try:
+            return max(1.0, min(float(header), _MAX_RETRY_AFTER))
+        except ValueError:
+            pass
+    return float(2**attempt)
+
+
+async def api_request(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    params: dict | None = None,
+    json: dict | None = None,
+) -> httpx.Response:
+    """Issue a Google API request with quota-aware retry.
+
+    429s, quota 403s, and 5xxs are retried with backoff (Retry-After honored).
+    Exhausted quota retries raise :class:`QuotaExceededError` so callers upstream
+    don't mistake a rate limit for revoked auth; every other error status raises
+    ``httpx.HTTPStatusError`` as before.
+    """
+    for attempt in range(_MAX_ATTEMPTS):
+        resp = await http_client().request(
+            method, url, headers=headers, params=params, json=json
+        )
+        quota = _is_quota_error(resp)
+        if not quota and resp.status_code < 500:
+            resp.raise_for_status()
+            return resp
+        if attempt + 1 < _MAX_ATTEMPTS:
+            delay = _retry_delay(resp, attempt)
+            log.warning(
+                "google api %s %s → %d; retrying in %.1fs (attempt %d/%d)",
+                method, url, resp.status_code, delay, attempt + 1, _MAX_ATTEMPTS,
+            )
+            await asyncio.sleep(delay)
+            continue
+        if quota:
+            raise QuotaExceededError(
+                f"{method} {url} rate-limited after {_MAX_ATTEMPTS} attempts"
+            )
+        resp.raise_for_status()
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def authorize_url(scope: str, state: str, redirect_uri: str) -> str:

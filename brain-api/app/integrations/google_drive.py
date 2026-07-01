@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 
 from app.integrations import google_common
-from app.integrations.base import ChannelRef, OAuthTokens, RawEvent, RawItem, http_client
+from app.integrations.base import ChannelRef, OAuthTokens, RawEvent, RawItem
 from app.shared.helpers.crypto import constant_time_compare
 
 log = logging.getLogger(__name__)
@@ -96,11 +96,11 @@ class GoogleDriveIntegration:
         return []
 
     async def _start_page_token(self, access_token: str) -> str:
-        resp = await http_client().get(
+        resp = await google_common.api_request(
+            "GET",
             f"{_API_BASE}/changes/startPageToken",
             headers=self._headers(access_token),
         )
-        resp.raise_for_status()
         return resp.json()["startPageToken"]
 
     async def _content(self, access_token: str, file: dict) -> str:
@@ -109,23 +109,23 @@ class GoogleDriveIntegration:
         file_id = file["id"]
         try:
             if mime in _EXPORT_MIME:
-                resp = await http_client().get(
+                resp = await google_common.api_request(
+                    "GET",
                     f"{_API_BASE}/files/{file_id}/export",
                     headers=self._headers(access_token),
                     params={"mimeType": _EXPORT_MIME[mime]},
                 )
-                resp.raise_for_status()
                 return resp.text
             if mime.startswith("text/"):
                 size = int(file.get("size") or 0)
                 if size and size > _MAX_CONTENT_BYTES:
                     return ""
-                resp = await http_client().get(
+                resp = await google_common.api_request(
+                    "GET",
                     f"{_API_BASE}/files/{file_id}",
                     headers=self._headers(access_token),
                     params={"alt": "media"},
                 )
-                resp.raise_for_status()
                 return resp.text
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (401, 403):
@@ -152,10 +152,9 @@ class GoogleDriveIntegration:
             }
             if page_token:
                 params["pageToken"] = page_token
-            resp = await http_client().get(
-                f"{_API_BASE}/files", headers=self._headers(access_token), params=params
+            resp = await google_common.api_request(
+                "GET", f"{_API_BASE}/files", headers=self._headers(access_token), params=params
             )
-            resp.raise_for_status()
             data = resp.json()
             for file in data.get("files", []):
                 items.append(await self._item_for(access_token, file))
@@ -182,7 +181,8 @@ class GoogleDriveIntegration:
         page_token: str | None = cursor
         next_cursor: str | None = cursor
         while True:
-            resp = await http_client().get(
+            resp = await google_common.api_request(
+                "GET",
                 f"{_API_BASE}/changes",
                 headers=self._headers(access_token),
                 params={
@@ -195,7 +195,6 @@ class GoogleDriveIntegration:
                     "includeRemoved": "false",
                 },
             )
-            resp.raise_for_status()
             data = resp.json()
             for change in data.get("changes", []):
                 file = change.get("file")
@@ -221,7 +220,8 @@ class GoogleDriveIntegration:
         """
         page_token = await self._start_page_token(access_token)
         channel_id = uuid.uuid4().hex
-        resp = await http_client().post(
+        resp = await google_common.api_request(
+            "POST",
             f"{_API_BASE}/changes/watch",
             headers={**self._headers(access_token), "Content-Type": "application/json"},
             params={"pageToken": page_token},
@@ -232,7 +232,6 @@ class GoogleDriveIntegration:
                 "token": token,
             },
         )
-        resp.raise_for_status()
         return channel_id, google_common.expiry_from_ms(resp.json().get("expiration"))
 
     # ── webhooks ───────────────────────────────────────────────────────────────────
