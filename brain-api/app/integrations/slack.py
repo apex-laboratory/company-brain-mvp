@@ -11,12 +11,14 @@ ingestion:
   not opt in), so ``refresh`` is unsupported.
 
 * **Polling:** ``conversations.list`` enumerates channels and
-  ``conversations.history`` pulls messages per channel. The connection cursor is
-  the newest message ``ts`` seen; the ``oldest`` parameter makes each fetch
-  incremental. Like the GitHub connector, ``fetch_since`` ignores the synthetic
-  connection-level channel handed in by ``source_sync`` and enumerates the
-  workspace's own channels, isolating per-channel errors (e.g. ``not_in_channel``)
-  so one unreadable channel can't fail the whole sweep. Slack rate-limits
+  ``conversations.history`` pulls messages per channel. ``source_sync``'s connection
+  cursor is ISO-8601 (``last_synced_at``); ``fetch_since`` converts it to a Slack
+  ``ts`` for the ``oldest`` param and converts the newest ``ts`` seen back to ISO-8601
+  for the returned cursor. ``fetch_since`` enumerates the workspace's own channels
+  rather than using the synthetic ``source_sync`` channel as a container, but reads
+  that channel's ``external_id`` (the connection's team id) to build message deep
+  links. Per-channel errors (e.g. ``not_in_channel``) are isolated so one unreadable
+  channel can't fail the whole sweep. Slack rate-limits
   ``conversations.history`` (HTTP 429 + ``Retry-After``); requests honor the header
   for a bounded number of retries, then hold the connection cursor for that channel
   so the next sweep retries rather than advancing past unfetched messages.
@@ -29,7 +31,8 @@ ingestion:
 ``normalize`` accepts both shapes: the Events API envelope
 (``{type: "event_callback", team_id, event: {...}}``) delivered by
 ``webhook_ingest``, and the bare message object produced by polling (with the
-channel id injected by ``fetch_since``, which ``conversations.history`` omits).
+channel id and team id injected by ``fetch_since``, which ``conversations.history``
+omits — the team is needed to build a working deep link).
 """
 from __future__ import annotations
 
@@ -47,6 +50,7 @@ import httpx
 from app.config.settings import settings
 from app.integrations.base import (
     ChannelRef,
+    ConnectorAuthError,
     OAuthTokens,
     RawEvent,
     RawItem,
@@ -137,6 +141,31 @@ def _parse_ts(ts: str | None) -> datetime | None:
         return datetime.fromtimestamp(float(ts), tz=UTC)
     except (TypeError, ValueError):
         return None
+
+
+def _iso_to_ts(cursor: str | None) -> str | None:
+    """Convert ``source_sync``'s ISO-8601 cursor to a Slack ``ts`` (unix seconds).
+
+    ``source_sync`` stores the connection cursor as ``last_synced_at`` and passes it in
+    as ``last_synced_at.isoformat()``; Slack's ``conversations.history`` ``oldest`` param
+    expects a ``ts``. Returns ``None`` when there is no cursor (first sweep). A naive
+    timestamp is treated as UTC so ``.timestamp()`` can't drift with the host's timezone.
+    """
+    if not cursor:
+        return None
+    parsed = datetime.fromisoformat(cursor)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return f"{parsed.timestamp():.6f}"
+
+
+def _ts_to_iso(ts: str) -> str:
+    """Convert a Slack ``ts`` back to an ISO-8601 cursor for ``source_sync``.
+
+    The connection cursor must be ISO-8601: ``source_sync`` re-parses the returned value
+    with ``datetime.fromisoformat`` (``_parse_iso``), which would raise on a raw ``ts``.
+    """
+    return datetime.fromtimestamp(float(ts), tz=UTC).isoformat()
 
 
 def _is_message(event: dict) -> bool:
@@ -274,15 +303,16 @@ class SlackIntegration:
         return channels
 
     async def _history(
-        self, access_token: str, channel_id: str, oldest: str | None
+        self, access_token: str, channel_id: str, oldest: str | None, team: str
     ) -> tuple[list[RawItem], str | None]:
         """Page through one channel's history after ``oldest`` (a Slack ``ts``).
 
         Returns ``(items, newest_ts)``. Skips non-content subtypes and bot messages.
         Raises :class:`SlackAPIError` on a Slack ``ok: false`` (or exhausted 429s) so
         ``fetch_since`` can classify the failure — per-channel skip (``not_in_channel``),
-        whole-connection auth, or transient rate limit. Injects the channel id into each
-        message payload, which ``conversations.history`` omits but ``normalize`` needs.
+        whole-connection auth, or transient rate limit. Injects the channel id **and the
+        team id** into each message payload, which ``conversations.history`` omits but
+        ``normalize`` needs (the team is required to build a working deep link).
         """
         items: list[RawItem] = []
         newest = oldest
@@ -304,6 +334,8 @@ class SlackIntegration:
                 if not ts:
                     continue
                 msg["channel"] = channel_id  # inject routing context normalize needs
+                if team:
+                    msg["team"] = team  # conversations.history omits team; deep link needs it
                 items.append(RawItem(external_id=ts, payload=msg))
                 if newest is None or float(ts) > float(newest):
                     newest = ts
@@ -321,31 +353,38 @@ class SlackIntegration:
         channel: ChannelRef,
         cursor: str | None,
     ) -> tuple[list[RawItem], str | None]:
-        """Fetch new messages across all readable channels since ``cursor`` (a ts).
+        """Fetch new messages across all readable channels since ``cursor``.
 
-        ``channel`` is the synthetic connection-level channel from ``source_sync``
-        and is ignored — Slack enumerates its own channels. Failures are classified
-        like the GitHub connector so one bad channel can't fail the sweep, and the
-        connection-level cursor is never advanced past data we didn't actually fetch:
+        ``cursor`` is an ISO-8601 timestamp (``source_sync``'s ``last_synced_at``). It is
+        converted to a Slack ``ts`` for ``conversations.history``'s ``oldest`` param, and
+        the returned next cursor is converted back to ISO-8601 so ``source_sync`` can
+        re-parse (``datetime.fromisoformat``) and store it. ``channel`` is the synthetic
+        connection-level channel from ``source_sync``: its ``external_id`` is the
+        connection's team id (injected into polled messages for deep links). Slack
+        enumerates its own channels rather than using it as a container.
 
-        * **auth** (``invalid_auth`` / ``token_revoked`` …) — re-raised so
-          ``source_sync`` marks the connection ``error`` (re-auth needed).
-        * **transient** (HTTP 429 after honored retries, or a 5xx) — the channel is
-          held: ``incomplete`` keeps the cursor where it was so the next sweep retries
-          it. Idempotent inserts make re-fetching succeeded channels harmless.
-        * **per-channel** (``not_in_channel`` …) — skipped permanently; the cursor
-          still advances. Dedupe is handled downstream by the ``source_events``
-          unique constraint.
+        Failures are classified like the GitHub connector so one bad channel can't fail
+        the sweep, and the cursor is never advanced past data we didn't fetch:
+
+        * **auth** (``invalid_auth`` / ``token_revoked`` …) — raised as
+          :class:`ConnectorAuthError` so ``source_sync`` marks the connection ``error``
+          (re-auth needed); Slack reports these as ``ok: false``, not an HTTP 401.
+        * **transient** (HTTP 429 after honored retries, or a 5xx) — the channel is held:
+          ``incomplete`` keeps the cursor where it was so the next sweep retries it.
+        * **per-channel** (``not_in_channel`` …) — skipped permanently; the cursor still
+          advances. Dedupe is handled downstream by the ``source_events`` constraint.
         """
+        oldest = _iso_to_ts(cursor)  # ISO cursor -> Slack ts for `oldest`
+        team = channel.external_id  # connection team id, for message deep links
         items: list[RawItem] = []
-        newest = cursor
+        newest_ts = oldest
         incomplete = False  # a transient failure means "don't advance the cursor"
 
         try:
             channels = await self.list_channels(access_token)
         except SlackAPIError as exc:
             if exc.auth:
-                raise  # whole-connection auth failure — let source_sync handle it
+                raise ConnectorAuthError(exc.error) from exc
             log.warning("slack fetch: conversations.list failed (%s); holding cursor", exc.error)
             return [], cursor
         except httpx.HTTPStatusError as exc:
@@ -358,11 +397,11 @@ class SlackIntegration:
         for ch in channels:
             try:
                 ch_items, ch_newest = await self._history(
-                    access_token, ch.external_id, cursor
+                    access_token, ch.external_id, oldest, team
                 )
             except SlackAPIError as exc:
                 if exc.auth:
-                    raise
+                    raise ConnectorAuthError(exc.error) from exc
                 if exc.transient:
                     log.warning(
                         "slack fetch: rate limited on %s — will retry next sweep", ch.external_id
@@ -381,12 +420,12 @@ class SlackIntegration:
                     continue
                 raise
             items.extend(ch_items)
-            if ch_newest and (newest is None or float(ch_newest) > float(newest)):
-                newest = ch_newest
+            if ch_newest and (newest_ts is None or float(ch_newest) > float(newest_ts)):
+                newest_ts = ch_newest
 
-        if incomplete:
-            return items, cursor  # hold the cursor; next sweep re-fetches everything
-        return items, newest
+        if incomplete or newest_ts is None or newest_ts == oldest:
+            return items, cursor  # hold the ISO cursor; nothing newer to advance to
+        return items, _ts_to_iso(newest_ts)  # advance as ISO for source_sync
 
     # ── webhooks ───────────────────────────────────────────────────────────────
     def verify_webhook(

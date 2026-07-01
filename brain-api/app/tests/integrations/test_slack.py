@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.config.settings import settings
-from app.integrations.base import ChannelRef, RawItem, SourceIntegration
-from app.integrations.slack import SlackAPIError, SlackIntegration
+from app.integrations.base import ChannelRef, ConnectorAuthError, RawItem, SourceIntegration
+from app.integrations.slack import SlackAPIError, SlackIntegration, _iso_to_ts, _ts_to_iso
 
 
 def _mock_http(method: str, json_payload: dict, status_code: int = 200):
@@ -181,13 +181,16 @@ async def test_fetch_since_collects_and_advances_cursor() -> None:
         ],
     }
     patcher, _ = _mock_http("get", history)
+    synthetic = ChannelRef(external_id="T99", name="workspace")  # external_id = team id
     with patcher, patch.object(integration, "list_channels", AsyncMock(return_value=channels)):
-        items, cursor = await integration.fetch_since("xoxb-test", channels[0], None)
+        items, cursor = await integration.fetch_since("xoxb-test", synthetic, None)
 
-    # channel_join is skipped; two real messages collected; channel id injected.
+    # channel_join is skipped; two real messages collected; channel + team injected.
     assert [i.external_id for i in items] == ["1700000002.0001", "1700000001.0001"]
     assert all(i.payload["channel"] == "C1" for i in items)
-    assert cursor == "1700000002.0001"  # newest ts seen
+    assert all(i.payload["team"] == "T99" for i in items)  # team injected for deep links
+    # cursor is returned as ISO-8601 so source_sync can re-parse + store it (bug #1)
+    assert cursor == _ts_to_iso("1700000002.0001")
 
 
 @pytest.mark.asyncio
@@ -198,7 +201,7 @@ async def test_fetch_since_isolates_unreadable_channel() -> None:
         ChannelRef(external_id="C_OK", name="general"),
     ]
 
-    async def fake_history(token, channel_id, oldest):
+    async def fake_history(token, channel_id, oldest, team):
         if channel_id == "C_BAD":
             raise SlackAPIError("not_in_channel")
         item = RawItem(external_id="1700000005.0001", payload={"channel": channel_id})
@@ -211,7 +214,7 @@ async def test_fetch_since_isolates_unreadable_channel() -> None:
 
     # The bad channel is skipped, the good one still contributes.
     assert len(items) == 1
-    assert cursor == "1700000005.0001"
+    assert cursor == _ts_to_iso("1700000005.0001")  # advanced, as ISO
 
 
 # ── rate limiting (HTTP 429 + Retry-After) ─────────────────────────────────────
@@ -243,28 +246,66 @@ async def test_fetch_since_holds_cursor_on_persistent_rate_limit() -> None:
     channels = [ChannelRef(external_id="C1", name="general")]
     mock_client = AsyncMock()
     mock_client.get.return_value = _resp(429, headers={"Retry-After": "1"})
+    held = "2023-11-14T22:13:19+00:00"  # source_sync passes an ISO cursor
     with patch("app.integrations.slack.http_client", return_value=mock_client), patch(
         "app.integrations.slack.asyncio.sleep", AsyncMock()
     ), patch.object(integration, "list_channels", AsyncMock(return_value=channels)):
-        items, cursor = await integration.fetch_since("xoxb-test", channels[0], "1699999999.0001")
+        items, cursor = await integration.fetch_since("xoxb-test", channels[0], held)
 
     assert items == []
-    assert cursor == "1699999999.0001"  # held, not advanced past unfetched messages
+    assert cursor == held  # held ISO cursor, not advanced past unfetched messages
 
 
 @pytest.mark.asyncio
-async def test_fetch_since_reraises_auth_error() -> None:
-    """An auth-class ok:false surfaces so source_sync can mark the connection error."""
+async def test_fetch_since_raises_connector_auth_error() -> None:
+    """An auth-class ok:false surfaces as ConnectorAuthError so source_sync classifies
+    it as auth_broken (re-auth needed) — Slack reports auth failures as ok:false, not a
+    401, so a plain SlackAPIError would fall through source_sync's generic handler (bug #3)."""
     integration = SlackIntegration()
     channels = [ChannelRef(external_id="C1", name="general")]
 
-    async def fake_history(token, channel_id, oldest):
+    async def fake_history(token, channel_id, oldest, team):
         raise SlackAPIError("token_revoked", auth=True)
 
     with patch.object(integration, "list_channels", AsyncMock(return_value=channels)), patch.object(
         integration, "_history", side_effect=fake_history
-    ), pytest.raises(SlackAPIError, match="token_revoked"):
+    ), pytest.raises(ConnectorAuthError, match="token_revoked"):
         await integration.fetch_since("xoxb-test", channels[0], None)
+
+
+def test_iso_to_ts_treats_naive_cursor_as_utc() -> None:
+    # A naive ISO cursor must not drift with the host timezone (uses UTC, not local).
+    assert _iso_to_ts("2023-11-14T22:13:19") == _iso_to_ts("2023-11-14T22:13:19+00:00")
+    assert _iso_to_ts(None) is None
+
+
+# ── source_sync cursor contract (bug #1 — the boundary the review bugs lived at) ─
+
+
+@pytest.mark.asyncio
+async def test_fetch_since_cursor_roundtrips_with_source_sync() -> None:
+    """An incoming ISO cursor is converted to a Slack ts for `oldest`, and the returned
+    cursor is ISO-8601 so source_sync's _parse_iso can re-parse + store it."""
+    from app.jobs.tasks.source_sync import _parse_iso
+
+    integration = SlackIntegration()
+    channels = [ChannelRef(external_id="C1", name="general")]
+    history = {
+        "ok": True,
+        "has_more": False,
+        "messages": [{"type": "message", "ts": "1700000002.0001", "user": "U1", "text": "hi"}],
+    }
+    patcher, client = _mock_http("get", history)
+    incoming = "2023-11-14T22:13:19+00:00"
+    with patcher, patch.object(integration, "list_channels", AsyncMock(return_value=channels)):
+        _, cursor = await integration.fetch_since(
+            "xoxb-test", ChannelRef(external_id="T1", name="ws"), incoming
+        )
+
+    # ISO cursor -> Slack ts on the `oldest` param (conversations.history expects a ts)
+    assert client.get.call_args.kwargs["params"]["oldest"] == _iso_to_ts(incoming)
+    # returned cursor is ISO-8601 and does NOT raise in source_sync's parser
+    assert _parse_iso(cursor) is not None
 
 
 # ── normalize ──────────────────────────────────────────────────────────────────
@@ -293,13 +334,26 @@ def test_normalize_webhook_envelope() -> None:
 
 
 def test_normalize_polled_message() -> None:
-    # Bare message as produced by fetch_since (channel injected, no envelope).
+    # Bare message as produced by fetch_since (channel + team injected, no envelope).
     payload = {
-        "type": "message", "ts": "1700000000.0001", "channel": "C9", "user": "U9", "text": "hi",
+        "type": "message", "ts": "1700000000.0001", "channel": "C9", "user": "U9",
+        "text": "hi", "team": "T7",
     }
     event = SlackIntegration().normalize(RawItem(external_id="1700000000.0001", payload=payload))
     assert event.external_event_id == "slack:C9:1700000000.0001"
     assert event.content == "hi"
+
+
+def test_normalize_polled_message_builds_team_deeplink() -> None:
+    # fetch_since injects team into polled messages; the deep link must use it, not T0
+    # (bug #4: conversations.history omits team, so the URL fell back to T0).
+    payload = {
+        "type": "message", "ts": "1700000000.0001", "channel": "C9", "user": "U9",
+        "text": "hi", "team": "T42",
+    }
+    event = SlackIntegration().normalize(RawItem(external_id="1700000000.0001", payload=payload))
+    assert event.url == "https://app.slack.com/client/T42/C9/p17000000000001"
+    assert "/T0/" not in event.url
 
 
 def test_normalize_rejects_bot_message() -> None:

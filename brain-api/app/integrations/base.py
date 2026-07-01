@@ -88,6 +88,17 @@ class RawEvent:
     raw: dict
 
 
+class ConnectorAuthError(Exception):
+    """A connector-signalled auth failure: the stored token is invalid or revoked and
+    the connection needs re-auth.
+
+    Consumers (``source_sync``) treat this like an HTTP 401 — mark the connection
+    ``error`` and stop retrying. Use it for providers that report auth failures
+    out-of-band rather than via a 401 status (e.g. Slack's ``ok: false`` with
+    ``invalid_auth``); providers that fail with a real 401 (GitHub) don't need it.
+    """
+
+
 @runtime_checkable
 class SourceIntegration(Protocol):
     """Per-provider OAuth + read-only fetch contract."""

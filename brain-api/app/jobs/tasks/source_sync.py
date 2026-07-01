@@ -19,7 +19,7 @@ import httpx
 
 from app.config.database import get_session
 from app.integrations import get_integration
-from app.integrations.base import ChannelRef
+from app.integrations.base import ChannelRef, ConnectorAuthError
 from app.jobs.repository import JobsRepository, SyncState
 from app.shared.helpers.crypto import decrypt
 from app.shared.middleware.with_tenant import run_in_tenant
@@ -84,6 +84,13 @@ async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
                     log.warning("source_sync: %s auth broken — re-auth required", source_id)
                     return {"inserted": inserted, "error": "auth_broken"}
                 raise  # transient — let ARQ retry
+            except ConnectorAuthError:
+                # Provider reported auth failure out-of-band (e.g. Slack ok:false
+                # invalid_auth), not via a 401 status — same handling as a 401.
+                await _repo.mark_error(session, source_id, auth_broken=True)
+                await session.commit()
+                log.warning("source_sync: %s auth broken — re-auth required", source_id)
+                return {"inserted": inserted, "error": "auth_broken"}
             except Exception:
                 await _repo.mark_error(session, source_id, auth_broken=False)
                 await session.commit()

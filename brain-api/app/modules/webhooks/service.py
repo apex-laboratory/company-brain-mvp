@@ -36,7 +36,15 @@ def _secret_for(provider: str) -> str:
 
 
 class WebhooksService:
-    async def receive(self, provider: str, headers: Mapping[str, str], raw_body: bytes) -> None:
+    async def receive(
+        self, provider: str, headers: Mapping[str, str], raw_body: bytes
+    ) -> str | None:
+        """Verify + enqueue a provider webhook.
+
+        Returns a **challenge string** to echo verbatim (Slack's Events API
+        ``url_verification`` handshake, which must be answered synchronously so the
+        endpoint can be registered), or ``None`` for a normal event that was enqueued.
+        """
         try:
             integration = get_integration(provider)
         except KeyError:
@@ -50,5 +58,12 @@ class WebhooksService:
         except json.JSONDecodeError:
             raise ValidationError({"body": "Webhook body is not valid JSON."})
 
+        # Slack Events API URL handshake: the (signature-verified) url_verification
+        # request must be answered by echoing its challenge; it is not an ingestible
+        # event, so return the challenge here instead of enqueuing.
+        if isinstance(payload, dict) and payload.get("type") == "url_verification":
+            return payload.get("challenge")
+
         # Enqueue and return fast; the job dedupes + normalizes + persists.
         await enqueue("webhook_ingest", provider, payload)
+        return None

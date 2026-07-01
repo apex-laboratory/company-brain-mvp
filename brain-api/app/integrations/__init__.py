@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from app.integrations.base import (
     ChannelRef,
+    ConnectorAuthError,
     OAuthTokens,
     RawEvent,
     RawItem,
@@ -33,6 +34,7 @@ def get_integration(provider: str) -> SourceIntegration:
 
 __all__ = [
     "ChannelRef",
+    "ConnectorAuthError",
     "OAuthTokens",
     "RawEvent",
     "RawItem",
