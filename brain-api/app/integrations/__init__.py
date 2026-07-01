@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from app.integrations.base import (
     ChannelRef,
+    ConnectorAuthError,
     OAuthTokens,
     RawEvent,
     RawItem,
@@ -15,12 +16,14 @@ from app.integrations.base import (
 )
 from app.integrations.github import GitHubIntegration
 from app.integrations.notion import NotionIntegration
+from app.integrations.slack import SlackIntegration
 
 # Provider → integration instance. The sources/webhooks layers and the sync jobs
 # resolve providers through this registry only.
 REGISTRY: dict[str, SourceIntegration] = {
     "notion": NotionIntegration(),
     "github": GitHubIntegration(),
+    "slack": SlackIntegration(),
 }
 
 
@@ -31,12 +34,14 @@ def get_integration(provider: str) -> SourceIntegration:
 
 __all__ = [
     "ChannelRef",
+    "ConnectorAuthError",
     "OAuthTokens",
     "RawEvent",
     "RawItem",
     "SourceIntegration",
     "NotionIntegration",
     "GitHubIntegration",
+    "SlackIntegration",
     "REGISTRY",
     "get_integration",
 ]
