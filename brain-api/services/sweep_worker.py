@@ -7,6 +7,7 @@ from uuid import UUID
 
 from connectors.base import SourceConnector
 from connectors.github import GitHubConnector
+from connectors.google_drive import GoogleDriveConnector
 from connectors.jira import JiraConnector
 from connectors.notion import NotionConnector
 from connectors.slack import SlackConnector
@@ -24,6 +25,7 @@ _CONNECTOR_CLASSES: dict[str, type[SourceConnector]] = {
     "github": GitHubConnector,
     "jira": JiraConnector,
     "zendesk": ZendeskConnector,
+    "google_drive": GoogleDriveConnector,
 }
 
 

@@ -13,6 +13,8 @@ tiers:
     sources:
       - type: notion
         signals: [designated_policy_page, owner_edited]
+      - type: google_drive
+        signals: [designated_policy_folder, owner_edited]
       - type: github
         signals: [path_prefix=/docs, path_prefix=/runbooks]
       - type: jira
@@ -31,6 +33,8 @@ tiers:
     sources:
       - type: slack
         signals: []
+      - type: google_drive
+        signals: [outside_designated_folder]
       - type: github
         signals: [content_type=comment]
       - type: jira
@@ -43,7 +47,7 @@ routing:
   # below 0.70 → draft, not surfaced to reviewers
 
 sweep:
-  processing_order: [notion, github, jira, slack, zendesk]
+  processing_order: [notion, google_drive, github, jira, slack, zendesk]
   rate_per_minute: 10       # items processed per source per minute
   semaphore_limit: 5        # concurrent LLM calls
   auto_publish_during_sweep: false

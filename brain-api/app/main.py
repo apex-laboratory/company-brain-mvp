@@ -24,6 +24,7 @@ from app.jobs.queue import close_queue
 from app.modules.api_keys.router import router as api_keys_router
 from app.modules.auth.router import router as auth_router
 from app.modules.dashboard.router import router as dashboard_router
+from app.modules.members.router import router as members_router
 from app.modules.sources.router import router as sources_router
 from app.modules.webhooks.router import router as webhooks_router
 from app.modules.workspaces.router import router as workspaces_router
@@ -75,6 +76,8 @@ app.include_router(webhooks_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api/v1")
 app.include_router(workspaces_router, prefix="/api/v1")
 app.include_router(api_keys_router, prefix="/api/v1")
+app.include_router(members_router, prefix="/api/v1")
+app.include_router(sources_router, prefix="/api/v1")
 
 
 @app.get("/health")

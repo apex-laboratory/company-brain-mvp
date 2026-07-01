@@ -44,7 +44,21 @@ class Settings(BaseSettings):
     resend_api_key: str
     default_from_email: str = "Brainite <founders@brainites.com>"
 
+    # Public dashboard origin used to build links in transactional emails
+    # (e.g. the member-invite acceptance URL). Frontend base, not the API host.
+    app_base_url: str = "http://localhost:3000"
+
+    # ── login SSO (Sign in with Google/GitHub) ────────────────────────────────
+    # Separate OAuth client registrations from the source-connector ones below —
+    # different scopes (profile/email only) and consent screens.
+    login_google_client_id: str = ""
+    login_google_client_secret: str = ""
+    login_github_client_id: str = ""
+    login_github_client_secret: str = ""
+
     # ── source connectors (KAN-2) ─────────────────────────────────────────────
+    # Base URL used to construct the redirect_uri / webhook callback URLs sent to
+    # providers. Must match a redirect registered in each provider's app config.
     oauth_redirect_base_url: str = "http://localhost:4000"
     frontend_url: str = "http://localhost:3000"
     notion_client_id: str = ""
@@ -63,15 +77,13 @@ class Settings(BaseSettings):
     # embedded in the Pub/Sub push endpoint URL (?token=) used to verify deliveries.
     google_pubsub_topic: str = ""  # projects/<project>/topics/<topic>
     google_pubsub_verification_token: str = ""
-
-    # Base domain for per-workspace MCP/brain endpoints.
-    mcp_base_domain: str = "brainites.com"
-
-    # ── source connectors ──────────────────────────────────────────────────────
     # Slack connector
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_signing_secret: str = ""
+
+    # Base domain for per-workspace MCP/brain endpoints.
+    mcp_base_domain: str = "brainites.com"
 
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes

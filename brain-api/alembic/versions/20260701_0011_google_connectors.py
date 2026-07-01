@@ -1,7 +1,7 @@
-"""Google Drive + Gmail connectors: opaque sync cursor, channel expiry, enum values
+"""Google Drive + Gmail connectors: opaque sync cursor, channel expiry, enum value
 
-Revision ID: 0009
-Revises: 0008
+Revision ID: 0011
+Revises: 0010
 Create Date: 2026-07-01
 
 The Google connectors are the first whose incremental-sync cursor is an opaque token
@@ -13,16 +13,17 @@ first to register expiring push channels. This migration adds:
   (Notion/GitHub) keep using last_synced_at and leave this NULL.
 - webhook_subscriptions.expires_at (TIMESTAMPTZ) — Google watch channels expire in
   <= 7 days; the renewal cron re-watches rows nearing this.
-- source_provider enum values 'google_drive' and 'gmail'. ``ALTER TYPE ... ADD VALUE``
-  cannot run inside a transaction block, so it runs in an autocommit block.
+- source_provider enum value 'gmail' ('google_drive' was already added in 0010).
+  ``ALTER TYPE ... ADD VALUE`` cannot run inside a transaction block, so it runs in
+  an autocommit block.
 """
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0009"
-down_revision: Union[str, None] = "0008"
+revision: str = "0011"
+down_revision: Union[str, None] = "0010"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -36,11 +37,10 @@ def upgrade() -> None:
 
     # ALTER TYPE ... ADD VALUE cannot run inside a transaction block.
     with op.get_context().autocommit_block():
-        op.execute("ALTER TYPE source_provider ADD VALUE IF NOT EXISTS 'google_drive'")
         op.execute("ALTER TYPE source_provider ADD VALUE IF NOT EXISTS 'gmail'")
 
 
 def downgrade() -> None:
-    # Postgres cannot drop enum values; leave 'google_drive'/'gmail' in place.
+    # Postgres cannot drop enum values; leave 'gmail' in place.
     op.drop_column("webhook_subscriptions", "expires_at")
     op.drop_column("source_connections", "sync_cursor")

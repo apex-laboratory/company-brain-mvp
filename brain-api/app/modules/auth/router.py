@@ -10,8 +10,11 @@ enumeration and token-minting/brute-force abuse.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config.database import get_session
 from app.config.settings import settings
@@ -19,18 +22,44 @@ from app.modules.auth.schemas import (
     EmailSigninRequest,
     EmailSignupRequest,
     LogoutRequest,
+    OAuthCallbackRequest,
     RefreshRequest,
     TokenPairOut,
 )
-from app.modules.auth.service import AuthService
+from app.modules.auth.service import OAUTH_PROVIDERS, AuthService
 from app.shared.errors.app_error import UnauthorizedError
 from app.shared.http.respond import created, error_response, no_content, ok
 from app.shared.logger import get_logger
-from app.shared.middleware.rate_limit import AUTH_LIMIT, limiter
+from app.shared.middleware.authenticate import AuthContext, _from_jwt
+from app.shared.middleware.rate_limit import AUTH_LIMIT, OAUTH_CALLBACK_LIMIT, limiter, user_key
 
 log = get_logger()
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# OAuth providers wired into the code-exchange flow, plus SAML (accepted here
+# but answered 501 by the service until it is implemented). Derived from the
+# service registry so the two never drift.
+_VALID_PROVIDERS = OAUTH_PROVIDERS | {"saml"}
+_bearer = HTTPBearer(auto_error=False)
+
+
+def _optional_auth(
+    credentials: HTTPAuthorizationCredentials | None,
+) -> AuthContext | None:
+    """Resolve an optional Bearer token for the account-linking flow.
+
+    Returns ``None`` when no token is supplied (anonymous sign-up/sign-in). A
+    token that is *present but invalid/expired* is rejected with a 401 rather
+    than silently downgraded to anonymous — otherwise an expired session would
+    drop the intended account link without any signal to the caller.
+    """
+    if credentials is None:
+        return None
+    auth = _from_jwt(credentials.credentials)
+    if auth is None:
+        raise UnauthorizedError("Invalid or expired access token")
+    return auth
 
 # The raw refresh token is delivered as an httpOnly, secure, samesite=strict
 # cookie (BACKEND_BEST_PRACTICES.md §7) so it is never readable by JS. Scoped to
@@ -164,3 +193,68 @@ async def logout(
     response = no_content()
     response.delete_cookie(_REFRESH_COOKIE, path=_REFRESH_COOKIE_PATH)
     return response
+
+
+# ── OAuth SSO (KAN-40) ─────────────────────────────────────────────────────────
+
+@router.get("/oauth/{provider}/start")
+@limiter.limit(AUTH_LIMIT)
+async def oauth_start(
+    request: Request,
+    provider: str,
+    mode: Literal["signup", "signin"] = "signin",
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    service: AuthService = Depends(get_auth_service),
+) -> JSONResponse:
+    """Return a signed state token and the provider's authorization URL.
+
+    Accepts an optional Bearer token so an already-authenticated user can link
+    an additional provider (account-linking). Unauthenticated callers get
+    ``user_id=None`` in the state.
+    """
+    if provider not in _VALID_PROVIDERS:
+        return error_response(
+            request, status=400, code="invalid_provider",
+            message="Provider must be google, github, or saml.",
+        )
+
+    auth = _optional_auth(credentials)
+    result = await service.start_oauth(
+        provider=provider,
+        mode=mode,
+        user_id=auth.user_id if auth else None,
+        workspace_id=auth.workspace_id if auth else None,
+    )
+    return ok(request, result.model_dump(by_alias=True))
+
+
+@router.post("/oauth/{provider}/callback")
+@limiter.limit(OAUTH_CALLBACK_LIMIT, key_func=user_key)
+async def oauth_callback(
+    request: Request,
+    provider: str,
+    body: OAuthCallbackRequest,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    service: AuthService = Depends(get_auth_service),
+) -> JSONResponse:
+    """Exchange an authorization code for a Brainite session.
+
+    Verifies all six state checks before touching the provider. Any failure
+    returns a generic 401 — never revealing which check failed.
+    """
+    if provider not in _VALID_PROVIDERS:
+        return error_response(
+            request, status=400, code="invalid_provider",
+            message="Provider must be google, github, or saml.",
+        )
+
+    auth = _optional_auth(credentials)
+    session_out = await service.handle_oauth_callback(
+        provider=provider,
+        code=body.code,
+        state=body.state,
+        current_user_id=auth.user_id if auth else None,
+        user_agent=request.headers.get("user-agent"),
+        ip=_client_ip(request),
+    )
+    return ok(request, session_out.model_dump(by_alias=True))

@@ -14,26 +14,40 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.config.settings import settings
+from app.integrations.oauth import OAuthError, OAuthProfile, github_oauth, google_oauth
 from app.modules.auth.repository import AuthRepository, MembershipRecord, UserRecord
 from app.modules.auth.schemas import (
     AuthSessionOut,
     EmailSigninRequest,
     EmailSignupRequest,
+    OAuthStartOut,
     UserOut,
     WorkspaceOut,
 )
 from app.modules.auth.tokens import generate_refresh_token, mint_access_token
-from app.shared.errors.app_error import ConflictError, NotFoundError, UnauthorizedError
+from app.shared.errors.app_error import AppError, ConflictError, NotFoundError, UnauthorizedError
 from app.shared.helpers.crypto import sha256_hash
 from app.shared.helpers.ids import generate_id
+from app.shared.helpers.oauth_state import decode_state, encode_state
 from app.shared.logger import get_logger
 
 log = get_logger()
+
+# Single source of truth for the OAuth providers wired into the code-exchange
+# flow. Adding a provider is one entry here; the router derives its allow-list
+# from this set, so the URL builder, profile fetch, and validation never drift.
+_PROVIDERS = {"google": google_oauth, "github": github_oauth}
+OAUTH_PROVIDERS: frozenset[str] = frozenset(_PROVIDERS)
+_PROVIDER_CRED_ATTRS: dict[str, tuple[str, str]] = {
+    "google": ("login_google_client_id", "login_google_client_secret"),
+    "github": ("login_github_client_id", "login_github_client_secret"),
+}
 
 
 @dataclass(frozen=True)
@@ -263,6 +277,176 @@ class AuthService:
         """Revoke every live token in a rotation family."""
         await self._repository.revoke_family(session, family_id)
 
+    # ── OAuth start (KAN-40) ──────────────────────────────────────────────────
+    async def start_oauth(
+        self,
+        *,
+        provider: str,
+        mode: str,
+        user_id: str | None,
+        workspace_id: str | None,
+    ) -> OAuthStartOut:
+        """Generate a signed state, persist it, and return the provider's auth URL.
+
+        SAML is not yet supported and raises 501. ``user_id``/``workspace_id``
+        come from the caller's current JWT if they are already authenticated
+        (account-linking flow); both are ``None`` for sign-up/sign-in flows.
+        """
+        if provider == "saml":
+            raise AppError(501, "not_implemented", "SAML is not yet supported.")
+
+        redirect_uri = (
+            f"{settings.oauth_redirect_base_url}"
+            f"/api/v1/auth/oauth/{provider}/callback"
+        )
+
+        expires_at = datetime.now(UTC) + timedelta(
+            seconds=settings.oauth_state_ttl_seconds
+        )
+        state_raw = encode_state(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            provider=provider,
+            redirect_uri=redirect_uri,
+            mode=mode,
+            expires_at=expires_at,
+        )
+        state_hash = sha256_hash(state_raw)
+
+        async with get_session() as session:
+            await self._repository.create_oauth_state(
+                session,
+                state_hash=state_hash,
+                provider=provider,
+                redirect_uri=redirect_uri,
+                expires_at=expires_at,
+                user_id=user_id,
+                workspace_id=workspace_id,
+            )
+            await session.commit()
+
+        auth_url = _build_auth_url(provider, state_raw, redirect_uri)
+        return OAuthStartOut(authorization_url=auth_url, state=state_raw)
+
+    # ── OAuth callback (KAN-40) ───────────────────────────────────────────────
+    async def handle_oauth_callback(
+        self,
+        *,
+        provider: str,
+        code: str,
+        state: str,
+        current_user_id: str | None,
+        user_agent: str | None,
+        ip: str | None,
+    ) -> AuthSessionOut:
+        """Verify state, exchange code, upsert user, issue tokens.
+
+        All six state-validation checks must pass; any failure raises a generic
+        401 so callers cannot enumerate which check failed.
+        """
+        # Checks 1 & 2: JWT signature valid + exp not in the past (shared helper).
+        state_claims = decode_state(state)
+
+        state_hash = sha256_hash(state)
+
+        # ── Phase 1: validate + consume the state (short transaction) ──────────
+        # The state is consumed and committed here, before the provider round-trip,
+        # so we never hold a DB connection or the ``FOR UPDATE`` row lock across an
+        # external HTTP call (which can take up to ~20s for GitHub). The lock still
+        # serialises concurrent callbacks for the same state: the second request
+        # blocks on the SELECT FOR UPDATE until this commits, then sees
+        # ``consumed_at`` set and fails check 4. A failed exchange afterwards leaves
+        # the state burned (codes are single-use at the provider anyway).
+        state_user_id = state_claims.get("user_id")
+        async with get_session() as session:
+            # Check 3: row exists by sha256(state).
+            row = await self._repository.find_oauth_state(
+                session, state_hash, for_update=True
+            )
+            if row is None:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Check 4: not already consumed (single-use).
+            if row.consumed_at is not None:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Check 5: provider in state matches :provider path param.
+            if state_claims.get("provider") != provider:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Check 6: redirect_uri in state matches the stored value.
+            if state_claims.get("redirect_uri") != row.redirect_uri:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            # Check 7: if user_id present in state, it must match the
+            # currently authenticated user (if any).
+            if (
+                state_user_id is not None
+                and current_user_id is not None
+                and state_user_id != current_user_id
+            ):
+                raise UnauthorizedError("Invalid OAuth state")
+
+            redirect_uri = row.redirect_uri
+            await self._repository.mark_oauth_state_consumed(session, row.id)
+            await session.commit()
+
+        # ── Phase 2: provider round-trip (no DB connection held) ───────────────
+        try:
+            profile = await _fetch_profile(provider, code, redirect_uri)
+        except httpx.HTTPError as exc:
+            log.warning("oauth_provider_error", provider=provider, error=str(exc))
+            raise AppError(
+                502, "provider_error", "OAuth provider request failed."
+            ) from exc
+        except OAuthError as exc:
+            # HTTP succeeded but the payload is unusable (error body, unverified or
+            # missing email). Surface the provider-supplied status/code, not a 500.
+            log.warning("oauth_profile_error", provider=provider, error=str(exc))
+            raise AppError(exc.status, exc.code, exc.message) from exc
+
+        # ── Phase 3: upsert user + issue tokens (second transaction) ───────────
+        async with get_session() as session:
+            # Upsert the user row (no duplicate users for the same email).
+            new_user_id = generate_id("user")
+            user = await self._repository.upsert_oauth_user(
+                session,
+                user_id=new_user_id,
+                email=profile.email.lower(),
+                name=profile.name,
+            )
+
+            # Account-linking guard: if the state was minted for an authenticated
+            # user (``state_user_id``), the provider email must resolve to that same
+            # user. Without this, a linking attempt whose provider email differs
+            # would silently log the caller into (or create) a *different* account.
+            # Proper cross-email linking needs a provider-identity table; until then
+            # we fail closed rather than switch identity. The rollback undoes the
+            # throwaway upsert when the emails don't match.
+            if state_user_id is not None and user.id != state_user_id:
+                raise UnauthorizedError("Invalid OAuth state")
+
+            membership = await self._repository.find_primary_membership(
+                session, user.id
+            )
+            access_token, refresh_token = await self.issue_token_pair(
+                session,
+                user_id=user.id,
+                workspace_id=membership.workspace_id if membership else None,
+                role=membership.role if membership else None,
+                user_agent=user_agent,
+                ip=ip,
+            )
+            await self._repository.touch_last_login(session, user.id)
+            await session.commit()
+
+        return self._session_response(
+            user,
+            membership=membership,
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
+
     # ── internals ─────────────────────────────────────────────────────────────
     async def _persist_session_tokens(
         self,
@@ -298,3 +482,34 @@ class AuthService:
             ip_address=ip,
         )
         return access_token, raw_refresh, token_id
+
+
+# ── module-level helpers ───────────────────────────────────────────────────────
+
+def _provider_credentials(provider: str) -> tuple[str, str]:
+    """Resolve ``(client_id, client_secret)`` from settings for a provider."""
+    id_attr, secret_attr = _PROVIDER_CRED_ATTRS[provider]
+    return getattr(settings, id_attr), getattr(settings, secret_attr)
+
+
+def _build_auth_url(provider: str, state_raw: str, redirect_uri: str) -> str:
+    """Construct the provider's authorization URL with required query params."""
+    client_id, _ = _provider_credentials(provider)
+    return _PROVIDERS[provider].build_authorize_url(
+        client_id=client_id, redirect_uri=redirect_uri, state=state_raw
+    )
+
+
+async def _fetch_profile(
+    provider: str, code: str, redirect_uri: str
+) -> OAuthProfile:
+    """Dispatch code exchange + profile fetch to the correct provider module."""
+    module = _PROVIDERS[provider]
+    client_id, client_secret = _provider_credentials(provider)
+    token = await module.exchange_code(
+        code=code,
+        redirect_uri=redirect_uri,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    return await module.fetch_profile(token)

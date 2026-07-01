@@ -259,7 +259,7 @@ Common status codes:
 Allowed source providers:
 
 ```txt
-slack, notion, github, jira, zendesk
+slack, notion, github, jira, zendesk, google_drive
 ```
 
 ### Decision
@@ -612,6 +612,14 @@ Response `200`:
       "tag": "Policies & playbooks",
       "estimatedItems": "284 pages",
       "defaultScopes": ["read_content"],
+      "readOnly": true
+    },
+    {
+      "provider": "google_drive",
+      "name": "Google Drive",
+      "tag": "SOPs & runbooks",
+      "estimatedItems": "1,204 files",
+      "defaultScopes": ["https://www.googleapis.com/auth/drive.readonly"],
       "readOnly": true
     }
   ]
