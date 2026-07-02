@@ -137,10 +137,10 @@ class GoogleDriveIntegration:
         file = {**file, "_content": await self._content(access_token, file)}
         return RawItem(external_id=file["id"], payload=file)
 
-    async def _backfill(self, access_token: str) -> list[RawItem]:
-        since = (datetime.now(UTC) - timedelta(days=_BOOTSTRAP_LOOKBACK_DAYS)).replace(
-            microsecond=0
-        )
+    async def _backfill(self, access_token: str, lookback_days: int | None = None) -> list[RawItem]:
+        since = (
+            datetime.now(UTC) - timedelta(days=lookback_days or _BOOTSTRAP_LOOKBACK_DAYS)
+        ).replace(microsecond=0)
         items: list[RawItem] = []
         page_token: str | None = None
         while True:
@@ -168,13 +168,18 @@ class GoogleDriveIntegration:
         access_token: str,
         channel: ChannelRef,
         cursor: str | None,
+        lookback_days: int | None = None,
     ) -> tuple[list[RawItem], str | None]:
-        """Fetch files changed since the opaque ``cursor`` (a Drive pageToken)."""
+        """Fetch files changed since the opaque ``cursor`` (a Drive pageToken).
+
+        ``lookback_days`` bounds the bootstrap backfill (the connection's
+        onboarding "how far back?"); it is ignored on incremental syncs.
+        """
         if cursor is None:
             # Capture the start token first so changes during the backfill aren't lost
             # (they reappear on the next incremental sweep; inserts dedupe).
             start_token = await self._start_page_token(access_token)
-            items = await self._backfill(access_token)
+            items = await self._backfill(access_token, lookback_days)
             return items, start_token
 
         items: list[RawItem] = []

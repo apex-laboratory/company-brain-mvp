@@ -218,6 +218,19 @@ class SourcesRepository:
         ).mappings().all()
         return [dict(r) for r in rows]
 
+    async def update_lookback(
+        self, session: AsyncSession, source_id: str, lookback_days: int
+    ) -> None:
+        await session.execute(
+            text(
+                """
+                UPDATE source_connections
+                   SET lookback_days = :days, updated_at = now()
+                 WHERE id = :id
+                """
+            ).bindparams(id=source_id, days=lookback_days)
+        )
+
     async def upsert_channel(
         self,
         session: AsyncSession,

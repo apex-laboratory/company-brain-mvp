@@ -1,8 +1,8 @@
 # Company Brain — Product Specification
 
-**Version:** 1.1  
+**Version:** 1.3  
 **Status:** Active  
-**Last updated:** June 2026
+**Last updated:** July 2026
 
 ---
 
@@ -10,19 +10,21 @@
 
 1. [Overview](#1-overview)
 2. [Problem Statement](#2-problem-statement)
-3. [What We Are Not Building](#3-what-we-are-not-building)
-4. [Users](#4-users)
-5. [Architecture](#5-architecture)
-6. [Tech Stack](#6-tech-stack)
-7. [Skill Format](#7-skill-format)
-8. [Data Model](#8-data-model)
-9. [Source Authority Config](#9-source-authority-config)
-10. [Features](#10-features)
-11. [Processes](#11-processes)
-12. [Onboarding Flow](#12-onboarding-flow)
-13. [API Surface](#13-api-surface)
-14. [Phases of Execution](#14-phases-of-execution)
-15. [Open Questions](#15-open-questions)
+3. [Positioning & Competitive Landscape](#3-positioning--competitive-landscape)
+4. [What We Are Not Building](#4-what-we-are-not-building)
+5. [Users](#5-users)
+6. [Architecture](#6-architecture)
+7. [Tech Stack](#7-tech-stack)
+8. [Skill Format](#8-skill-format)
+9. [Data Model](#9-data-model)
+10. [Source Authority Config](#10-source-authority-config)
+11. [Features](#11-features)
+12. [Processes](#12-processes)
+13. [Onboarding Flow](#13-onboarding-flow)
+14. [API Surface](#14-api-surface)
+15. [Success Metrics](#15-success-metrics)
+16. [Phases of Execution](#16-phases-of-execution)
+17. [Open Questions](#17-open-questions)
 
 ---
 
@@ -60,7 +62,40 @@ The right fix is not better prompting or larger context windows. It is a dedicat
 
 ---
 
-## 3. What We Are Not Building
+## 3. Positioning & Competitive Landscape
+
+### Category validation
+
+This product is a direct answer to Y Combinator's official Request for Startups. Tom Blomfield's **"Company Brain"** RFS asks for "a system that pulls knowledge out of all these fragmented sources, structures it, keeps it current, and turns it into an executable skills file for AI... a living map of how a company works: how refunds get handled, how pricing exceptions are decided." Diana Hu's **"AI Operating System for Companies"** RFS asks for the closed feedback loop the same system enables. The problem is validated; the category is forming now, which means speed matters.
+
+### Competitive landscape (as of July 2026)
+
+| Competitor | What they do | How we differ |
+| --- | --- | --- |
+| **Hyperspell** (YC F25, ~$2M raised) | Memory layer API for agents; connectors for Slack, Gmail, Notion, Drive. Tagline: "Your Company Brain." | Sells *recall*. We sell *decision logic*: structured skills with base rules, exceptions, and actions. |
+| **Hyper** (YC P26) | Knowledge graph of timestamped subject-predicate-object facts with provenance and "supersedes" relations. | Closest in ambition, but auto-extracts facts with no human gate. Public criticism centers on fact hallucination, silent staleness, and no auditability — exactly what our review queue and contradiction detection solve. |
+| **Cerenovus** (YC W26) | Aggregates company files into a markdown knowledge graph; infers operational inefficiencies for executives. | Different buyer (executives, not agent engineers) and different output (analysis, not executable skills). |
+| **GBrain** (open source) | Typed knowledge graph, zero LLM calls per write, large OSS adoption. | Free floor for small tech-forward teams. We do not compete for that segment. |
+| **Mem0 / Zep / Letta** (Mem0: $24M Series A) | Agent memory infrastructure: vectors, temporal graphs, memory-OS runtimes. | They store what *an agent* experienced. We encode how *the company* decides. Complementary — an agent can use both. |
+| **Glean / Dust / Onyx** | Enterprise search and chat-over-documents. | Solved problem, different product. We return executable skills, not search results (see Section 4). |
+
+### Differentiation thesis
+
+Every funded entrant in this category is retrieval-first: they make company data *findable*. None of them ship what agents actually need to act safely: **human-reviewed, versioned, executable decision logic with contradiction detection and full audit trails**. Industry criticism of the retrieval-first approach converges on three failures — non-determinism, no governance, no auditability. Our review queue, source-authority tiers, confidence routing, contradiction cards, and `skill_versions` history are a direct answer to all three. The exceptions-table design (a new policy appends a row to an existing skill rather than creating a new document) is a structural insight no competitor has.
+
+### Moat
+
+1. **The reviewed skill corpus compounds.** Every human approval makes the brain more trustworthy and harder to replicate. Retrieval indexes can be rebuilt overnight; a corpus of human-verified operational logic cannot.
+2. **Portability as a wedge against lock-in fear.** Skills are plain versioned markdown, exportable at any time via `GET /skills/export`. The loudest criticism of competitors is vendor lock-in on accumulated organizational intelligence. "Your brain is yours — export it anytime" is a differentiator we get for free and must never break.
+3. **The review workflow is the trust layer.** Regulated and risk-sensitive operations (the acknowledged gap in every competitor) require exactly the determinism and traceability our pipeline produces by construction.
+
+### Launch wedge
+
+We launch narrow: **the policy brain for AI customer-support agents at 50–500 person B2B SaaS companies running Zendesk**. The demo scenario (refund handling), the Zendesk connector, and the CS-lead reviewer persona all already point here. Engineering runbooks, incident routing, and ops automation are expansion surfaces, not launch surfaces.
+
+---
+
+## 4. What We Are Not Building
 
 These decisions reflect deliberate choices to keep the MVP shippable and the product honest.
 
@@ -72,12 +107,16 @@ These decisions reflect deliberate choices to keep the MVP shippable and the pro
 | PM4Py process mining                        | A Sonnet call over resolved Zendesk tickets produces equivalent output for MVP purposes.                                                                        |
 | ExIde two-stage extraction                  | Replaced by a cleaner two-pass extraction design with better separation of concerns.                                                                            |
 | Multi-tenant PII redaction                  | Required before external enterprise customers. Not for internal prototype.                                                                                      |
-| Fine-tuned content classifier               | Claude Haiku via prompt handles classification at MVP scale.                                                                                                    |
-| Salesforce, HubSpot, Gmail, Gong connectors | Post-MVP. Six sources are sufficient to prove the extraction pipeline.                                                                                         |
+| Fine-tuned content classifier               | The Groq fast classifier (`llama-3.3-70b-versatile`) via prompt handles classification at MVP scale.                                                            |
+| Salesforce, HubSpot, Gong connectors        | Post-MVP. Six sources are sufficient to prove the extraction pipeline.                                                                                         |
+
+> **Note on Gmail:** a Gmail connector has since been implemented alongside Google Drive (`feature/kan-2-connectors`). It is treated as a seventh, optional source; onboarding UI support and authority-tier signals for it land in a later PRD revision.
 
 ---
 
-## 4. Users
+## 5. Users
+
+**Launch wedge (see Section 3):** AI support agents at 50–500 person B2B SaaS companies running Zendesk. The personas below are described generally, but launch messaging, onboarding defaults, and the demo all target the customer-support use case first.
 
 ### Primary — AI engineers deploying support or ops agents
 
@@ -95,7 +134,7 @@ When the extraction engine produces a low-confidence skill or detects a contradi
 
 ---
 
-## 5. Architecture
+## 6. Architecture
 
 Company Brain is organized into three layers. The onboarding sweep populates the brain at signup. The event-driven pipeline keeps it current thereafter. The delivery layer serves skills to agents.
 
@@ -148,7 +187,7 @@ For every agent query:
 
 ---
 
-## 6. Tech Stack
+## 7. Tech Stack
 
 | Component          | Technology                    | Notes                                                                    |
 | ------------------ | ----------------------------- | ------------------------------------------------------------------------ |
@@ -166,7 +205,7 @@ For every agent query:
 
 ---
 
-## 7. Skill Format
+## 8. Skill Format
 
 The output of every extraction is a structured markdown document. This is what agents receive when they call `query_brain`. It is designed to be both human-readable (for the review queue) and machine-readable (for agents).
 
@@ -215,7 +254,7 @@ Skills are stored and served as structured text, not as graph nodes or JSON blob
 
 ---
 
-## 8. Data Model
+## 9. Data Model
 
 ### `skills`
 
@@ -251,6 +290,8 @@ CREATE INDEX ON skills USING ivfflat (embedding vector_cosine_ops)
 CREATE INDEX ON skills (status);
 CREATE INDEX ON skills (source_authority);
 ```
+
+> **Multi-tenancy note:** the schema above is shown single-tenant for readability. In the implemented multi-tenant schema every table carries a `workspace_id` with row-level security enforced, and skill names are unique per workspace — `UNIQUE (workspace_id, name)` — not globally.
 
 ### `skill_versions`
 
@@ -317,7 +358,8 @@ CREATE TABLE source_events (
   skill_id     UUID,
   -- set after extraction if a skill was created or updated
   outcome      VARCHAR(30),
-  -- published | queued | discarded | duplicate | contradiction
+  -- published | queued | discarded | duplicate | contradiction | failed
+  -- failed = pipeline dead-letter after exhausted retries; re-runnable
   sweep_id     UUID,
   -- set if this event was processed during an onboarding sweep
   created_at   TIMESTAMP DEFAULT NOW()
@@ -349,7 +391,7 @@ CREATE TABLE sweeps (
 
 ### `agent_interactions`
 
-Stub for episodic feedback. Logged on every `query_brain` call. Processed in v2.
+Logged on every `query_brain` call. Drives the MVP-minimal feedback loop (Feature 15a): a `human_override = true` interaction decrements the matched skill's confidence and, below the auto-publish floor, creates a review queue item. Richer episodic processing lands in v2.
 
 ```sql
 CREATE TABLE agent_interactions (
@@ -416,7 +458,7 @@ CREATE INDEX ON webhook_subscriptions (expires_at);
 
 ---
 
-## 9. Source Authority Config
+## 10. Source Authority Config
 
 Loaded from `source_authority.yaml` at startup. Contains only static configuration: tier weights, routing thresholds, and sweep settings. Version-controlled alongside the codebase.
 
@@ -470,11 +512,15 @@ sweep:
   semaphore_limit: 5     # concurrent LLM calls
   auto_publish_during_sweep: false
   # all sweep extractions go to review_queue regardless of confidence
+  fast_track_high_tier: true
+  # high-tier designated sources (Notion policy pages, Drive policy folders)
+  # surface first in the review queue with a lightweight one-click "verify"
+  # flow instead of the full review card — see Onboarding Flow, Step 3
 ```
 
 ---
 
-## 10. Features
+## 11. Features
 
 ### Layer 1 — Source Connections
 
@@ -511,10 +557,10 @@ Reads `source_authority.yaml`, determines the tier of an incoming event or sweep
 
 ### Layer 2 — Extraction Engine
 
-**Feature 4 — Relevance gate** (Claude Haiku)
+**Feature 4 — Relevance gate** (Groq fast classifier)
 Single LLM call. Binary question: does this content contain operational decision logic, a policy rule, a process instruction, or an exception to an existing rule? Yes → proceed. No → mark `source_events.outcome = discarded`. This is the cheapest call in the pipeline and filters most noise before any expensive processing.
 
-**Feature 5 — Pass 1: Decision moment identifier** (Claude Haiku)
+**Feature 5 — Pass 1: Decision moment identifier** (Groq fast classifier)
 For threaded or long-form sources (Slack threads, Jira comment chains, GitHub review threads): reads the full content and identifies only the authoritative decision moments.
 
 Signals it looks for:
@@ -544,8 +590,10 @@ Output:
 }
 ```
 
-**Feature 7 — Boundary classifier** (Claude Haiku)
-After extraction, runs a pgvector cosine search over published skills (top 3 matches). If max similarity > 0.82, sends the new extraction alongside the matching skill to Haiku with a four-way classification question:
+**Feature 7 — Boundary classifier** (Groq fast classifier)
+After extraction, runs a pgvector cosine search over published skills (top 3 matches). If max similarity > 0.82, sends the new extraction alongside the matching skill to the fast classifier with a four-way classification question:
+
+> **Sweep-scope rule:** during an onboarding sweep nothing is published yet (`auto_publish_during_sweep = false`), so a published-only search would classify every item as NEW and flood the review queue with duplicates. When processing sweep items, the similarity search runs over **published + `pending_review`** skills.
 
 - **UPDATE** — this changes the base logic of the existing skill
 - **EXCEPTION** — this is a new exception or override to add to the existing skill
@@ -560,7 +608,7 @@ Routes by result:
 - NEW → create new skill entry, send to contradiction detector
 
 **Feature 8 — Contradiction detector**
-Runs when the boundary classifier returns UPDATE or NEW. Compares the proposed change against the current published skill. If the proposed content conflicts with the existing content on the same condition:
+Runs when the boundary classifier returns UPDATE or NEW. Compares the proposed change against the current published skill (during a sweep, against the matched `pending_review` skill — same sweep-scope rule as Feature 7). If the proposed content conflicts with the existing content on the same condition:
 
 - Does not update the skill
 - Does not create a new skill
@@ -606,7 +654,7 @@ confidence < 0.70
 ```
 
 **Feature 11 — Embedder**
-Calls OpenAI `text-embedding-3-small` on the skill's `trigger` + `base_logic` text. Stores the resulting 1536-dimension vector in `skills.embedding`. Called after skill_writer completes. Also called at query time to embed the agent's situation string for semantic search.
+Calls OpenAI `text-embedding-3-small` on the skill's `trigger` + `base_logic` text. Stores the resulting 1536-dimension vector in `skills.embedding`. Called after Pass 2 extraction and **before** boundary classification, which needs the vector to search (see Process 1); re-run whenever skill_writer commits a content change. Also called at query time to embed the agent's situation string for semantic search.
 
 ---
 
@@ -635,6 +683,14 @@ The primary interface for AI agents. Full implementation:
 5. If max similarity < 0.70: trigger Feature 16 (query-driven extraction)
 6. Cache result in Redis (5-min TTL)
 7. Log to `agent_interactions`
+
+**Feature 15a — Feedback loop (MVP-minimal)**
+Closes the loop between agent usage and skill quality without waiting for v2 episodic processing:
+
+- Agent frameworks (or humans supervising them) can report an override via `POST /interactions/{id}/override`
+- On override: decrement the matched skill's confidence by 0.05 (floor 0.0)
+- If the skill's confidence falls below 0.90 (the auto-publish floor), create a `review_queue` row with `review_type = update` and `reason = "agent override reported"`
+- Override rate per skill is surfaced in the review UI so reviewers see which skills are failing in production
 
 Response schema:
 
@@ -675,9 +731,11 @@ When `query_brain` finds no match (max similarity < 0.70), instead of returning 
 5. Store as draft in `review_queue` with `review_type: query_driven` for human promotion to published
 6. If the agent interaction is later marked as successful (no override, no correction), confidence bumps on next review
 
+**Latency budget:** query-driven extraction runs a multi-step LLM pipeline inline in an agent call. Hard budget: **15 seconds**. If the pipeline cannot complete within budget, return immediately with `{match_type: "no_match", extraction_queued: true, retry_after_seconds: 60}` and finish the extraction asynchronously — the agent can retry or escalate to a human. Agent integration docs must state this contract explicitly so developers can set their own timeouts sanely.
+
 **Feature 17 — FastAPI REST API**
 
-See Section 13 for full endpoint reference.
+See Section 14 for full endpoint reference.
 
 ---
 
@@ -831,7 +889,7 @@ Acceptance: zero hallucinated policy in agent output. Every decision traceable t
 
 ---
 
-## 11. Processes
+## 12. Processes
 
 ### Process 1 — Event-Driven Extraction
 
@@ -843,7 +901,7 @@ Source event received
   → Log to source_events (processed=false)
   → Enqueue for processing
 
-  [RELEVANCE GATE — Haiku]
+  [RELEVANCE GATE — Groq]
   → Is this content operational decision logic?
   → No  → source_events.outcome = discarded. Stop.
   → Yes → continue
@@ -852,7 +910,7 @@ Source event received
   → Fetch full surrounding context via source MCP
   → Annotate with source authority tier
 
-  [PASS 1 — DECISION MOMENT IDENTIFICATION — Haiku]
+  [PASS 1 — DECISION MOMENT IDENTIFICATION — Groq]
   → For threaded sources: extract authoritative decision moments
   → Output: [{message_id, author, timestamp, decision_text, signals}]
   → For non-threaded sources (Notion pages, Google Drive documents, GitHub files): skip to Pass 2
@@ -864,10 +922,10 @@ Source event received
   [EMBEDDING]
   → Call OpenAI text-embedding-3-small on trigger + base_logic
 
-  [BOUNDARY CLASSIFICATION — Haiku]
+  [BOUNDARY CLASSIFICATION — Groq]
   → pgvector search: top 3 matches, get similarity scores
   → max_similarity > 0.82?
-      YES → Haiku call: UPDATE | EXCEPTION | DUPLICATE | NEW
+      YES → fast-classifier call: UPDATE | EXCEPTION | DUPLICATE | NEW
       NO  → assume NEW, skip to contradiction check
 
   UPDATE    → go to CONTRADICTION DETECTOR with diff
@@ -987,13 +1045,14 @@ Runs inside Process 1 after Pass 2 extraction completes.
 New extraction produced
 
   [SIMILARITY SEARCH]
-  → pgvector search: top 3 published skills by embedding similarity
+  → pgvector search: top 3 skills by embedding similarity
+    (published only; published + pending_review during sweeps)
   → Record similarity scores
 
   max_similarity > 0.82?
     NO  → treat as NEW, proceed to Contradiction Detector
 
-    YES → [HAIKU BOUNDARY CALL]
+    YES → [GROQ BOUNDARY CALL]
           Input: new extraction + matching skill
           Question: UPDATE | EXCEPTION | DUPLICATE | NEW?
 
@@ -1069,7 +1128,7 @@ Reviewer opens item card
 
 ---
 
-## 12. Onboarding Flow
+## 13. Onboarding Flow
 
 ### Step 1 — Connect Sources
 
@@ -1156,9 +1215,16 @@ Skills extracted during the sweep never auto-publish regardless of confidence sc
 
 This is intentional. Historical data is less reliable than live events — policies change, Slack threads contain outdated stances, and you do not want an agent running on an automatically populated brain that no human has verified. The sweep gets the brain to a working draft state. Human review gets it to a trusted published state.
 
+### Cold-Start Mitigation
+
+The review requirement creates a cold-start risk: dozens of queued items gated on a non-technical reviewer before any value arrives. Two mitigations:
+
+1. **High-tier fast track** (`sweep.fast_track_high_tier`). Skills extracted from designated high-authority sources (Notion policy pages, Drive policy folders) surface at the top of the queue with a one-click "verify" flow — the reviewer confirms the source is current rather than reviewing full extraction detail. Combined with bulk cluster approval, this gets the first skills published fast without abandoning the human gate.
+2. **Time-to-first-value target:** **10 published skills within 1 hour of connecting sources.** This is a product acceptance metric (see Section 15), not just an aspiration — onboarding ordering, fast-track UX, and sweep priority all serve it.
+
 ---
 
-## 13. API Surface
+## 14. API Surface
 
 ### FastAPI REST — port 8000
 
@@ -1168,6 +1234,8 @@ This is intentional. Historical data is less reliable than live events — polic
 | GET    | `/skills/search?q={query}&limit={k}` | pgvector semantic search over published skills         |
 | GET    | `/skills/{id}`                       | Full skill body                                        |
 | GET    | `/skills/{id}/versions`              | Full version history                                   |
+| GET    | `/skills/export`                     | Export all published skills as a markdown bundle (zip). The anti-lock-in guarantee — see Section 3, Moat. |
+| POST   | `/interactions/{id}/override`        | Report an agent override (Feature 15a feedback loop)   |
 | POST   | `/skills`                            | Manual skill create (sets `changed_by=human_authored`) |
 | PATCH  | `/skills/{id}`                       | Manual skill edit                                      |
 | POST   | `/ingest/event`                      | Webhook receiver                                       |
@@ -1201,7 +1269,27 @@ async def query_brain(situation: str) -> dict:
 
 ---
 
-## 14. Phases of Execution
+## 15. Success Metrics
+
+**North star: percentage of agent queries answered by a published, human-reviewed skill** (`match_type = semantic` against a published skill). This measures the whole system — extraction coverage, quality, and currency — in one number.
+
+| Metric | Target | Measures |
+| --- | --- | --- |
+| Answered-by-published-skill rate | ≥ 70% of `query_brain` calls after week 2 | Coverage + retrieval quality |
+| Time to first value | 10 published skills within 1 hour of connecting sources | Onboarding + cold start |
+| Reviewer rejection rate | ≤ 25% of surfaced review items | Extraction precision (a free quality signal — track from day one) |
+| Contradiction detection recall | ≥ 80% on the synthetic validation set | Safety of auto-publish |
+| Relevance gate precision | ≥ 70% of gated-in items survive to queue or publish | Pipeline cost efficiency |
+| Agent override rate per skill | ≤ 5% of interactions; alert above | Production skill correctness (Feature 15a) |
+| Median review decision time | ≤ 30 seconds per item | Review UX |
+| Redis cache hit rate | ≥ 40% of `query_brain` calls | Delivery cost + latency |
+| Webhook-to-published latency | ≤ 5 minutes | Living currency promise |
+
+These are product acceptance metrics: phase acceptance criteria below reference them, and instrumentation for each must exist before the phase that depends on it closes.
+
+---
+
+## 16. Phases of Execution
 
 ### Phase 1 — Infrastructure
 
@@ -1230,51 +1318,68 @@ async def query_brain(situation: str) -> dict:
 
 **Scope:** OAuth connector setup, onboarding configuration UI, sweep worker, source authority annotator, context expanders.
 
+**What "sweep" means in this phase:** ingestion only. The Phase 2 sweep worker fetches historical items and logs them to `source_events` (`processed = false`) in authority order — it does **not** extract, because the extraction pipeline is Phase 3. Phase 3 then runs extraction over the events this phase logged. This makes Phase 2 independently verifiable.
+
+**Connector priority:** Zendesk is the launch wedge (Section 3) and must be treated as first-class, not built last. Remaining connector order: **Zendesk → Jira** (Slack, Notion, GitHub, Google Drive, Gmail already implemented).
+
 **Deliverables:**
 
-- OAuth flows for all six sources
+- OAuth flows for all six sources, Zendesk prioritized
 - Onboarding config UI (channel/space picker + time window)
-- Sweep worker with priority ordering and rate limiting
+- Sweep worker (ingestion-only) with priority ordering and rate limiting
+- Per-source **API** rate limiting for historical fetches (Notion ~3 rps, Slack tier limits, Zendesk incremental export limits) — distinct from the LLM processing rate limit
 - `GET /ingest/sweep/{id}/status` with per-source progress
-- Context expander for each source
 - Source authority annotator reading `source_authority.yaml`
 - Webhook receiver `POST /ingest/event` (logs and enqueues, does not yet extract)
+- **Webhook security:** per-source signature verification (Slack signing secret, GitHub HMAC, Notion verification token, Zendesk basic auth/signing), URL-verification handshakes (e.g., Slack `url_verification` challenge echo), and duplicate-delivery dedup keyed on source event ID
 - Webhook subscriptions created for monitored sources after onboarding
+- **Credential & subscription lifecycle:** transparent OAuth token refresh from `source_connections.refresh_token`; renewal job for expiring subscriptions driven by `webhook_subscriptions.expires_at` (Google Drive channels expire within ~7 days)
 
 **Acceptance:**
 
 - User can complete OAuth for all six sources
-- After onboarding config, sweep worker starts and processes items in authority order
+- After onboarding config, sweep worker starts and ingests items in authority order; `source_events` populates with `processed = false`
 - `GET /ingest/sweep/{id}/status` shows real-time per-source progress
-- `source_events` table populates during sweep
+- **Resumability exercised, not assumed:** killing the sweep mid-run and restarting resumes from the last processed item with zero duplicate `source_events` rows
+- **Failure isolation:** one source erroring (revoked token, API outage) marks that source failed in `sweeps.progress` and does not halt the other sources
 - Webhook subscriptions verified active for all monitored channels
+- Unsigned or badly-signed webhook payloads are rejected with 401 and do not create `source_events` rows; redelivered events do not create duplicates
+- An expired OAuth token refreshes without user action; a Drive channel nearing expiry is renewed by the renewal job before it lapses
 
 ---
 
 ### Phase 3 — Extraction Engine
 
-**Scope:** Full extraction pipeline. Relevance gate, two-pass extraction, boundary classifier, contradiction detector, confidence scorer, embedder, skill writer.
+**Scope:** Full extraction pipeline. Relevance gate, two-pass extraction, boundary classifier, contradiction detector, confidence scorer, embedder, skill writer. Extraction runs over the `source_events` rows the Phase 2 sweep ingested (`processed = false`).
 
 **Deliverables:**
 
-- `services/relevance_gate.py` — Haiku classifier
-- `services/decision_identifier.py` — Pass 1, Haiku thread structurer
+- Context expander for each source (moved from Phase 2 in v1.3: expanders are only invoked by the pipeline after the relevance gate, so building them earlier means guessing this phase's interface)
+- `services/relevance_gate.py` — Groq classifier
+- `services/decision_identifier.py` — Pass 1, Groq thread structurer
 - `services/skill_extractor.py` — Pass 2, Sonnet structured extractor
-- `services/boundary_classifier.py` — Haiku four-way classifier
-- `services/contradiction_detector.py` — conflict comparison
+- `services/boundary_classifier.py` — Groq four-way classifier, **searching published + `pending_review` skills during sweeps** (see Feature 7 sweep-scope note — without this, an empty published set classifies every sweep item as NEW and floods the queue with duplicates)
+- `services/contradiction_detector.py` — conflict comparison (same sweep-scope rule)
 - `services/confidence_scorer.py` — authority-weighted scoring
 - `services/embedder.py` — OpenAI embedding wrapper
 - `services/skill_writer.py` — write to skills table with routing logic
+- **Pipeline failure handling:** transient LLM failures retry with exponential backoff (3 attempts); exhausted retries set `source_events.outcome = failed` (dead-letter) so the sweep never silently drops items; failed events are re-runnable
+- **Synthetic validation dataset + eval harness:** the labeled dataset resolving the Section 17 open question, plus a repeatable harness measuring relevance-gate precision, boundary-classification accuracy, and contradiction-detection recall. This is also the regression suite for every future prompt change
+- **Cost telemetry:** per-stage LLM cost logged per event; per-sweep cost rollup in `sweeps.progress`
+- `POST /review/{id}/approve` and `POST /review/{id}/reject` API endpoints (UI comes in Phase 4; Phase 3 approval happens via API)
 - End-to-end processing of sweep items through full pipeline
 - `review_queue` populates with sweep-sourced skills
 
 **Acceptance:**
 
 - Running sweep on real or synthetic data produces skills in `review_queue`
-- At least 10 published skills after human approval of sweep items
-- Duplicate Slack messages about the same policy correctly classified as DUPLICATE
+- At least 10 published skills after human approval of sweep items **via the approve API** (review UI is Phase 4)
+- Duplicate Slack messages about the same policy correctly classified as DUPLICATE — **including during a sweep**, when the matching skill is still `pending_review` rather than published
 - At least one contradiction correctly detected and routed to `review_queue` with both sources populated
 - Every skill in the `skills` table has a non-null `embedding` vector
+- A forced transient LLM failure retries and succeeds; a forced permanent failure lands in `outcome = failed` and is visible in sweep progress, not silently dropped
+- Sweep cost rollup reported; pipeline cost per 1,000 sweep items within the budget set at phase start
+- **Extraction quality measured, not assumed:** on the synthetic validation set, relevance gate precision ≥ 70%, contradiction detection recall ≥ 80%, reviewer rejection rate ≤ 25% (Section 15). Rejection-rate instrumentation ships with this phase.
 
 ---
 
@@ -1313,9 +1418,13 @@ async def query_brain(situation: str) -> dict:
 - `query_brain` MCP tool fully implemented (embed → cache check → search → return or fallback)
 - Query-driven extraction fallback (Feature 16)
 - Event-driven pipeline active: webhook events now trigger full extraction, not just logging
+- **Backlog policy:** webhook events logged to `source_events` between Phase 2 activation and this phase (received but never extracted) are replayed through the pipeline on activation, oldest first — or explicitly marked `discarded` by config; they must not remain silently unprocessed
 - `GET /skills/search` endpoint live with pgvector results
 - Redis cache confirmed working: second identical query served from cache
 - `agent_interactions` logging on every `query_brain` call
+- Feedback loop (Feature 15a): `POST /interactions/{id}/override` decrements skill confidence and queues review below the auto-publish floor
+- Query-driven extraction honors the 15-second latency budget with async fallback
+- `GET /skills/export` returns the full published skill corpus as portable markdown
 
 **Acceptance:**
 
@@ -1323,6 +1432,8 @@ async def query_brain(situation: str) -> dict:
 - Second identical call served from Redis (confirmed via cache hit log)
 - Posting a mock Slack policy message to `POST /ingest/event` produces an updated or new skill within 5 minutes
 - Query with no matching skill triggers query-driven extraction and returns a result flagged `query_driven: true`
+- Query-driven extraction exceeding 15 seconds returns `extraction_queued: true` instead of blocking the agent
+- Reporting an override on a published skill drops its confidence and creates a review item once below 0.90
 
 ---
 
@@ -1345,11 +1456,11 @@ async def query_brain(situation: str) -> dict:
 
 ---
 
-## 15. Open Questions
+## 17. Open Questions
 
 | Question                                                                                                                                                                                                                         | Priority | Needed by                                 |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------- |
-| Which data set for Phase 3 validation — pilot customer's real data or a synthetic data set designed to stress-test contradiction detection and boundary classification?                                                          | High     | Before Phase 3                            |
+| ~~Which data set for Phase 3 validation — pilot customer's real data or a synthetic data set?~~ **Resolved (v1.3):** a synthetic validation dataset + eval harness is a Phase 3 deliverable; pilot data supplements it when available. | ~~High~~ | Resolved                                  |
 | Should the review queue send notifications (email, Slack DM) when new items arrive, or is polling the UI sufficient for MVP?                                                                                                     | Medium   | Before Phase 4                            |
 | What is the right lookback window default for the sweep? 3 months is safer (less stale data) but 12 months surfaces more institutional knowledge.                                                                                | Medium   | Before Phase 2                            |
 | Pricing model: platform fee + per-query, flat monthly, or outcome-based?                                                                                                                                                         | High     | Before any external customer conversation |

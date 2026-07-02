@@ -147,3 +147,30 @@ async def test_no_selection_means_no_channel_filter() -> None:
     )
     integration = await _run_ok(_state(), integration, selected=[])
     assert "allowed_channels" not in integration.fetch_since.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_opaque_bootstrap_receives_lookback_days() -> None:
+    state = _state()
+    state.sync_cursor = None  # bootstrap: no cursor yet
+    integration = MagicMock(
+        fetch_since=AsyncMock(return_value=([], "tok-1")),
+        opaque_cursor=True,
+        supports_channel_filter=False,
+    )
+    integration = await _run_ok(state, integration)
+    assert integration.fetch_since.await_args.kwargs["lookback_days"] == 90
+
+
+@pytest.mark.asyncio
+async def test_opaque_incremental_does_not_pass_lookback() -> None:
+    state = _state()
+    state.sync_cursor = "page-token-7"
+    integration = MagicMock(
+        fetch_since=AsyncMock(return_value=([], "page-token-8")),
+        opaque_cursor=True,
+        supports_channel_filter=False,
+    )
+    integration = await _run_ok(state, integration)
+    assert "lookback_days" not in integration.fetch_since.await_args.kwargs
+    assert integration.fetch_since.await_args.args[2] == "page-token-7"

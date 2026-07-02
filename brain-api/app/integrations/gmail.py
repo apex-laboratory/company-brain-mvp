@@ -111,8 +111,14 @@ class GmailIntegration:
         )
         return str(resp.json()["historyId"])
 
-    async def _bootstrap(self, access_token: str) -> tuple[list[RawItem], str]:
-        after = int((datetime.now(UTC) - timedelta(days=_BOOTSTRAP_LOOKBACK_DAYS)).timestamp())
+    async def _bootstrap(
+        self, access_token: str, lookback_days: int | None = None
+    ) -> tuple[list[RawItem], str]:
+        after = int(
+            (
+                datetime.now(UTC) - timedelta(days=lookback_days or _BOOTSTRAP_LOOKBACK_DAYS)
+            ).timestamp()
+        )
         # Read the cursor first so messages arriving during the backfill aren't missed.
         cursor = await self._profile_history_id(access_token)
         items: list[RawItem] = []
@@ -137,10 +143,15 @@ class GmailIntegration:
         access_token: str,
         channel: ChannelRef,
         cursor: str | None,
+        lookback_days: int | None = None,
     ) -> tuple[list[RawItem], str | None]:
-        """Fetch messages added since the opaque ``cursor`` (a Gmail historyId)."""
+        """Fetch messages added since the opaque ``cursor`` (a Gmail historyId).
+
+        ``lookback_days`` bounds the bootstrap backfill (the connection's
+        onboarding "how far back?"); it is ignored on incremental syncs.
+        """
         if cursor is None:
-            return await self._bootstrap(access_token)
+            return await self._bootstrap(access_token, lookback_days)
 
         items: list[RawItem] = []
         seen: set[str] = set()
@@ -161,7 +172,7 @@ class GmailIntegration:
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 404:
                     # Stored historyId is too old — Gmail dropped it. Full resync.
-                    return await self._bootstrap(access_token)
+                    return await self._bootstrap(access_token, lookback_days)
                 raise
             data = resp.json()
             for record in data.get("history", []):

@@ -223,6 +223,8 @@ class SourcesService:
                 provider = await self._repo.get_connection_provider(session, source_id)
                 if provider is None:
                     raise NotFoundError("Source connection")
+                if req.lookback_days is not None:
+                    await self._repo.update_lookback(session, source_id, req.lookback_days)
                 for ch in req.channels:
                     await self._repo.upsert_channel(
                         session,

@@ -102,6 +102,10 @@ async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
                     selected = await _repo.selected_channel_ids(session, source_id)
                     if selected:
                         kwargs["allowed_channels"] = set(selected)
+                if opaque_cursor and cursor is None and state.lookback_days:
+                    # Opaque-cursor providers (Drive/Gmail) bound their bootstrap
+                    # backfill themselves — hand them the connection's window.
+                    kwargs["lookback_days"] = state.lookback_days
                 items, next_cursor = await integration.fetch_since(token, channel, cursor, **kwargs)
 
                 for item in items:
