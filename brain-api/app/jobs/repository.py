@@ -262,6 +262,27 @@ class JobsRepository:
         ).first()
         return (row.id, row.workspace_id) if row else None
 
+    async def list_pollable_connections(
+        self, session: AsyncSession, providers: list[str]
+    ) -> list[tuple[str, str]]:
+        """``(source_id, workspace_id)`` for every connected connection of ``providers``.
+
+        Cross-tenant by design (like ``list_expiring_subscriptions``): the polling
+        cron fans out one tenant-scoped ``source_sync`` job per row.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, workspace_id FROM source_connections
+                     WHERE status = 'connected'
+                       AND provider::text = ANY(:providers)
+                    """
+                ).bindparams(providers=providers)
+            )
+        ).all()
+        return [(r.id, r.workspace_id) for r in rows]
+
     # ── onboarding sweeps ──────────────────────────────────────────────────────────
     async def list_connected_sources(self, session: AsyncSession) -> list[dict]:
         """All connected connections in the tenant, oldest first (stable sweep order)."""

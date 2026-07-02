@@ -13,6 +13,7 @@ from app.config.settings import settings
 from app.integrations.base import close_http_client
 from app.jobs.tasks.google_watch import watch_register, watch_renew
 from app.jobs.tasks.onboarding_sweep import onboarding_sweep
+from app.jobs.tasks.poll_sync import poll_pull_sources
 from app.jobs.tasks.source_sync import source_sync
 from app.jobs.tasks.webhook_ingest import webhook_ingest
 
@@ -27,8 +28,12 @@ class WorkerSettings:
     # instead of the default 10-minute job_timeout; a timeout kill is resumed by
     # the ARQ retry (completed sources are skipped).
     functions = [source_sync, webhook_ingest, watch_register, func(onboarding_sweep, timeout=3600)]
-    # Daily renewal of Google push channels (Drive/Gmail watch expires <= 7 days).
-    cron_jobs = [cron(watch_renew, hour=3, minute=0)]
+    # Daily renewal of Google push channels (Drive/Gmail watch expires <= 7 days);
+    # 15-minute polling for providers without push delivery (Notion).
+    cron_jobs = [
+        cron(watch_renew, hour=3, minute=0),
+        cron(poll_pull_sources, minute={0, 15, 30, 45}),
+    ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     on_shutdown = shutdown
     max_jobs = 10
