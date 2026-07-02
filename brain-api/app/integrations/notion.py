@@ -54,6 +54,9 @@ def _title_of(page: dict) -> str:
 
 class NotionIntegration:
     provider = "notion"
+    # Notion has no webhooks: updates only arrive by polling, so the
+    # poll_pull_sources cron enqueues periodic source_sync runs for it.
+    push_delivery = False
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()

@@ -189,8 +189,14 @@ class SourcesService:
                 )
                 await session.commit()
 
-        # 5. Kick off the initial sweep (best-effort).
-        await enqueue("source_sync", resolved.workspace_id, connection_id)
+        # 5. No sync yet: the initial backfill is the onboarding sweep
+        #    (POST /sweeps after the user finishes the channel/lookback picker),
+        #    so we don't ingest channels the user is about to deselect.
+
+        # 6. Google connectors register a push channel (Drive changes.watch /
+        #    Gmail users.watch) so updates arrive in real time.
+        if provider in ("google_drive", "gmail"):
+            await enqueue("watch_register", resolved.workspace_id, connection_id)
 
         return f"{settings.frontend_url}/settings/sources?connected={provider}"
 
@@ -215,6 +221,9 @@ class SourcesService:
                     await integration.revoke(_dec(secrets_row["access_token_enc"]))
                 except Exception:  # noqa: BLE001 — never block disconnect on a provider error
                     pass
+                # Stop renewing any push channels for this source; the provider-side
+                # channel then expires on its own (<= 7 days for Google watch).
+                await self._repo.revoke_subscriptions_for_source(session, source_id)
                 await self._repo.delete_connection(session, source_id)
                 await session.commit()
 
@@ -256,6 +265,8 @@ class SourcesService:
                 provider = await self._repo.get_connection_provider(session, source_id)
                 if provider is None:
                     raise NotFoundError("Source connection")
+                if req.lookback_days is not None:
+                    await self._repo.update_lookback(session, source_id, req.lookback_days)
                 for ch in req.channels:
                     await self._repo.upsert_channel(
                         session,

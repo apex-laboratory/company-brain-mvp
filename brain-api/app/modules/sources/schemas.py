@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 
@@ -58,3 +58,6 @@ class ChannelSelection(_Request):
 
 class ChannelSelectRequest(_Request):
     channels: list[ChannelSelection]
+    # Onboarding's "how far back?" selector. Bounds the connection's first sync
+    # (source_connections.lookback_days); omitted = keep the current value.
+    lookback_days: int | None = Field(default=None, ge=1, le=730)

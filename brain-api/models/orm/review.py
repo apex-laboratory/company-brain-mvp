@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
+from .enums import source_provider_enum as _source_provider
 
 _decision_status = Enum("approved", "active", "review",
                          name="decision_status", create_type=False)
@@ -13,8 +14,6 @@ _review_kind = Enum("policy_change", "new_decision", "contradiction", "exception
                      name="review_kind", create_type=False)
 _review_status = Enum("pending", "approved", "rejected",
                        name="review_status", create_type=False)
-_source_provider = Enum("slack", "notion", "github", "jira", "zendesk",
-                         name="source_provider", create_type=False)
 
 
 class Decision(Base):

@@ -44,7 +44,21 @@ class Settings(BaseSettings):
     resend_api_key: str
     default_from_email: str = "Brainite <founders@brainites.com>"
 
+    # Public dashboard origin used to build links in transactional emails
+    # (e.g. the member-invite acceptance URL). Frontend base, not the API host.
+    app_base_url: str = "http://localhost:3000"
+
+    # ── login SSO (Sign in with Google/GitHub) ────────────────────────────────
+    # Separate OAuth client registrations from the source-connector ones below —
+    # different scopes (profile/email only) and consent screens.
+    login_google_client_id: str = ""
+    login_google_client_secret: str = ""
+    login_github_client_id: str = ""
+    login_github_client_secret: str = ""
+
     # ── source connectors (KAN-2) ─────────────────────────────────────────────
+    # Base URL used to construct the redirect_uri / webhook callback URLs sent to
+    # providers. Must match a redirect registered in each provider's app config.
     oauth_redirect_base_url: str = "http://localhost:4000"
     frontend_url: str = "http://localhost:3000"
     notion_client_id: str = ""
@@ -55,6 +69,18 @@ class Settings(BaseSettings):
     github_app_private_key: str = ""
     github_app_slug: str = ""  # used to build the install URL
     github_webhook_secret: str = ""  # shared secret for X-Hub-Signature-256
+    # Google (Drive + Gmail) share one OAuth client (web-server flow). The consent
+    # screen is kept in "Testing" status (<=100 users) to avoid Google verification.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    # Gmail push: the Cloud Pub/Sub topic users.watch publishes to, and a shared token
+    # embedded in the Pub/Sub push endpoint URL (?token=) used to verify deliveries.
+    google_pubsub_topic: str = ""  # projects/<project>/topics/<topic>
+    google_pubsub_verification_token: str = ""
+    # Slack connector
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_signing_secret: str = ""
     # Zendesk OAuth (subdomain-scoped). One global OAuth client across all customer
     # subdomains; the per-customer subdomain travels through the OAuth flow + connection.
     zendesk_client_id: str = ""
@@ -62,6 +88,10 @@ class Settings(BaseSettings):
 
     # Base domain for per-workspace MCP/brain endpoints.
     mcp_base_domain: str = "brainites.com"
+
+    # source_authority.yaml (sweep processing order etc.); lives at the repo root
+    # in dev. A missing file falls back to the built-in default order.
+    source_authority_path: str = "../source_authority.yaml"
 
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes

@@ -6,9 +6,8 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
+from .enums import source_provider_enum as _source_provider
 
-_source_provider = Enum("slack", "notion", "github", "jira", "zendesk",
-                         name="source_provider", create_type=False)
 _source_status = Enum("connected", "disconnected", "error", "pending",
                        name="source_status", create_type=False)
 _sync_status = Enum("healthy", "pending", "syncing", "error",
@@ -37,6 +36,7 @@ class SourceConnection(Base):
     token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     scopes: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
     external_account_id: Mapped[str | None] = mapped_column(Text)
+    sync_cursor: Mapped[str | None] = mapped_column(Text)                 # opaque incremental cursor (Drive pageToken / Gmail historyId)
     lookback_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("90"))
     health: Mapped[int | None] = mapped_column(Integer)                  # 0–100
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -92,7 +92,8 @@ class WebhookSubscription(Base):
     provider: Mapped[str] = mapped_column(_source_provider, nullable=False)
     source_ref_id: Mapped[str | None] = mapped_column(Text)              # subscription id assigned by provider
     target_id: Mapped[str | None] = mapped_column(Text)                  # channel/space/project monitored
-    secret_enc: Mapped[bytes | None] = mapped_column(LargeBinary)        # encrypted signing secret
+    secret_enc: Mapped[bytes | None] = mapped_column(LargeBinary)        # encrypted signing secret / channel token
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # push-channel expiry (Google watch <= 7d)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")

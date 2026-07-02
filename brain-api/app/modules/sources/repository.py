@@ -198,6 +198,16 @@ class SourcesRepository:
         )
         return (result.rowcount or 0) > 0
 
+    async def revoke_subscriptions_for_source(
+        self, session: AsyncSession, source_id: str
+    ) -> None:
+        """Mark any push-channel subscriptions for this source revoked (stops renewal)."""
+        await session.execute(
+            text(
+                "UPDATE webhook_subscriptions SET status = 'revoked' WHERE target_id = :sid"
+            ).bindparams(sid=source_id)
+        )
+
     # ── source_channels (tenant) ──────────────────────────────────────────────
     async def list_channels(self, session: AsyncSession, source_id: str) -> list[dict]:
         rows = (
@@ -213,6 +223,19 @@ class SourcesRepository:
             )
         ).mappings().all()
         return [dict(r) for r in rows]
+
+    async def update_lookback(
+        self, session: AsyncSession, source_id: str, lookback_days: int
+    ) -> None:
+        await session.execute(
+            text(
+                """
+                UPDATE source_connections
+                   SET lookback_days = :days, updated_at = now()
+                 WHERE id = :id
+                """
+            ).bindparams(id=source_id, days=lookback_days)
+        )
 
     async def upsert_channel(
         self,

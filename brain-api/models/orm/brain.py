@@ -5,12 +5,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
+from .enums import source_provider_enum as _source_provider
 
 _build_status = Enum("queued", "running", "completed", "failed", "canceled",
                       name="build_status", create_type=False)
 _message_role = Enum("user", "assistant", name="message_role", create_type=False)
-_source_provider = Enum("slack", "notion", "github", "jira", "zendesk",
-                         name="source_provider", create_type=False)
 
 
 class BrainBuild(Base):

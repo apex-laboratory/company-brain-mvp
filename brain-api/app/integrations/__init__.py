@@ -8,13 +8,17 @@ from __future__ import annotations
 
 from app.integrations.base import (
     ChannelRef,
+    ConnectorAuthError,
     OAuthTokens,
     RawEvent,
     RawItem,
     SourceIntegration,
 )
 from app.integrations.github import GitHubIntegration
+from app.integrations.gmail import GmailIntegration
+from app.integrations.google_drive import GoogleDriveIntegration
 from app.integrations.notion import NotionIntegration
+from app.integrations.slack import SlackIntegration
 from app.integrations.zendesk import ZendeskIntegration
 
 # Provider → integration instance. The sources/webhooks layers and the sync jobs
@@ -22,6 +26,9 @@ from app.integrations.zendesk import ZendeskIntegration
 REGISTRY: dict[str, SourceIntegration] = {
     "notion": NotionIntegration(),
     "github": GitHubIntegration(),
+    "slack": SlackIntegration(),
+    "google_drive": GoogleDriveIntegration(),
+    "gmail": GmailIntegration(),
     "zendesk": ZendeskIntegration(),
 }
 
@@ -33,12 +40,16 @@ def get_integration(provider: str) -> SourceIntegration:
 
 __all__ = [
     "ChannelRef",
+    "ConnectorAuthError",
     "OAuthTokens",
     "RawEvent",
     "RawItem",
     "SourceIntegration",
     "NotionIntegration",
     "GitHubIntegration",
+    "SlackIntegration",
+    "GoogleDriveIntegration",
+    "GmailIntegration",
     "ZendeskIntegration",
     "REGISTRY",
     "get_integration",
