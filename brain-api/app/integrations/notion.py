@@ -78,7 +78,10 @@ class NotionIntegration:
         }
 
     # ── OAuth ──────────────────────────────────────────────────────────────────
-    def authorize_url(self, state: str, redirect_uri: str) -> str:
+    def authorize_url(
+        self, state: str, redirect_uri: str, *, config: Mapping[str, str] | None = None
+    ) -> str:
+        # ``config`` is unused — Notion has a global authorize endpoint.
         from urllib.parse import urlencode
 
         query = urlencode(

@@ -44,6 +44,12 @@ class ChannelOut(_Response):
 
 
 # ── requests ──────────────────────────────────────────────────────────────────
+class AuthorizeStartRequest(_Request):
+    # Required for subdomain-scoped providers (e.g. Zendesk: 'acme' -> acme.zendesk.com);
+    # omitted for global-endpoint providers (Notion, GitHub).
+    subdomain: str | None = None
+
+
 class ChannelSelection(_Request):
     external_id: str
     name: str

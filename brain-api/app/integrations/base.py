@@ -105,8 +105,15 @@ class SourceIntegration(Protocol):
 
     provider: str
 
-    def authorize_url(self, state: str, redirect_uri: str) -> str:
-        """Build the provider consent URL for the start of the OAuth flow."""
+    def authorize_url(
+        self, state: str, redirect_uri: str, *, config: Mapping[str, str] | None = None
+    ) -> str:
+        """Build the provider consent URL for the start of the OAuth flow.
+
+        ``config`` carries provider-specific start params not known until the user
+        initiates the connect (e.g. a Zendesk/Jira ``subdomain``, which is the URL
+        host). Providers with global endpoints (Notion, GitHub) ignore it.
+        """
         ...
 
     async def exchange_code(

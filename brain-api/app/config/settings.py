@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     slack_client_id: str = ""
     slack_client_secret: str = ""
     slack_signing_secret: str = ""
+    # Zendesk OAuth (subdomain-scoped). One global OAuth client across all customer
+    # subdomains; the per-customer subdomain travels through the OAuth flow + connection.
+    zendesk_client_id: str = ""
+    zendesk_client_secret: str = ""
 
     # Base domain for per-workspace MCP/brain endpoints.
     mcp_base_domain: str = "brainites.com"

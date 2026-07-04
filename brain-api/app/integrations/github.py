@@ -133,7 +133,10 @@ class GitHubIntegration:
         return resp.json()
 
     # ── OAuth / install ──────────────────────────────────────────────────────────
-    def authorize_url(self, state: str, redirect_uri: str) -> str:
+    def authorize_url(
+        self, state: str, redirect_uri: str, *, config: Mapping[str, str] | None = None
+    ) -> str:
+        # ``config`` is unused — GitHub App installs use a global install page.
         # GitHub App installs go through the App's install page; the callback URL is
         # configured on the App itself, so redirect_uri is not sent here.
         query = urlencode({"state": state})
