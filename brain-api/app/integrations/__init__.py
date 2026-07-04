@@ -20,6 +20,7 @@ from app.integrations.google_drive import GoogleDriveIntegration
 from app.integrations.jira import JiraIntegration
 from app.integrations.notion import NotionIntegration
 from app.integrations.slack import SlackIntegration
+from app.integrations.zendesk import ZendeskIntegration
 
 # Provider → integration instance. The sources/webhooks layers and the sync jobs
 # resolve providers through this registry only.
@@ -29,6 +30,7 @@ REGISTRY: dict[str, SourceIntegration] = {
     "slack": SlackIntegration(),
     "google_drive": GoogleDriveIntegration(),
     "gmail": GmailIntegration(),
+    "zendesk": ZendeskIntegration(),
     "jira": JiraIntegration(),
 }
 
@@ -50,6 +52,7 @@ __all__ = [
     "SlackIntegration",
     "GoogleDriveIntegration",
     "GmailIntegration",
+    "ZendeskIntegration",
     "JiraIntegration",
     "REGISTRY",
     "get_integration",
