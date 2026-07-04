@@ -109,6 +109,9 @@ class SourceEvent(Base):
         Index("ix_source_events_workspace_id_provider_processed",
               "workspace_id", "provider", "processed"),
         Index("ix_source_events_workspace_id_sweep_id", "workspace_id", "sweep_id"),
+        # Partial index for the dead-letter listing (0013):
+        Index("ix_source_events_workspace_failed", "workspace_id",
+              postgresql_where=text("outcome = 'failed'")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -124,7 +127,14 @@ class SourceEvent(Base):
     payload: Mapped[dict | None] = mapped_column(JSONB)
     processed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("FALSE"))
     skill_id: Mapped[str | None] = mapped_column(Text, ForeignKey("skills.id", ondelete="SET NULL"))
-    outcome: Mapped[str | None] = mapped_column(Text)                    # published|queued|draft|discarded|duplicate
+    # queued → published|review|draft|discarded|duplicate|contradiction|failed.
+    # processed=true on every terminal outcome incl. failed; re-run resets to
+    # processed=false, outcome='queued'.
+    outcome: Mapped[str | None] = mapped_column(Text)
+    # Pipeline dead-letter bookkeeping (0013): full-pipeline attempts (each one
+    # already retried transient LLM failures internally) + per-stage costs/errors.
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    pipeline_meta: Mapped[dict | None] = mapped_column(JSONB)
     sweep_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")

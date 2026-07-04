@@ -98,6 +98,10 @@ class Review(Base):
     evidence_quote: Mapped[str | None] = mapped_column(Text)
     evidence_author: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[int | None] = mapped_column(Integer)              # 0–100
+    # Structured card payload (0013): {source_a, source_b, proposed_skill,
+    # matched_skill_id, boundary}. Contradiction cards need two full structured
+    # sources; the flat text columns above can't carry them.
+    payload: Mapped[dict | None] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(_review_status, nullable=False, server_default=text("'pending'"))
     verdict: Mapped[str | None] = mapped_column(Text)                    # 'approve'|'reject'
     comment: Mapped[str | None] = mapped_column(Text)
