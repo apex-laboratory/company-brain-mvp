@@ -75,7 +75,8 @@ async def onboarding_sweep(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
         await _write_progress(workspace_id, sweep_id, provider, entry)
 
         try:
-            result = await source_sync(ctx, workspace_id, source_id)
+            # sweep_id stamps the events and defers extraction to sweep_extract.
+            result = await source_sync(ctx, workspace_id, source_id, sweep_id=sweep_id)
         except Exception:
             # Isolation: a transient blow-up in one source must not halt the rest.
             # The held cursor means the next sync (webhook or manual) retries it.

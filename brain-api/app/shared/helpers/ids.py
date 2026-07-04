@@ -15,6 +15,7 @@ PREFIX_MAP: dict[str, str] = {
     "decision": "dec",
     "review": "rev",
     "skill": "skl",
+    "skill_version": "skv",
     "key": "key",
     "invite": "inv",
     "conversation": "cnv",

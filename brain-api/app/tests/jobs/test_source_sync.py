@@ -98,14 +98,16 @@ async def _run_ok(
     repo = MagicMock(
         get_sync_state=AsyncMock(return_value=state),
         advance_sync=AsyncMock(),
-        insert_event=AsyncMock(return_value=True),
+        insert_event=AsyncMock(return_value="evt_1"),
         selected_channel_ids=AsyncMock(return_value=selected or []),
     )
     with patch.object(ss, "get_session", return_value=_AsyncCtx(session)), patch.object(
         ss, "run_in_tenant", return_value=_AsyncCtx(None)
     ), patch.object(ss, "_repo", repo), patch.object(
         ss, "get_integration", return_value=integration
-    ), patch.object(ss, "_resolve_token", AsyncMock(return_value="tok")):
+    ), patch.object(ss, "_resolve_token", AsyncMock(return_value="tok")), patch.object(
+        ss, "enqueue", AsyncMock()
+    ):
         await ss.source_sync({}, "wrk_1", "src_1")
     return integration
 

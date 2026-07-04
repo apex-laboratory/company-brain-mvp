@@ -51,8 +51,11 @@ async def _run(
     repo = _repo(sources, sweep)
     synced: list[str] = []
 
-    async def fake_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
+    async def fake_sync(
+        ctx: dict, workspace_id: str, source_id: str, sweep_id: str | None = None
+    ) -> dict:
         synced.append(source_id)
+        assert sweep_id == "swp_1"  # sweep stamps events for the batched extract pass
         outcome = sync_results.get(source_id, {"inserted": 0})
         if isinstance(outcome, Exception):
             raise outcome

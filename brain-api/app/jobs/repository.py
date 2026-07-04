@@ -48,20 +48,27 @@ class JobsRepository:
         return SyncState(**row) if row else None
 
     async def insert_event(
-        self, session: AsyncSession, workspace_id: str, event: RawEvent
-    ) -> bool:
-        """Insert one normalized event. Returns False if it was a duplicate."""
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        event: RawEvent,
+        sweep_id: str | None = None,
+    ) -> str | None:
+        """Insert one normalized event. Returns the new event id, or ``None`` for a
+        duplicate. The id is what the caller enqueues ``extract_event`` with."""
         result = await session.execute(
             text(
                 """
                 INSERT INTO source_events
                     (workspace_id, provider, event_type, source_id,
-                     external_event_id, payload, outcome)
+                     external_event_id, payload, outcome, sweep_id)
                 VALUES
                     (:workspace_id, CAST(:provider AS source_provider), :event_type, :source_id,
-                     :external_event_id, CAST(:payload AS jsonb), 'queued')
+                     :external_event_id, CAST(:payload AS jsonb), 'queued',
+                     CAST(:sweep_id AS uuid))
                 ON CONFLICT ON CONSTRAINT source_events_workspace_provider_event_key
                 DO NOTHING
+                RETURNING id
                 """
             ).bindparams(
                 workspace_id=workspace_id,
@@ -70,9 +77,11 @@ class JobsRepository:
                 source_id=event.source_id,
                 external_event_id=event.external_event_id,
                 payload=json.dumps(event.raw),
+                sweep_id=sweep_id,
             )
         )
-        return (result.rowcount or 0) > 0
+        row = result.first()
+        return str(row.id) if row else None
 
     async def advance_sync(
         self,

@@ -16,14 +16,15 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.integrations import get_integration
 from app.integrations.base import ChannelRef, ConnectorAuthError
+from app.jobs.queue import enqueue
 from app.jobs.repository import JobsRepository, SyncState
 from app.shared.helpers.crypto import decrypt, encrypt
 from app.shared.middleware.with_tenant import run_in_tenant
-from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
 
@@ -62,10 +63,19 @@ async def _resolve_token(session: AsyncSession, state: SyncState) -> str:
     return token
 
 
-async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
-    """ARQ entrypoint. ``ctx`` is the ARQ job context (unused)."""
+async def source_sync(
+    ctx: dict, workspace_id: str, source_id: str, sweep_id: str | None = None
+) -> dict:
+    """ARQ entrypoint. ``ctx`` is the ARQ job context (unused).
+
+    ``sweep_id`` is set when invoked from ``onboarding_sweep``: events are
+    stamped with it and extraction is deferred to the batched ``sweep_extract``
+    job (M3). Without it (webhook/poll paths) each inserted event enqueues its
+    own ``extract_event``.
+    """
     integration = None
     inserted = 0
+    inserted_ids: list[str] = []
     async with get_session() as session:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
             state = await _repo.get_sync_state(session, source_id)
@@ -110,8 +120,12 @@ async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
 
                 for item in items:
                     event = integration.normalize(item)
-                    if await _repo.insert_event(session, workspace_id, event):
+                    event_id = await _repo.insert_event(
+                        session, workspace_id, event, sweep_id=sweep_id
+                    )
+                    if event_id:
                         inserted += 1
+                        inserted_ids.append(event_id)
 
                 if opaque_cursor:
                     await _repo.advance_sync(
@@ -139,6 +153,12 @@ async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
                 await _repo.mark_error(session, source_id, auth_broken=False)
                 await session.commit()
                 raise
+
+    # Non-sweep syncs (webhook backstop / 15-min poll) extract immediately;
+    # sweep events wait for the batched, rate-limited sweep_extract pass.
+    if sweep_id is None:
+        for event_id in inserted_ids:
+            await enqueue("extract_event", workspace_id, event_id)
 
     log.info("source_sync: %s inserted %d new events", source_id, inserted)
     return {"inserted": inserted}
