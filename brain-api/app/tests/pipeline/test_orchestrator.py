@@ -14,7 +14,7 @@ import pytest
 from app.integrations.base import RawEvent
 from app.pipeline import orchestrator
 from app.pipeline.authority import AuthorityAnnotation, RoutingConfig
-from app.pipeline.repository import EventRow
+from app.pipeline.repository import EventRow, SimilarSkill
 from app.pipeline.types import DecisionMoment, PipelineResult, SkillDraft, StageUsage
 
 _USAGE = StageUsage(stage="s", model="m", input_tokens=1, output_tokens=1, cost_usd=0.001)
@@ -53,6 +53,7 @@ def wired(monkeypatch):
     repo = MagicMock(
         load_event=AsyncMock(return_value=_event()),
         finalize_event=AsyncMock(),
+        similar_skills=AsyncMock(return_value=[]),  # default: no neighbours → NEW
     )
     monkeypatch.setattr(orchestrator, "get_session", _fake_session)
     monkeypatch.setattr(orchestrator, "run_in_tenant", lambda *a, **k: _null_ctx())
@@ -146,3 +147,82 @@ async def test_missing_event_returns_failed(wired, monkeypatch) -> None:
     monkeypatch.setattr(orchestrator, "_repo", wired)
     result = await orchestrator.run_pipeline("wrk_1", "evt_1")
     assert result.outcome == "failed"
+
+
+# ── boundary routing ──────────────────────────────────────────────────────────
+
+def _similar() -> SimilarSkill:
+    return SimilarSkill(
+        id="skl_x", name="Refund", version="v1", base_logic="refund <30d",
+        exceptions_block=[], source_authority="high", similarity=0.95,
+    )
+
+
+async def test_update_with_contradiction_routes_to_contradiction(wired, monkeypatch) -> None:
+    await _mock_stages(monkeypatch)
+    wired.similar_skills = AsyncMock(return_value=[_similar()])
+    wired.skill_provenance = AsyncMock(return_value=None)  # → fallback source_a
+    monkeypatch.setattr(orchestrator, "_repo", wired)
+    monkeypatch.setattr(
+        orchestrator.boundary_classifier, "classify_boundary",
+        AsyncMock(return_value=(
+            orchestrator.boundary_classifier.BoundaryResult("UPDATE", "skl_x", 0.95), _USAGE,
+        )),
+    )
+    monkeypatch.setattr(
+        orchestrator.contradiction_detector, "detect_contradiction",
+        AsyncMock(return_value=(True, _USAGE)),
+    )
+    contra = AsyncMock(return_value=PipelineResult(outcome="contradiction", skill_id="skl_x"))
+    monkeypatch.setattr(orchestrator.skill_writer, "write_contradiction", contra)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "contradiction"
+    contra.assert_awaited_once()
+    assert wired.finalize_event.await_args.kwargs["outcome"] == "contradiction"
+
+
+async def test_update_without_contradiction_routes_to_update(wired, monkeypatch) -> None:
+    await _mock_stages(monkeypatch)
+    wired.similar_skills = AsyncMock(return_value=[_similar()])
+    monkeypatch.setattr(orchestrator, "_repo", wired)
+    monkeypatch.setattr(
+        orchestrator.boundary_classifier, "classify_boundary",
+        AsyncMock(return_value=(
+            orchestrator.boundary_classifier.BoundaryResult("UPDATE", "skl_x", 0.95), _USAGE,
+        )),
+    )
+    monkeypatch.setattr(
+        orchestrator.contradiction_detector, "detect_contradiction",
+        AsyncMock(return_value=(False, _USAGE)),
+    )
+    upd = AsyncMock(return_value=PipelineResult(outcome="review", skill_id="skl_x"))
+    monkeypatch.setattr(orchestrator.skill_writer, "write_update", upd)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "review"
+    upd.assert_awaited_once()
+
+
+async def test_duplicate_short_circuits_without_contradiction(wired, monkeypatch) -> None:
+    await _mock_stages(monkeypatch)
+    wired.similar_skills = AsyncMock(return_value=[_similar()])
+    monkeypatch.setattr(orchestrator, "_repo", wired)
+    monkeypatch.setattr(
+        orchestrator.boundary_classifier, "classify_boundary",
+        AsyncMock(return_value=(
+            orchestrator.boundary_classifier.BoundaryResult("DUPLICATE", "skl_x", 0.99), _USAGE,
+        )),
+    )
+    contra = AsyncMock()
+    monkeypatch.setattr(orchestrator.contradiction_detector, "detect_contradiction", contra)
+    dup = AsyncMock(return_value=PipelineResult(outcome="duplicate", skill_id="skl_x"))
+    monkeypatch.setattr(orchestrator.skill_writer, "write_duplicate", dup)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "duplicate"
+    contra.assert_not_awaited()  # duplicates never reach contradiction detection
+    dup.assert_awaited_once()

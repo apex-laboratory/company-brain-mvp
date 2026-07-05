@@ -16,6 +16,7 @@ from app.jobs.tasks.google_watch import watch_register, watch_renew
 from app.jobs.tasks.onboarding_sweep import onboarding_sweep
 from app.jobs.tasks.poll_sync import poll_pull_sources
 from app.jobs.tasks.source_sync import source_sync
+from app.jobs.tasks.sweep_extract import sweep_extract
 from app.jobs.tasks.webhook_ingest import webhook_ingest
 
 
@@ -36,6 +37,9 @@ class WorkerSettings:
         watch_register,
         extract_event,
         func(onboarding_sweep, timeout=3600),
+        # A large historical backfill can take a while to extract; give it an hour
+        # like the sweep itself. A timeout kill resumes on retry (queued events only).
+        func(sweep_extract, timeout=3600),
     ]
     # Daily renewal of Google push channels (Drive/Gmail watch expires <= 7 days);
     # 15-minute polling for providers without push delivery (Notion).

@@ -35,6 +35,20 @@ class EventRow:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class SimilarSkill:
+    """A published/pending skill returned by pgvector search, with its cosine
+    similarity to the query draft."""
+
+    id: str
+    name: str
+    version: str
+    base_logic: str
+    exceptions_block: list
+    source_authority: str | None
+    similarity: float
+
+
 def _vector_literal(embedding: list[float]) -> str:
     """pgvector input literal: '[0.1,0.2,...]'."""
     return "[" + ",".join(repr(float(v)) for v in embedding) + "]"
@@ -98,7 +112,168 @@ class PipelineRepository:
             )
         )
 
+    async def skill_provenance(
+        self, session: AsyncSession, skill_id: str
+    ) -> EventRow | None:
+        """Most recent source_event that produced ``skill_id`` (for a
+        contradiction card's existing-source dict). ``None`` if none recorded."""
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, workspace_id, provider, event_type, source_id,
+                           external_event_id, payload, processed, sweep_id,
+                           attempts, created_at
+                      FROM source_events
+                     WHERE skill_id = :skill_id
+                     ORDER BY created_at DESC
+                     LIMIT 1
+                    """
+                ).bindparams(skill_id=skill_id)
+            )
+        ).mappings().first()
+        if row is None:
+            return None
+        data = dict(row)
+        data["id"] = str(data["id"])
+        data["sweep_id"] = str(data["sweep_id"]) if data["sweep_id"] else None
+        data["payload"] = data["payload"] or {}
+        return EventRow(**data)
+
     # ── skills ────────────────────────────────────────────────────────────────
+
+    async def similar_skills(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        embedding: list[float],
+        statuses: tuple[str, ...],
+        *,
+        limit: int = 3,
+    ) -> list[SimilarSkill]:
+        """Top-``limit`` non-deleted skills by cosine similarity, restricted to
+        ``statuses`` (published scope vs sweep scope). Uses the HNSW cosine index
+        (``embedding <=> :vec``); similarity = ``1 - distance``.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, name, version, base_logic, exceptions_block,
+                           source_authority,
+                           1 - (embedding <=> CAST(:vec AS vector)) AS similarity
+                      FROM skills
+                     WHERE workspace_id = :ws
+                       AND status = ANY(:statuses)
+                       AND embedding IS NOT NULL
+                       AND deleted_at IS NULL
+                     ORDER BY embedding <=> CAST(:vec AS vector)
+                     LIMIT :limit
+                    """
+                ).bindparams(
+                    ws=workspace_id,
+                    vec=_vector_literal(embedding),
+                    statuses=list(statuses),
+                    limit=limit,
+                )
+            )
+        ).mappings().all()
+        return [
+            SimilarSkill(
+                id=r["id"],
+                name=r["name"],
+                version=r["version"],
+                base_logic=r["base_logic"] or "",
+                exceptions_block=r["exceptions_block"] or [],
+                source_authority=r["source_authority"],
+                similarity=float(r["similarity"]),
+            )
+            for r in rows
+        ]
+
+    async def append_source_id(
+        self, session: AsyncSession, skill_id: str, event_id: str
+    ) -> None:
+        """Record that ``event_id`` also supports ``skill_id`` (DUPLICATE path)."""
+        await session.execute(
+            text(
+                """
+                UPDATE skills
+                   SET source_ids = source_ids || CAST(:eid AS jsonb),
+                       updated_at = now()
+                 WHERE id = :skill_id
+                """
+            ).bindparams(skill_id=skill_id, eid=json.dumps([event_id]))
+        )
+
+    async def update_skill_logic(
+        self,
+        session: AsyncSession,
+        skill_id: str,
+        *,
+        base_logic: str,
+        exceptions_block: list,
+        version: str,
+        confidence: float,
+        embedding: list[float],
+        status: str = "active",
+    ) -> None:
+        """Apply an UPDATE/EXCEPTION to a published skill (auto-publish branch)."""
+        await session.execute(
+            text(
+                """
+                UPDATE skills
+                   SET base_logic = :base_logic,
+                       exceptions_block = CAST(:exceptions AS jsonb),
+                       version = :version,
+                       confidence = :confidence,
+                       embedding = CAST(:embedding AS vector),
+                       status = CAST(:status AS skill_status),
+                       updated_at = now()
+                 WHERE id = :skill_id
+                """
+            ).bindparams(
+                skill_id=skill_id,
+                base_logic=base_logic,
+                exceptions=json.dumps(exceptions_block),
+                version=version,
+                confidence=confidence,
+                embedding=_vector_literal(embedding),
+                status=status,
+            )
+        )
+
+    async def apply_exception(
+        self,
+        session: AsyncSession,
+        skill_id: str,
+        *,
+        exceptions_block: list,
+        version: str,
+        confidence: float,
+        status: str = "active",
+    ) -> None:
+        """Append-exception UPDATE: base_logic + embedding stay put (the rule is
+        unchanged; only its carve-outs grow), so we don't touch the vector."""
+        await session.execute(
+            text(
+                """
+                UPDATE skills
+                   SET exceptions_block = CAST(:exceptions AS jsonb),
+                       version = :version,
+                       confidence = :confidence,
+                       status = CAST(:status AS skill_status),
+                       updated_at = now()
+                 WHERE id = :skill_id
+                """
+            ).bindparams(
+                skill_id=skill_id,
+                exceptions=json.dumps(exceptions_block),
+                version=version,
+                confidence=confidence,
+                status=status,
+            )
+        )
 
     async def resolve_skill_name(
         self, session: AsyncSession, workspace_id: str, name: str
@@ -264,6 +439,50 @@ class PipelineRepository:
             )
         )
         return review_id
+
+    # ── sweep extraction ──────────────────────────────────────────────────────
+
+    async def list_sweep_queued_events(
+        self, session: AsyncSession, sweep_id: str
+    ) -> list[tuple[str, str]]:
+        """``(event_id, provider)`` for a sweep's un-extracted events, oldest first.
+
+        The caller re-orders by provider authority rank; ``created_at`` breaks ties
+        within a provider. Re-selects on every (re)entry, so a crashed sweep_extract
+        resumes exactly where it left off — finalized events drop out of the set.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, provider FROM source_events
+                     WHERE sweep_id = CAST(:sweep_id AS uuid)
+                       AND processed = FALSE
+                       AND outcome = 'queued'
+                     ORDER BY created_at
+                    """
+                ).bindparams(sweep_id=sweep_id)
+            )
+        ).all()
+        return [(str(r.id), r.provider) for r in rows]
+
+    async def write_extraction_progress(
+        self, session: AsyncSession, sweep_id: str, progress: dict
+    ) -> None:
+        """Write the extraction rollup into ``sweeps.progress['extraction']``."""
+        await session.execute(
+            text(
+                """
+                UPDATE sweeps
+                   SET progress = jsonb_set(
+                           COALESCE(progress, '{}'::jsonb),
+                           ARRAY['extraction'],
+                           CAST(:progress AS jsonb)
+                       )
+                 WHERE id = CAST(:id AS uuid)
+                """
+            ).bindparams(id=sweep_id, progress=json.dumps(progress))
+        )
 
     # ── sweep counters ────────────────────────────────────────────────────────
 

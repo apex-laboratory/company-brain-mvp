@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 
 from app.config.database import get_session
+from app.jobs.queue import enqueue
 from app.jobs.repository import JobsRepository
 from app.jobs.sweep_order import processing_order
 from app.jobs.tasks.source_sync import source_sync
@@ -99,6 +100,11 @@ async def onboarding_sweep(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
             await _repo.set_sweep_status(session, sweep_id, status, completed=True)
             await session.commit()
+
+    # Ingestion done → hand the queued events to the batched extraction pass.
+    # Enqueue unconditionally: even a partially-failed sweep may have ingested
+    # events worth extracting, and sweep_extract no-ops on an empty queue.
+    await enqueue("sweep_extract", workspace_id, sweep_id)
 
     log.info(
         "onboarding_sweep: %s finished (%d sources, %d failed) → %s",

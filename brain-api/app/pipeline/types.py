@@ -126,3 +126,4 @@ class PipelineResult:
     outcome: str
     skill_id: str | None = None
     review_id: str | None = None
+    cost_usd: float = 0.0  # total LLM cost of this event's run (for sweep rollup)
