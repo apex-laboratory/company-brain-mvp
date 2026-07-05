@@ -15,8 +15,10 @@ import logging
 from app.config.database import get_session
 from app.integrations import get_integration
 from app.integrations.base import RawEvent, RawItem
+from app.jobs.token_helper import token_for_provider
 from app.pipeline import authority as authority_mod
 from app.pipeline import confidence_scorer, embedder
+from app.pipeline.expanders import ExpandRequest, get_expander, needs_expansion
 from app.pipeline.repository import EventRow, PipelineRepository, SimilarSkill
 from app.pipeline.stages import (
     boundary_classifier,
@@ -54,6 +56,32 @@ def _normalize(event: EventRow) -> RawEvent | None:
         )
     except ValueError:
         return None
+
+
+async def _expand(event: EventRow, raw: RawEvent) -> tuple[str, str | None]:
+    """Enrich the item with its surrounding context. Returns ``(text, error)``:
+    ``text`` is the expanded context (or raw content on any miss), ``error`` a
+    short reason string when expansion couldn't run (recorded in pipeline_meta,
+    never fatal)."""
+    if not needs_expansion(event.provider):
+        return raw.content, None
+    try:
+        creds = await token_for_provider(event.workspace_id, event.provider)
+        if creds is None:
+            return raw.content, "no_connection"
+        token, account_id = creds
+        req = ExpandRequest(
+            provider=event.provider,
+            token=token,
+            account_id=account_id,
+            payload=event.payload,
+            content=raw.content,
+        )
+        expanded = await get_expander(event.provider).expand(req)
+        return (expanded.text or raw.content), None
+    except Exception as exc:  # noqa: BLE001 — expansion is best-effort
+        log.warning("pipeline: expander failed for %s (%s)", event.provider, exc)
+        return raw.content, f"{type(exc).__name__}: {exc}"
 
 
 def _source_dict(raw: RawEvent, authority: str, logic: str) -> dict:
@@ -115,8 +143,11 @@ async def _finalize(
         await session.commit()
 
 
-async def _commit(event: EventRow, ledger: CostLedger, make_result) -> PipelineResult:
+async def _commit(
+    event: EventRow, ledger: CostLedger, make_result, *, extra_meta: dict | None = None
+) -> PipelineResult:
     """Open the write transaction, run ``make_result(session)``, finalize + commit."""
+    meta = {"stage": "skill_writer", "costs": ledger.as_meta(), **(extra_meta or {})}
     async with get_session() as session, run_in_tenant(
         session, event.workspace_id, "system", "admin"
     ):
@@ -126,7 +157,7 @@ async def _commit(event: EventRow, ledger: CostLedger, make_result) -> PipelineR
             event.id,
             outcome=result.outcome,
             skill_id=result.skill_id,
-            pipeline_meta={"stage": "skill_writer", "costs": ledger.as_meta()},
+            pipeline_meta=meta,
         )
         await session.commit()
     return result
@@ -145,6 +176,7 @@ async def _route(
     matched: SimilarSkill | None,
     sweep_sourced: bool,
     evidence,
+    extra_meta: dict | None = None,
 ) -> PipelineResult:
     """Dispatch a scored draft by its boundary classification."""
     ws = event.workspace_id
@@ -157,6 +189,7 @@ async def _route(
         return await _commit(
             event, ledger,
             lambda s: skill_writer.write_duplicate(s, _repo, matched=matched, event_id=event.id),
+            extra_meta=extra_meta,
         )
 
     # EXCEPTION: add a carve-out to the matched skill (no contradiction check).
@@ -169,6 +202,7 @@ async def _route(
                 sweep_sourced=sweep_sourced, sweep_id=event.sweep_id, routing=routing,
                 evidence=evidence,
             ),
+            extra_meta=extra_meta,
         )
 
     # UPDATE: refine the matched skill — but first check for a real contradiction.
@@ -186,6 +220,7 @@ async def _route(
                     s, _repo, workspace_id=ws, provider=event.provider, matched=matched,
                     draft=draft, source_a=source_a, source_b=source_b,
                 ),
+                extra_meta=extra_meta,
             )
         return await _commit(
             event, ledger,
@@ -195,6 +230,7 @@ async def _route(
                 authority=annotation.tier, sweep_sourced=sweep_sourced, sweep_id=event.sweep_id,
                 routing=routing, evidence=evidence,
             ),
+            extra_meta=extra_meta,
         )
 
     # NEW (or no match): write a brand-new skill routed by confidence.
@@ -206,6 +242,7 @@ async def _route(
             confidence=confidence, authority=annotation.tier, sweep_sourced=sweep_sourced,
             routing=routing, evidence=evidence,
         ),
+        extra_meta=extra_meta,
     )
 
 
@@ -245,9 +282,11 @@ async def run_pipeline(
         )
         return PipelineResult(outcome="discarded", cost_usd=ledger.total_usd)
 
-    # M4 hook: context expanders run here (post-gate, pre-identifier); until
-    # then the raw normalized content is the context.
-    context = raw.content
+    # Context expansion (post-gate, pre-identifier): pull the full thread/ticket/
+    # page around the relevant item. Best-effort — a failure falls back to raw
+    # content and is recorded, never fatal (PRD Phase 3).
+    context, expander_error = await _expand(event, raw)
+    expander_meta = {"expander_error": expander_error} if expander_error else None
 
     decisions, id_usage = await decision_identifier.identify_decisions(
         context,
@@ -261,7 +300,8 @@ async def run_pipeline(
     if not decisions:
         await _finalize(
             event, outcome="discarded", skill_id=None, ledger=ledger,
-            stage="decision_identifier", extra_meta={"reason": "no_decisions"},
+            stage="decision_identifier",
+            extra_meta={"reason": "no_decisions", **(expander_meta or {})},
         )
         return PipelineResult(outcome="discarded", cost_usd=ledger.total_usd)
 
@@ -272,7 +312,8 @@ async def run_pipeline(
     except ValueError as exc:
         await _finalize(
             event, outcome="discarded", skill_id=None, ledger=ledger,
-            stage="skill_extractor", extra_meta={"reason": str(exc)},
+            stage="skill_extractor",
+            extra_meta={"reason": str(exc), **(expander_meta or {})},
         )
         return PipelineResult(outcome="discarded", cost_usd=ledger.total_usd)
     ledger.add(usage)
@@ -297,6 +338,7 @@ async def run_pipeline(
     result = await _route(
         event, raw, draft, embedding, annotation, routing, ledger,
         boundary=boundary, matched=matched, sweep_sourced=sweep_sourced, evidence=evidence,
+        extra_meta=expander_meta,
     )
 
     result.cost_usd = ledger.total_usd

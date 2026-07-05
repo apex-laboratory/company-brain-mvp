@@ -53,7 +53,7 @@ async def _run_with_fetch_error(error: Exception) -> tuple[dict, MagicMock]:
         ss, "run_in_tenant", return_value=_AsyncCtx(None)
     ), patch.object(ss, "_repo", repo), patch.object(
         ss, "get_integration", return_value=integration
-    ), patch.object(ss, "_resolve_token", AsyncMock(return_value="xoxb")):
+    ), patch.object(ss, "resolve_token", AsyncMock(return_value="xoxb")):
         result = await ss.source_sync({}, "wrk_1", "src_1")
     return result, repo
 
@@ -105,7 +105,7 @@ async def _run_ok(
         ss, "run_in_tenant", return_value=_AsyncCtx(None)
     ), patch.object(ss, "_repo", repo), patch.object(
         ss, "get_integration", return_value=integration
-    ), patch.object(ss, "_resolve_token", AsyncMock(return_value="tok")), patch.object(
+    ), patch.object(ss, "resolve_token", AsyncMock(return_value="tok")), patch.object(
         ss, "enqueue", AsyncMock()
     ):
         await ss.source_sync({}, "wrk_1", "src_1")

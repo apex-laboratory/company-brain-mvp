@@ -16,51 +16,24 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.integrations import get_integration
 from app.integrations.base import ChannelRef, ConnectorAuthError
 from app.jobs.queue import enqueue
-from app.jobs.repository import JobsRepository, SyncState
-from app.shared.helpers.crypto import decrypt, encrypt
+from app.jobs.repository import JobsRepository
+from app.jobs.token_helper import resolve_token
 from app.shared.middleware.with_tenant import run_in_tenant
 
 log = logging.getLogger(__name__)
 
 _repo = JobsRepository()
-_REFRESH_SKEW = timedelta(minutes=5)
 
 
 def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
-async def _resolve_token(session: AsyncSession, state: SyncState) -> str:
-    """Decrypt the access token, refreshing proactively when near expiry.
-
-    A refreshed token is persisted (`update_tokens`) so providers with short-lived
-    access tokens (Google: ~1h) don't re-refresh every sweep, and a rotated refresh
-    token is never lost.
-    """
-    integration = get_integration(state.provider)
-    token = decrypt(state.access_token_enc.decode())  # type: ignore[union-attr]
-    expires = state.token_expires_at
-    if expires and expires < datetime.now(UTC) + _REFRESH_SKEW and state.refresh_token_enc:
-        refreshed = await integration.refresh(decrypt(state.refresh_token_enc.decode()))
-        token = refreshed.access_token
-        await _repo.update_tokens(
-            session,
-            state.id,
-            access_token_enc=encrypt(refreshed.access_token).encode(),
-            token_expires_at=refreshed.expires_at,
-            refresh_token_enc=(
-                encrypt(refreshed.refresh_token).encode() if refreshed.refresh_token else None
-            ),
-        )
-    return token
 
 
 async def source_sync(
@@ -89,7 +62,7 @@ async def source_sync(
             # deriving the cursor from last_synced_at.
             opaque_cursor = getattr(integration, "opaque_cursor", False)
             try:
-                token = await _resolve_token(session, state)
+                token = await resolve_token(session, state)
                 channel = ChannelRef(
                     external_id=state.external_account_id or "workspace", name="workspace"
                 )

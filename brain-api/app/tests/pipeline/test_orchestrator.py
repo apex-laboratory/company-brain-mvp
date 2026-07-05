@@ -59,6 +59,11 @@ def wired(monkeypatch):
     monkeypatch.setattr(orchestrator, "run_in_tenant", lambda *a, **k: _null_ctx())
     monkeypatch.setattr(orchestrator, "_repo", repo)
     monkeypatch.setattr(orchestrator, "_normalize", lambda event: _raw())
+    # Context expansion is exercised in test_expanders; here it's a passthrough
+    # so the orchestrator tests stay off the DB/network.
+    monkeypatch.setattr(
+        orchestrator, "_expand", AsyncMock(side_effect=lambda ev, raw: (raw.content, None))
+    )
     monkeypatch.setattr(
         orchestrator.authority_mod, "annotate",
         lambda p, pl: AuthorityAnnotation(tier="medium", weight=0.7),
@@ -204,6 +209,24 @@ async def test_update_without_contradiction_routes_to_update(wired, monkeypatch)
 
     assert result.outcome == "review"
     upd.assert_awaited_once()
+
+
+async def test_expander_error_is_recorded_not_fatal(wired, monkeypatch) -> None:
+    # A failing expander must not stop the pipeline: it falls back to raw content
+    # and records the error in pipeline_meta.
+    await _mock_stages(monkeypatch)
+    monkeypatch.setattr(
+        orchestrator, "_expand",
+        AsyncMock(side_effect=lambda ev, raw: (raw.content, "HTTPStatusError: 500")),
+    )
+    writer = AsyncMock(return_value=PipelineResult(outcome="review", skill_id="skl_1"))
+    monkeypatch.setattr(orchestrator.skill_writer, "write_new_skill", writer)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "review"  # pipeline still completed
+    meta = wired.finalize_event.await_args.kwargs["pipeline_meta"]
+    assert meta["expander_error"] == "HTTPStatusError: 500"
 
 
 async def test_duplicate_short_circuits_without_contradiction(wired, monkeypatch) -> None:
