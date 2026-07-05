@@ -275,6 +275,35 @@ class PipelineRepository:
             )
         )
 
+    async def get_skill(self, session: AsyncSession, skill_id: str) -> dict | None:
+        """Current skill fields needed to apply a review approval."""
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, workspace_id, name, status, version, trigger,
+                           base_logic, exceptions_block, confidence
+                      FROM skills
+                     WHERE id = :id AND deleted_at IS NULL
+                    """
+                ).bindparams(id=skill_id)
+            )
+        ).mappings().first()
+        return dict(row) if row else None
+
+    async def set_skill_status(
+        self, session: AsyncSession, skill_id: str, status: str
+    ) -> None:
+        await session.execute(
+            text(
+                """
+                UPDATE skills
+                   SET status = CAST(:status AS skill_status), updated_at = now()
+                 WHERE id = :skill_id
+                """
+            ).bindparams(skill_id=skill_id, status=status)
+        )
+
     async def resolve_skill_name(
         self, session: AsyncSession, workspace_id: str, name: str
     ) -> str:
