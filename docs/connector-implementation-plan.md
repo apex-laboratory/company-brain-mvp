@@ -233,6 +233,29 @@ state = {"updated_at": "2024-01-15T10:00:00Z"}
 - Some streams require 1 HTTP call per issue — filter by project to reduce volume
 - Webhooks available but delivery not guaranteed under load — use poll backstop
 - Streams: issues, comments, changelogs, worklogs, sprints
+- Incremental fetch uses the new `POST /rest/api/3/search/jql` (`nextPageToken` paging;
+  the old `startAt`/`total` search is deprecated). JQL `updated` is minute-precision in
+  the token user's timezone — read tz from `/myself`, floor the cursor to the minute.
+- **Multi-site + multi-project:** one OAuth grant (one rotating refresh token) can span
+  several sites, so it is modelled as **one connection** with a **project** as the
+  selectable "channel", flattened across sites (`external_id = "{cloudId}:{projectId}"`).
+  The developer-console app **must be created as `Account-level`** access type (not
+  `Resource-level`) — Account-level is what lets `accessible-resources` return every site;
+  Resource-level would restrict the token to the single site chosen at consent and break
+  the multi-site model.
+
+> **DECISION — Jira webhooks deferred to a follow-up (agreed with Afnan, 2026-07-02).**
+> v1 ships **polling-only** (`push_delivery = False`, ~15-min freshness; matches
+> Notion/Slack/Zendesk v1). **We will need real-time webhook hits later** — this is a
+> deliberate, important deferral, not an oversight. Why deferred: Jira OAuth webhooks are
+> *dynamic* — registered **per connection** via REST (needs the `manage:jira-webhook`
+> scope), they **expire every 30 days** so a renewal cron is mandatory, and they require a
+> **public HTTPS callback URL** (can't be verified end-to-end on localhost). The connector
+> is webhook-ready: `verify_webhook` is stubbed (returns `False`) with a note, and the
+> receiver already does HMAC `X-Hub-Signature` for other providers. Follow-up ticket must
+> add: (1) webhook registration at connect time, (2) the 30-day extension cron, (3) enable
+> `verify_webhook` HMAC, (4) `manage:jira-webhook` scope. Applies to any connector wanting
+> push once we have a public URL.
 
 ### Notion
 - **No webhook API** — polling only

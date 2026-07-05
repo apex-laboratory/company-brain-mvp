@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # subdomains; the per-customer subdomain travels through the OAuth flow + connection.
     zendesk_client_id: str = ""
     zendesk_client_secret: str = ""
+    # Jira Cloud OAuth 2.0 (3LO). One global OAuth client; consent is at
+    # auth.atlassian.com and the customer's Jira site (cloudId) is discovered after
+    # exchange via accessible-resources — no per-tenant host to configure.
+    jira_client_id: str = ""
+    jira_client_secret: str = ""
 
     # Base domain for per-workspace MCP/brain endpoints.
     mcp_base_domain: str = "brainites.com"
