@@ -1,35 +1,59 @@
-"""Third-party OAuth provider integrations.
+"""Provider integrations (BACKEND_BEST_PRACTICES.md §2).
 
-Each sub-module owns the HTTP exchange (code → access_token → profile) for one
-provider. All calls use ``httpx.AsyncClient`` with a 10-second timeout so a
-hung provider never stalls the request indefinitely.
+Each module isolates one external provider's OAuth + read-only fetch behind the
+``SourceIntegration`` protocol. If a vendor changes, only its file changes; the
+sources/webhooks modules and the sync jobs depend only on the protocol.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from app.integrations.base import (
+    ChannelRef,
+    ConnectorAuthError,
+    OAuthTokens,
+    RawEvent,
+    RawItem,
+    SourceIntegration,
+)
+from app.integrations.github import GitHubIntegration
+from app.integrations.gmail import GmailIntegration
+from app.integrations.google_drive import GoogleDriveIntegration
+from app.integrations.jira import JiraIntegration
+from app.integrations.notion import NotionIntegration
+from app.integrations.slack import SlackIntegration
+from app.integrations.zendesk import ZendeskIntegration
+
+# Provider → integration instance. The sources/webhooks layers and the sync jobs
+# resolve providers through this registry only.
+REGISTRY: dict[str, SourceIntegration] = {
+    "notion": NotionIntegration(),
+    "github": GitHubIntegration(),
+    "slack": SlackIntegration(),
+    "google_drive": GoogleDriveIntegration(),
+    "gmail": GmailIntegration(),
+    "zendesk": ZendeskIntegration(),
+    "jira": JiraIntegration(),
+}
 
 
-@dataclass(frozen=True)
-class OAuthProfile:
-    """Normalised user identity returned by every provider integration."""
-
-    email: str
-    name: str | None
+def get_integration(provider: str) -> SourceIntegration:
+    """Return the integration for ``provider`` or raise ``KeyError``."""
+    return REGISTRY[provider]
 
 
-class OAuthError(Exception):
-    """Provider returned a response we can't trust (error body, unverified or
-    missing email, …).
-
-    Distinct from ``httpx.HTTPError`` (a transport/status failure): the HTTP call
-    succeeded but the *payload* is unusable. Carries the status/code/message the
-    callback should surface so a provider-data problem never leaks as a 500.
-    """
-
-    def __init__(
-        self, message: str, *, status: int = 502, code: str = "provider_error"
-    ) -> None:
-        super().__init__(message)
-        self.status = status
-        self.code = code
-        self.message = message
+__all__ = [
+    "ChannelRef",
+    "ConnectorAuthError",
+    "OAuthTokens",
+    "RawEvent",
+    "RawItem",
+    "SourceIntegration",
+    "NotionIntegration",
+    "GitHubIntegration",
+    "SlackIntegration",
+    "GoogleDriveIntegration",
+    "GmailIntegration",
+    "ZendeskIntegration",
+    "JiraIntegration",
+    "REGISTRY",
+    "get_integration",
+]

@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.config.settings import settings
-from app.integrations import OAuthError, OAuthProfile, github_oauth, google_oauth
+from app.integrations.oauth import OAuthError, OAuthProfile, github_oauth, google_oauth
 from app.modules.auth.repository import AuthRepository, MembershipRecord, UserRecord
 from app.modules.auth.schemas import (
     AuthSessionOut,
@@ -45,8 +45,8 @@ log = get_logger()
 _PROVIDERS = {"google": google_oauth, "github": github_oauth}
 OAUTH_PROVIDERS: frozenset[str] = frozenset(_PROVIDERS)
 _PROVIDER_CRED_ATTRS: dict[str, tuple[str, str]] = {
-    "google": ("google_client_id", "google_client_secret"),
-    "github": ("github_client_id", "github_client_secret"),
+    "google": ("login_google_client_id", "login_google_client_secret"),
+    "github": ("login_github_client_id", "login_github_client_secret"),
 }
 
 

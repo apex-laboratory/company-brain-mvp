@@ -1,149 +1,100 @@
-"""Source-integration routers (API_DOCUMENTATION.md §Source Integrations API).
+"""Sources router (BACKEND_BEST_PRACTICES.md §2, §6).
 
-Two routers, both mounted under ``/api/v1`` by ``main.py``:
+Paths + dependencies only — all logic lives in :class:`SourcesService`. Mounted
+under ``/api/v1`` by ``main.py``.
 
-* ``catalog_router`` (``/sources``) — the static provider catalog, any member.
-* ``router`` (``/workspaces``) — workspace-scoped connect/callback/list/scope/
-  disconnect (admin-only, gated by ``connections_admin`` RLS) plus the channel
-  list (any member, gated by ``channels_select`` RLS).
-
-Connect and callback run OAuth round-trips, so they carry the tighter OAuth-callback
-limit; the rest use the dashboard surface limit. All keyed per user.
+All connection routes require an **admin** dashboard JWT (``source_connections``
+is admin-only at the RLS layer). The OAuth *callback* is exempt: it is a browser
+redirect from the provider that carries no JWT, so it authenticates via the
+signed, single-use ``state`` instead.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import RedirectResponse
 
-from app.integrations.source_oauth import PROVIDERS
-from app.modules.sources.schemas import (
-    SourceCallbackRequest,
-    SourceConnectRequest,
-    SourceScopeRequest,
-)
-from app.modules.sources.service import SourceService
-from app.shared.http.respond import created, error_response, no_content, ok
+from app.modules.sources.schemas import AuthorizeStartRequest, ChannelSelectRequest
+from app.modules.sources.service import SourcesService
+from app.shared.http.respond import accepted, no_content, ok
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
 from app.shared.middleware.authorize import require_role
-from app.shared.middleware.rate_limit import (
-    DASHBOARD_LIMIT,
-    OAUTH_CALLBACK_LIMIT,
-    limiter,
-    user_key,
-)
+from app.shared.middleware.rate_limit import OAUTH_CALLBACK_LIMIT, limiter
 
-catalog_router = APIRouter(prefix="/sources", tags=["sources"])
-router = APIRouter(prefix="/workspaces", tags=["sources"])
+router = APIRouter(prefix="/sources", tags=["sources"])
+
+_service = SourcesService()
 
 
-_INVALID_PROVIDER = (
-    "Provider must be one of: slack, notion, github, jira, zendesk, google_drive."
-)
+@router.get("", dependencies=[Depends(require_role("admin"))])
+async def list_sources(request: Request, auth: AuthContext = Depends(get_auth_context)):
+    """List this workspace's source connections."""
+    connections = await _service.list_connections(auth)
+    return ok(request, [c.model_dump(by_alias=True) for c in connections])
 
 
-def get_source_service() -> SourceService:
-    """Provider so the service can be overridden in tests."""
-    return SourceService()
-
-
-@catalog_router.get("/providers")
-@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
-async def list_providers(
-    request: Request,
-    _auth: AuthContext = Depends(get_auth_context),
-    service: SourceService = Depends(get_source_service),
-) -> JSONResponse:
-    providers = service.list_providers()
-    return ok(request, [p.model_dump(by_alias=True) for p in providers])
-
-
-@router.post("/{workspace_id}/sources/{provider}/connect")
-@limiter.limit(OAUTH_CALLBACK_LIMIT, key_func=user_key)
-async def connect_source(
-    request: Request,
-    workspace_id: str,
+@router.post("/{provider}/authorize", dependencies=[Depends(require_role("admin"))])
+async def authorize(
     provider: str,
-    body: SourceConnectRequest,
-    auth: AuthContext = Depends(get_auth_context),
-    _: None = Depends(require_role("admin")),
-    service: SourceService = Depends(get_source_service),
-) -> JSONResponse:
-    if provider not in PROVIDERS:
-        return error_response(
-            request, status=400, code="invalid_provider", message=_INVALID_PROVIDER
-        )
-    result = await service.start_connect(auth, workspace_id, provider, body)
-    return ok(request, result.model_dump(by_alias=True))
-
-
-@router.post("/{workspace_id}/sources/{provider}/callback", status_code=201)
-@limiter.limit(OAUTH_CALLBACK_LIMIT, key_func=user_key)
-async def source_callback(
     request: Request,
-    workspace_id: str,
+    body: AuthorizeStartRequest | None = None,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Begin the OAuth flow: return the provider consent URL to redirect the user to.
+
+    Subdomain-scoped providers (Zendesk) pass ``{"subdomain": "acme"}`` in the body.
+    """
+    result = await _service.start_authorization(
+        auth, provider, subdomain=body.subdomain if body else None
+    )
+    return accepted(request, result.model_dump(by_alias=True))
+
+
+@router.get("/{provider}/callback")
+@limiter.limit(OAUTH_CALLBACK_LIMIT)
+async def callback(
     provider: str,
-    body: SourceCallbackRequest,
-    auth: AuthContext = Depends(get_auth_context),
-    _: None = Depends(require_role("admin")),
-    service: SourceService = Depends(get_source_service),
-) -> JSONResponse:
-    if provider not in PROVIDERS:
-        return error_response(
-            request, status=400, code="invalid_provider", message=_INVALID_PROVIDER
-        )
-    source = await service.handle_callback(auth, workspace_id, provider, body)
-    return created(request, {"source": source.model_dump(by_alias=True)})
-
-
-@router.get("/{workspace_id}/sources")
-@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
-async def list_sources(
     request: Request,
-    workspace_id: str,
-    auth: AuthContext = Depends(get_auth_context),
-    _: None = Depends(require_role("admin")),
-    service: SourceService = Depends(get_source_service),
-) -> JSONResponse:
-    sources = await service.list_sources(auth, workspace_id)
-    return ok(request, [s.model_dump(by_alias=True) for s in sources])
+    state: str,
+    code: str | None = None,
+    installation_id: str | None = None,
+    error: str | None = None,
+):
+    """OAuth redirect target: exchange the code, store the connection, bounce to the dashboard.
+
+    ``code`` is optional because a pure GitHub App install redirects here with an
+    ``installation_id`` and no ``code``. ``error`` is set when the user declines the
+    consent screen (e.g. ``error=access_denied``); the service redirects back cleanly
+    instead of trying to exchange a missing code.
+    """
+    redirect_to = await _service.handle_callback(
+        provider, state=state, code=code, installation_id=installation_id, error=error
+    )
+    return RedirectResponse(url=redirect_to, status_code=302)
 
 
-@router.put("/{workspace_id}/sources/scope")
-@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
-async def configure_scope(
-    request: Request,
-    workspace_id: str,
-    body: SourceScopeRequest,
-    auth: AuthContext = Depends(get_auth_context),
-    _: None = Depends(require_role("admin")),
-    service: SourceService = Depends(get_source_service),
-) -> JSONResponse:
-    result = await service.update_scope(auth, workspace_id, body)
-    return ok(request, result.model_dump(by_alias=True))
+@router.post("/{source_id}/disconnect", dependencies=[Depends(require_role("admin"))])
+async def disconnect(source_id: str, auth: AuthContext = Depends(get_auth_context)):
+    """Revoke (best-effort) and delete a source connection."""
+    await _service.disconnect(auth, source_id)
+    return no_content()
 
 
-@router.get("/{workspace_id}/sources/{source_id}/channels")
-@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
+@router.get("/{source_id}/channels", dependencies=[Depends(require_role("admin"))])
 async def list_channels(
-    request: Request,
-    workspace_id: str,
-    source_id: str,
-    auth: AuthContext = Depends(get_auth_context),
-    service: SourceService = Depends(get_source_service),
-) -> JSONResponse:
-    channels = await service.list_channels(auth, workspace_id, source_id)
+    source_id: str, request: Request, auth: AuthContext = Depends(get_auth_context)
+):
+    """List provider-discoverable channels merged with persisted selection state."""
+    channels = await _service.list_channels(auth, source_id)
     return ok(request, [c.model_dump(by_alias=True) for c in channels])
 
 
-@router.delete("/{workspace_id}/sources/{source_id}", status_code=204)
-@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
-async def disconnect_source(
-    request: Request,
-    workspace_id: str,
+@router.patch("/{source_id}/channels", dependencies=[Depends(require_role("admin"))])
+async def select_channels(
     source_id: str,
+    body: ChannelSelectRequest,
+    request: Request,
     auth: AuthContext = Depends(get_auth_context),
-    _: None = Depends(require_role("admin")),
-    service: SourceService = Depends(get_source_service),
-) -> Response:
-    await service.disconnect(auth, workspace_id, source_id)
-    return no_content()
+):
+    """Toggle which channels are selected for ingestion."""
+    channels = await _service.select_channels(auth, source_id, body)
+    return ok(request, [c.model_dump(by_alias=True) for c in channels])

@@ -1,99 +1,126 @@
-"""Source-integration data access — the only place this SQL lives (§2 layering).
+"""Source connection data access (the only place sources SQL lives).
 
-Every query is workspace-scoped (``workspace_id = :workspace_id`` bound param)
-and runs under the caller's tenant context. RLS backstops each operation: the
-``connections_admin`` policy gates ``source_connections`` (it holds encrypted
-tokens) to workspace admins, while ``channels_select`` lets any member read the
-channel list and ``channels_write`` restricts changes to admins.
+Two access modes:
+  * ``oauth_states`` rows are read/written on a **service-role** session — the
+    callback resolves a state hash *before* any workspace context exists, and the
+    table has no RLS (privileged lookup by hash). All other tables are RLS-guarded
+    and are accessed inside ``run_in_tenant`` by the service.
+  * ``source_connections`` / ``source_channels`` queries run inside the caller's
+    tenant transaction; RLS (admin-only for connections) backstops them.
 
-Provider tokens are stored only as AES-GCM ciphertext (``*_token_enc``); the raw
-tokens are never persisted in plaintext and never selected back out here.
+All queries are parameterized — never string-built.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import cast
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# time_range (API contract) -> lookback_days stored on the connection.
-LOOKBACK_DAYS: dict[str, int] = {"30d": 30, "90d": 90, "6mo": 180, "all": 3650}
-
 
 @dataclass(frozen=True)
-class ConnectionRow:
+class ResolvedState:
     id: str
-    provider: str
-    name: str
-    status: str
-    sync_status: str
-    last_synced_at: datetime | None
-    health: int | None
-    active_channel_count: int
+    user_id: str
+    workspace_id: str
+    redirect_uri: str
+    subdomain: str | None = None
 
 
-@dataclass(frozen=True)
-class ChannelRow:
-    id: str
-    name: str
-    provider: str
-    selected: bool
-    item_count: int
-
-
-class SourceRepository:
+class SourcesRepository:
     """Stateless repository; methods take the session they run in."""
 
-    async def list_connections(
-        self, session: AsyncSession, workspace_id: str
-    ) -> list[ConnectionRow]:
-        """All non-disconnected source connections, oldest first."""
-        rows = (
+    # ── oauth_states (service-role, no RLS) ──────────────────────────────────────
+    async def create_oauth_state(
+        self,
+        session: AsyncSession,
+        *,
+        state_hash: bytes,
+        provider: str,
+        redirect_uri: str,
+        user_id: str,
+        workspace_id: str,
+        expires_at: datetime,
+        subdomain: str | None = None,
+    ) -> None:
+        await session.execute(
+            text(
+                """
+                INSERT INTO oauth_states
+                    (user_id, workspace_id, provider, redirect_uri, state_hash,
+                     expires_at, subdomain)
+                VALUES (:user_id, :workspace_id, :provider, :redirect_uri, :state_hash,
+                        :expires_at, :subdomain)
+                """
+            ).bindparams(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                provider=provider,
+                redirect_uri=redirect_uri,
+                state_hash=state_hash,
+                expires_at=expires_at,
+                subdomain=subdomain,
+            )
+        )
+        await session.commit()
+
+    async def consume_oauth_state(
+        self,
+        session: AsyncSession,
+        *,
+        state_hash: bytes,
+        provider: str,
+        now: datetime,
+    ) -> ResolvedState | None:
+        """Atomically claim an unconsumed, unexpired state for ``provider``.
+
+        The single ``UPDATE ... RETURNING`` makes consumption race-safe: a replayed
+        state finds ``consumed_at`` already set and matches no row.
+        """
+        row = (
             await session.execute(
                 text(
                     """
-                    SELECT c.id, c.provider, c.name, c.status, c.sync_status,
-                           c.last_synced_at, c.health,
-                           (SELECT count(*) FROM source_channels ch
-                             WHERE ch.source_id = c.id AND ch.selected) AS active_channel_count
-                    FROM source_connections c
-                    WHERE c.workspace_id = :workspace_id
-                      AND c.status <> 'disconnected'
-                    ORDER BY c.created_at ASC, c.id ASC
+                    UPDATE oauth_states
+                       SET consumed_at = :now
+                     WHERE state_hash = :state_hash
+                       AND provider = :provider
+                       AND consumed_at IS NULL
+                       AND expires_at > :now
+                    RETURNING id, user_id, workspace_id, redirect_uri, subdomain
                     """
-                ).bindparams(workspace_id=workspace_id),
+                ).bindparams(state_hash=state_hash, provider=provider, now=now)
             )
-        ).all()
-        return [_to_connection(r) for r in rows]
+        ).first()
+        await session.commit()
+        if row is None:
+            return None
+        return ResolvedState(
+            id=row.id,
+            user_id=row.user_id,
+            workspace_id=row.workspace_id,
+            redirect_uri=row.redirect_uri,
+            subdomain=row.subdomain,
+        )
 
+    # ── source_connections (tenant, admin-only RLS) ──────────────────────────────
     async def upsert_connection(
         self,
         session: AsyncSession,
         *,
-        new_id: str,
+        connection_id: str,
         workspace_id: str,
         provider: str,
         name: str,
         access_token_enc: bytes,
         refresh_token_enc: bytes | None,
         token_expires_at: datetime | None,
-        scopes: Sequence[str],
-        external_account_id: str,
+        scopes: list[str],
+        external_account_id: str | None,
         connected_by: str,
-    ) -> ConnectionRow:
-        """Connect or reconnect a provider account, atomically. Caller commits.
-
-        One ``INSERT ... ON CONFLICT (workspace_id, provider, external_account_id)``
-        so a reconnect updates the existing row (keeping its id) and a concurrent
-        double-connect can't create duplicate rows. ``external_account_id`` must be
-        non-NULL (the service substitutes a sentinel for providers that return no
-        account id) — otherwise the unique constraint wouldn't fire on NULLs.
-        ``active_channel_count`` is reported as 0 here; the list endpoint computes
-        the live count.
-        """
+    ) -> str:
+        """Insert or refresh a connection. Returns the connection id."""
         row = (
             await session.execute(
                 text(
@@ -103,181 +130,187 @@ class SourceRepository:
                          access_token_enc, refresh_token_enc, token_expires_at,
                          scopes, external_account_id, connected_by)
                     VALUES
-                        (:id, :workspace_id, CAST(:provider AS source_provider),
-                         :name, 'connected', 'pending',
+                        (:id, :workspace_id, CAST(:provider AS source_provider), :name,
+                         'connected', 'pending',
                          :access_token_enc, :refresh_token_enc, :token_expires_at,
                          :scopes, :external_account_id, :connected_by)
-                    ON CONFLICT (workspace_id, provider, external_account_id)
+                    ON CONFLICT ON CONSTRAINT source_connections_workspace_id_provider_account_key
                     DO UPDATE SET
-                        status            = 'connected',
-                        sync_status       = 'pending',
-                        name              = EXCLUDED.name,
-                        access_token_enc  = EXCLUDED.access_token_enc,
-                        refresh_token_enc = EXCLUDED.refresh_token_enc,
-                        token_expires_at  = EXCLUDED.token_expires_at,
-                        scopes            = EXCLUDED.scopes,
-                        connected_by      = EXCLUDED.connected_by,
-                        updated_at        = now()
-                    RETURNING id, provider, name, status, sync_status,
-                              last_synced_at, health
+                         status = 'connected',
+                         access_token_enc = EXCLUDED.access_token_enc,
+                         refresh_token_enc = EXCLUDED.refresh_token_enc,
+                         token_expires_at = EXCLUDED.token_expires_at,
+                         scopes = EXCLUDED.scopes,
+                         name = EXCLUDED.name,
+                         updated_at = now()
+                    RETURNING id
                     """
                 ).bindparams(
-                    id=new_id,
+                    id=connection_id,
                     workspace_id=workspace_id,
                     provider=provider,
                     name=name,
                     access_token_enc=access_token_enc,
                     refresh_token_enc=refresh_token_enc,
                     token_expires_at=token_expires_at,
-                    scopes=list(scopes),
+                    scopes=scopes,
                     external_account_id=external_account_id,
                     connected_by=connected_by,
-                ),
-            )
-        ).one()
-        return _to_connection(row, active_channel_count=0)
-
-    async def disconnect(
-        self, session: AsyncSession, workspace_id: str, source_id: str
-    ) -> bool:
-        """Soft-disconnect a source and wipe its stored tokens. Caller commits.
-
-        Returns ``False`` when no live connection matched (→ 404). Tokens are
-        cleared so a disconnected row can never be used to call the provider; the
-        row itself is kept (status='disconnected') for audit and for revoking the
-        associated webhook subscriptions in a later step.
-        """
-        row = (
-            await session.execute(
-                text(
-                    """
-                    UPDATE source_connections
-                    SET status            = 'disconnected',
-                        access_token_enc  = NULL,
-                        refresh_token_enc = NULL,
-                        token_expires_at  = NULL,
-                        updated_at        = now()
-                    WHERE id = :source_id
-                      AND workspace_id = :workspace_id
-                      AND status <> 'disconnected'
-                    RETURNING id
-                    """
-                ).bindparams(source_id=source_id, workspace_id=workspace_id),
+                )
             )
         ).first()
-        return row is not None
+        return row.id  # type: ignore[union-attr]
 
-    async def list_channels(
-        self, session: AsyncSession, workspace_id: str, source_id: str
-    ) -> list[ChannelRow]:
-        """Channels/spaces/projects known for a connection, by name."""
+    async def list_connections(self, session: AsyncSession) -> list[dict]:
         rows = (
             await session.execute(
                 text(
                     """
-                    SELECT id, name, provider, selected, item_count
-                    FROM source_channels
-                    WHERE workspace_id = :workspace_id AND source_id = :source_id
-                    ORDER BY name ASC, id ASC
+                    SELECT id, provider, name, status, sync_status,
+                           external_account_id, last_synced_at, health, created_at
+                      FROM source_connections
+                     ORDER BY created_at DESC
                     """
-                ).bindparams(workspace_id=workspace_id, source_id=source_id),
+                )
             )
-        ).all()
-        return [
-            ChannelRow(
-                id=r.id,
-                name=r.name,
-                provider=r.provider,
-                selected=r.selected,
-                item_count=int(r.item_count),
-            )
-            for r in rows
-        ]
+        ).mappings().all()
+        return [dict(r) for r in rows]
 
-    async def set_lookback(
-        self, session: AsyncSession, workspace_id: str, lookback_days: int
-    ) -> None:
-        """Apply the chosen time window to every connected source. Caller commits."""
-        await session.execute(
-            text(
-                """
-                UPDATE source_connections
-                SET lookback_days = :lookback_days, updated_at = now()
-                WHERE workspace_id = :workspace_id AND status = 'connected'
-                """
-            ).bindparams(workspace_id=workspace_id, lookback_days=lookback_days),
-        )
-
-    async def set_channel_selection(
-        self,
-        session: AsyncSession,
-        workspace_id: str,
-        provider: str,
-        external_ids: Sequence[str],
-    ) -> None:
-        """Select exactly ``external_ids`` for a provider; deselect the rest.
-
-        Selection is **provider-wide**, matching the provider-keyed scope contract
-        (API_DOCUMENTATION.md §Configure Source Scope): ``external_ids`` is the full
-        set of selected channels for that provider across the workspace. If a
-        workspace has more than one connection of the same provider (e.g. two Slack
-        workspaces), they share one selection set — scope is not per-connection.
-
-        Caller commits. A no-op until the sync job has populated ``source_channels``
-        for the provider, so it is safe to call during onboarding before ingestion.
-        """
-        await session.execute(
-            text(
-                """
-                UPDATE source_channels
-                SET selected = (external_id = ANY(:external_ids))
-                WHERE workspace_id = :workspace_id
-                  AND provider = CAST(:provider AS source_provider)
-                """
-            ).bindparams(
-                workspace_id=workspace_id,
-                provider=provider,
-                external_ids=list(external_ids),
-            ),
-        )
-
-    async def selected_item_total(
-        self, session: AsyncSession, workspace_id: str
-    ) -> int:
-        """Sum of item counts across selected channels (0 before any sync)."""
+    async def get_connection_secrets(
+        self, session: AsyncSession, connection_id: str
+    ) -> dict | None:
         row = (
             await session.execute(
                 text(
                     """
-                    SELECT COALESCE(SUM(item_count), 0) AS total
-                    FROM source_channels
-                    WHERE workspace_id = :workspace_id AND selected
+                    SELECT id, provider, access_token_enc, refresh_token_enc, token_expires_at
+                      FROM source_connections
+                     WHERE id = :id
                     """
-                ).bindparams(workspace_id=workspace_id),
+                ).bindparams(id=connection_id)
             )
-        ).one()
-        return int(row.total)
+        ).mappings().first()
+        return dict(row) if row else None
 
+    async def update_tokens(
+        self,
+        session: AsyncSession,
+        connection_id: str,
+        *,
+        access_token_enc: bytes,
+        token_expires_at: datetime | None,
+        refresh_token_enc: bytes | None,
+    ) -> None:
+        """Persist a refreshed access token (and rotated refresh token, if any).
 
-def _to_connection(r: object, *, active_channel_count: int | None = None) -> ConnectionRow:
-    """Map a result Row to a ConnectionRow.
+        ``refresh_token_enc`` is COALESCE'd so a provider that doesn't rotate its refresh
+        token (returns None) keeps the stored one.
+        """
+        await session.execute(
+            text(
+                """
+                UPDATE source_connections
+                   SET access_token_enc = :access_token_enc,
+                       token_expires_at = :token_expires_at,
+                       refresh_token_enc = COALESCE(:refresh_token_enc, refresh_token_enc),
+                       updated_at = now()
+                 WHERE id = :id
+                """
+            ).bindparams(
+                id=connection_id,
+                access_token_enc=access_token_enc,
+                token_expires_at=token_expires_at,
+                refresh_token_enc=refresh_token_enc,
+            )
+        )
 
-    When ``active_channel_count`` is given (insert/update RETURNING, which doesn't
-    project the channel count) it is used directly; otherwise it is read off the
-    row (the list query computes it).
-    """
-    row = cast(ConnectionRow, r)  # SQLAlchemy Row attr access; fields line up by name
-    return ConnectionRow(
-        id=row.id,
-        provider=row.provider,
-        name=row.name,
-        status=row.status,
-        sync_status=row.sync_status,
-        last_synced_at=row.last_synced_at,
-        health=row.health,
-        active_channel_count=(
-            active_channel_count
-            if active_channel_count is not None
-            else int(row.active_channel_count)
-        ),
-    )
+    async def delete_connection(self, session: AsyncSession, connection_id: str) -> bool:
+        result = await session.execute(
+            text("DELETE FROM source_connections WHERE id = :id").bindparams(id=connection_id)
+        )
+        return (result.rowcount or 0) > 0
+
+    async def revoke_subscriptions_for_source(
+        self, session: AsyncSession, source_id: str
+    ) -> None:
+        """Mark any push-channel subscriptions for this source revoked (stops renewal)."""
+        await session.execute(
+            text(
+                "UPDATE webhook_subscriptions SET status = 'revoked' WHERE target_id = :sid"
+            ).bindparams(sid=source_id)
+        )
+
+    # ── source_channels (tenant) ──────────────────────────────────────────────
+    async def list_channels(self, session: AsyncSession, source_id: str) -> list[dict]:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, external_id, name, selected, item_count
+                      FROM source_channels
+                     WHERE source_id = :source_id
+                     ORDER BY name
+                    """
+                ).bindparams(source_id=source_id)
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def update_lookback(
+        self, session: AsyncSession, source_id: str, lookback_days: int
+    ) -> None:
+        await session.execute(
+            text(
+                """
+                UPDATE source_connections
+                   SET lookback_days = :days, updated_at = now()
+                 WHERE id = :id
+                """
+            ).bindparams(id=source_id, days=lookback_days)
+        )
+
+    async def upsert_channel(
+        self,
+        session: AsyncSession,
+        *,
+        channel_id: str,
+        workspace_id: str,
+        source_id: str,
+        provider: str,
+        external_id: str,
+        name: str,
+        selected: bool,
+    ) -> None:
+        await session.execute(
+            text(
+                """
+                INSERT INTO source_channels
+                    (id, workspace_id, source_id, provider, external_id, name, selected)
+                VALUES
+                    (:id, :workspace_id, :source_id, CAST(:provider AS source_provider),
+                     :external_id, :name, :selected)
+                ON CONFLICT ON CONSTRAINT source_channels_source_id_external_id_key
+                DO UPDATE SET name = EXCLUDED.name, selected = EXCLUDED.selected
+                """
+            ).bindparams(
+                id=channel_id,
+                workspace_id=workspace_id,
+                source_id=source_id,
+                provider=provider,
+                external_id=external_id,
+                name=name,
+                selected=selected,
+            )
+        )
+
+    async def get_connection_provider(
+        self, session: AsyncSession, connection_id: str
+    ) -> str | None:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT provider FROM source_connections WHERE id = :id"
+                ).bindparams(id=connection_id)
+            )
+        ).first()
+        return row.provider if row else None

@@ -10,9 +10,10 @@ it once here so the member list stays the single source of truth, matched by the
 """
 from sqlalchemy import Enum
 
-# Keep in lockstep with the DB ``source_provider`` type (alembic) and the
-# ``SourceProvider`` literal in app/integrations/source_oauth.py.
-SOURCE_PROVIDER_VALUES = ("slack", "notion", "github", "jira", "zendesk", "google_drive")
+# Keep in lockstep with the DB ``source_provider`` type (alembic migrations).
+SOURCE_PROVIDER_VALUES = (
+    "slack", "notion", "github", "jira", "zendesk", "google_drive", "gmail",
+)
 
 source_provider_enum = Enum(
     *SOURCE_PROVIDER_VALUES, name="source_provider", create_type=False

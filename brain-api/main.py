@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from routers import health, skills, ingest, review
+from routers import health, skills, review
 from database import init_db_pool, close_db_pool
 from cache import init_redis, close_redis
 from mcp_server.server import run_mcp_server
@@ -22,7 +22,6 @@ app = FastAPI(title="Company Brain API", version="1.0.0", lifespan=lifespan)
 
 app.include_router(health.router)
 app.include_router(skills.router, prefix="/skills")
-app.include_router(ingest.router, prefix="/ingest")
 app.include_router(review.router, prefix="/review")
 
 if __name__ == "__main__":

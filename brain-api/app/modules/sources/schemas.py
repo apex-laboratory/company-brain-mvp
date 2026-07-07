@@ -1,82 +1,67 @@
-"""Source-integration request/response schemas (BACKEND_BEST_PRACTICES.md §3, §5).
+"""Sources request/response schemas (BACKEND_BEST_PRACTICES.md §3, §5).
 
-Requests reject unknown keys; responses serialize to camelCase per the API
-contract (API_DOCUMENTATION.md §Source Integrations API). Provider tokens never
-appear in any response schema — only connection metadata.
+Requests reject unknown keys; responses serialize to camelCase.
 """
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
 
-from pydantic import Field
-
-from app.shared.schemas import CamelModel as _Response
-from app.shared.schemas import CamelRequestModel as _Request
-
-SourceProvider = Literal["slack", "notion", "github", "jira", "zendesk", "google_drive"]
-# Sweep/ingestion lookback window (API_DOCUMENTATION.md §Configure Source Scope).
-TimeRange = Literal["30d", "90d", "6mo", "all"]
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_camel
 
 
-# ── requests ──────────────────────────────────────────────────────────────────
-class SourceConnectRequest(_Request):
-    redirect_uri: Annotated[str, Field(min_length=1, max_length=2048)]
-    # Optional scope override; defaults to the provider's read-only scopes.
-    requested_scopes: list[str] | None = None
+class _Request(BaseModel):
+    # Accept the camelCase keys our responses emit (externalId, lookbackDays, …) while
+    # still allowing snake_case; unknown keys are rejected.
+    model_config = ConfigDict(
+        extra="forbid", alias_generator=to_camel, populate_by_name=True
+    )
 
 
-class SourceCallbackRequest(_Request):
-    code: Annotated[str, Field(min_length=1, max_length=4096)]
-    state: Annotated[str, Field(min_length=1, max_length=4096)]
-
-
-class SourceScopeRequest(_Request):
-    time_range: TimeRange
-    # provider -> list of channel/space/project external ids to select.
-    channels: dict[SourceProvider, list[str]]
+class _Response(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 # ── responses ─────────────────────────────────────────────────────────────────
-class ProviderOut(_Response):
-    provider: SourceProvider
-    name: str
-    tag: str
-    default_scopes: list[str]
-    read_only: bool
-    # A pre-connect volume hint (e.g. "3,412 messages"); unknown until estimated.
-    estimated_items: str | None = None
+class AuthorizeStartOut(_Response):
+    authorize_url: str
 
 
-class SourceOut(_Response):
+class SourceConnectionOut(_Response):
     id: str
-    provider: SourceProvider
+    provider: str
     name: str
     status: str
     sync_status: str
-    last_synced_at: datetime | None
-    health: int | None
-    active_channel_count: int
-    # Sync-derived fields (API_DOCUMENTATION.md §List Connected Sources). Populated
-    # by the ingestion job; reported as empty/zero until the first sync runs.
-    pending_items: int = 0
-    extracted_label: str | None = None
-    ingest7d: list[int] = Field(default_factory=list)
+    external_account_id: str | None = None
+    last_synced_at: datetime | None = None
+    health: int | None = None
+    created_at: datetime
 
 
-class SourceConnectStartOut(_Response):
-    authorization_url: str
-    state: str
-
-
-class SourceChannelOut(_Response):
-    id: str
+class ChannelOut(_Response):
+    id: str | None = None  # null until persisted (discovered-but-unselected)
+    external_id: str
     name: str
-    provider: SourceProvider
-    selected: bool
-    item_count: int
+    selected: bool = False
+    item_count: int = 0
 
 
-class SourceScopeUpdatedOut(_Response):
-    status: Literal["configured"]
-    estimated_decisions: int
+# ── requests ──────────────────────────────────────────────────────────────────
+class AuthorizeStartRequest(_Request):
+    # Required for subdomain-scoped providers (e.g. Zendesk: 'acme' -> acme.zendesk.com);
+    # omitted for global-endpoint providers (Notion, GitHub).
+    subdomain: str | None = None
+
+
+class ChannelSelection(_Request):
+    external_id: str
+    name: str
+    selected: bool = True
+
+
+class ChannelSelectRequest(_Request):
+    channels: list[ChannelSelection]
+    # Onboarding's "how far back?" selector. Bounds the connection's first sync
+    # (source_connections.lookback_days); omitted = keep the current value.
+    lookback_days: int | None = Field(default=None, ge=1, le=730)

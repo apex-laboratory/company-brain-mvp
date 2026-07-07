@@ -48,34 +48,61 @@ class Settings(BaseSettings):
     # (e.g. the member-invite acceptance URL). Frontend base, not the API host.
     app_base_url: str = "http://localhost:3000"
 
-    # Base domain for per-workspace MCP/brain endpoints. The workspace settings
-    # endpoint advertises ``https://{slug}.{mcp_base_domain}/mcp`` to clients.
-    mcp_base_domain: str = "brainites.com"
+    # ── login SSO (Sign in with Google/GitHub) ────────────────────────────────
+    # Separate OAuth client registrations from the source-connector ones below —
+    # different scopes (profile/email only) and consent screens.
+    login_google_client_id: str = ""
+    login_google_client_secret: str = ""
+    login_github_client_id: str = ""
+    login_github_client_secret: str = ""
 
-    # ── OAuth providers (login SSO) ───────────────────────────────────────────
-    google_client_id: str = ""
-    google_client_secret: str = ""
-    github_client_id: str = ""
-    github_client_secret: str = ""
-    # Base URL used to construct the redirect_uri sent to providers.
-    # Must match a redirect registered in each provider's app config.
+    # ── source connectors (KAN-2) ─────────────────────────────────────────────
+    # Base URL used to construct the redirect_uri / webhook callback URLs sent to
+    # providers. Must match a redirect registered in each provider's app config.
     oauth_redirect_base_url: str = "http://localhost:4000"
-
-    # ── Source-connection OAuth providers ─────────────────────────────────────
-    # Read-only knowledge-source connectors. Each empty by default so the app
-    # boots unconfigured; connecting an unconfigured provider returns 501.
-    # GitHub reuses github_client_id/github_client_secret above; Google Drive
-    # reuses google_client_id/google_client_secret above.
-    slack_client_id: str = ""
-    slack_client_secret: str = ""
+    frontend_url: str = "http://localhost:3000"
     notion_client_id: str = ""
     notion_client_secret: str = ""
-    jira_client_id: str = ""
-    jira_client_secret: str = ""
+    # GitHub App (KAN-7). Auth is App-JWT (RS256) → per-installation tokens, so no
+    # OAuth client id/secret. The private key is a PEM stored \n-escaped on one line.
+    github_app_id: str = ""
+    github_app_private_key: str = ""
+    github_app_slug: str = ""  # used to build the install URL
+    github_webhook_secret: str = ""  # shared secret for X-Hub-Signature-256
+    # GitHub App OAuth client (the App's own client id/secret, distinct from the numeric
+    # app id). Used for the "Request user authorization (OAuth) during installation" leg:
+    # the callback code is exchanged for a user token so we can verify the caller
+    # actually controls the installation_id they passed (blocks cross-tenant binding).
+    github_app_client_id: str = ""
+    github_app_client_secret: str = ""
+    # Google (Drive + Gmail) share one OAuth client (web-server flow). The consent
+    # screen is kept in "Testing" status (<=100 users) to avoid Google verification.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    # Gmail push: the Cloud Pub/Sub topic users.watch publishes to, and a shared token
+    # embedded in the Pub/Sub push endpoint URL (?token=) used to verify deliveries.
+    google_pubsub_topic: str = ""  # projects/<project>/topics/<topic>
+    google_pubsub_verification_token: str = ""
+    # Slack connector
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+    slack_signing_secret: str = ""
+    # Zendesk OAuth (subdomain-scoped). One global OAuth client across all customer
+    # subdomains; the per-customer subdomain travels through the OAuth flow + connection.
     zendesk_client_id: str = ""
     zendesk_client_secret: str = ""
-    # Zendesk OAuth is per-account: its URLs are {subdomain}.zendesk.com.
-    zendesk_subdomain: str = ""
+    # Jira Cloud OAuth 2.0 (3LO). One global OAuth client; consent is at
+    # auth.atlassian.com and the customer's Jira site (cloudId) is discovered after
+    # exchange via accessible-resources — no per-tenant host to configure.
+    jira_client_id: str = ""
+    jira_client_secret: str = ""
+
+    # Base domain for per-workspace MCP/brain endpoints.
+    mcp_base_domain: str = "brainites.com"
+
+    # source_authority.yaml (sweep processing order etc.); lives at the repo root
+    # in dev. A missing file falls back to the built-in default order.
+    source_authority_path: str = "../source_authority.yaml"
 
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes

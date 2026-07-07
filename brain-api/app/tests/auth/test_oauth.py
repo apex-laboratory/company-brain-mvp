@@ -15,8 +15,8 @@ import pytest
 from jose import jwt
 
 from app.config.settings import settings
-from app.integrations import OAuthError, OAuthProfile
-from app.integrations.github_oauth import _primary_email
+from app.integrations.oauth import OAuthError, OAuthProfile
+from app.integrations.oauth.github_oauth import _primary_email
 from app.modules.auth.repository import (
     AuthRepository,
     MembershipRecord,

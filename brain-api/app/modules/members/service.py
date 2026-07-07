@@ -28,7 +28,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config.database import get_session
 from app.config.settings import settings
-from app.integrations import resend
+from app.integrations.oauth import resend
 from app.modules.members.repository import MemberRepository
 from app.modules.members.schemas import (
     MemberInviteOut,
