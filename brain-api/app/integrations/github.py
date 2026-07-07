@@ -33,6 +33,7 @@ from jose import jwt
 from app.config.settings import settings
 from app.integrations.base import (
     ChannelRef,
+    ConnectorAuthError,
     OAuthTokens,
     RawEvent,
     RawItem,
@@ -97,8 +98,11 @@ def _unwrap(payload: dict) -> tuple[dict | None, str]:
     # this FIRST so that stub isn't mistaken for a webhook envelope's nested object.
     if "id" in payload and ("title" in payload or "body" in payload):
         return payload, "pr" if payload.get("pull_request") else "issue"
-    # Webhook envelope: {action, issue|pull_request|comment, ...}.
-    for key, etype in (("issue", "issue"), ("pull_request", "pr"), ("comment", "comment")):
+    # Webhook envelope: {action, issue|pull_request|comment, ...}. ``comment`` is checked
+    # FIRST because an issue_comment / pull_request_review_comment delivery carries BOTH
+    # the comment *and* its parent issue/PR — resolving to the issue would silently drop
+    # the comment's text and author.
+    for key, etype in (("comment", "comment"), ("issue", "issue"), ("pull_request", "pr")):
         core = payload.get(key)
         if isinstance(core, dict):
             # An `issues` webhook represents a PR as an issue with a pull_request
@@ -145,9 +149,24 @@ class GitHubIntegration:
     async def exchange_code(
         self, code: str, redirect_uri: str, installation_id: str | None = None
     ) -> OAuthTokens:
-        # ``code`` is unused — a GitHub App install authenticates via installation_id.
+        """Bind a GitHub App installation to the connecting workspace.
+
+        SECURITY: the ``installation_id`` in the callback is attacker-influenceable
+        (small, enumerable integers) and the App JWT will mint a token for *any*
+        installation, so we must prove the caller actually controls this installation
+        before minting. We do that with the "Request user authorization (OAuth) during
+        installation" leg: the callback also carries a ``code``, which we exchange for a
+        *user* token and check the installation appears in ``GET /user/installations``.
+        Without this check an admin could bind a victim org's installation to their own
+        workspace and ingest its private repos.
+        """
         if not installation_id:
             raise ValueError("GitHub callback missing installation_id")
+        await self._verify_installation_owner(code, installation_id)
+        return await self._mint_tokens(installation_id)
+
+    async def _mint_tokens(self, installation_id: str) -> OAuthTokens:
+        """Mint a fresh installation access token (no ownership check — internal/refresh)."""
         data = await self._mint_installation_token(installation_id)
         return OAuthTokens(
             access_token=data["token"],
@@ -159,9 +178,62 @@ class GitHubIntegration:
             raw=data,
         )
 
+    async def _verify_installation_owner(self, code: str, installation_id: str) -> None:
+        """Confirm the OAuth user controls ``installation_id`` (cross-tenant guard).
+
+        Requires the App to be configured for "Request user authorization (OAuth) during
+        installation" and its OAuth client id/secret to be set. Raises ``ConnectorAuthError``
+        when the code is missing, the user token can't be obtained, or the installation is
+        not one the user can access.
+        """
+        if not settings.github_app_client_id or not settings.github_app_client_secret:
+            raise ConnectorAuthError(
+                "GitHub App OAuth client is not configured; cannot verify installation "
+                "ownership. Set GITHUB_APP_CLIENT_ID / GITHUB_APP_CLIENT_SECRET and enable "
+                "user authorization during installation."
+            )
+        if not code:
+            raise ConnectorAuthError("GitHub callback missing user-authorization code.")
+
+        token_resp = await http_client().post(
+            "https://github.com/login/oauth/access_token",
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": settings.github_app_client_id,
+                "client_secret": settings.github_app_client_secret,
+                "code": code,
+            },
+        )
+        token_resp.raise_for_status()
+        user_token = token_resp.json().get("access_token")
+        if not user_token:
+            raise ConnectorAuthError("GitHub user-authorization code exchange failed.")
+
+        target = str(installation_id)
+        page = 1
+        while True:
+            resp = await http_client().get(
+                f"{_API_BASE}/user/installations",
+                headers=self._headers(user_token),
+                params={"per_page": _PER_PAGE, "page": page},
+            )
+            resp.raise_for_status()
+            installations = resp.json().get("installations", [])
+            if any(str(inst.get("id")) == target for inst in installations):
+                return
+            if len(installations) < _PER_PAGE:
+                break
+            page += 1
+        raise ConnectorAuthError(
+            "GitHub installation is not accessible to the authorizing user "
+            "(possible cross-tenant attempt)."
+        )
+
     async def refresh(self, refresh_token: str) -> OAuthTokens:
         # ``refresh_token`` is the installation_id; re-mint a fresh installation token.
-        return await self.exchange_code("", "", installation_id=refresh_token)
+        # No ownership check here — ownership was verified at connect time; this is our
+        # own stored credential being renewed.
+        return await self._mint_tokens(refresh_token)
 
     async def revoke(self, access_token: str) -> None:
         # Installation tokens expire on their own (~1h); the real revoke is the user

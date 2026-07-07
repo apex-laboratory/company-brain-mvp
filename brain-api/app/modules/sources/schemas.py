@@ -11,7 +11,11 @@ from pydantic.alias_generators import to_camel
 
 
 class _Request(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Accept the camelCase keys our responses emit (externalId, lookbackDays, …) while
+    # still allowing snake_case; unknown keys are rejected.
+    model_config = ConfigDict(
+        extra="forbid", alias_generator=to_camel, populate_by_name=True
+    )
 
 
 class _Response(BaseModel):

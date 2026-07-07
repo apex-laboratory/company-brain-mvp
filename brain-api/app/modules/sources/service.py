@@ -20,6 +20,7 @@ from app.config.database import get_session
 from app.config.settings import settings
 from app.integrations import get_integration
 from app.integrations.base import OAuthTokens
+from app.integrations.google_common import GOOGLE_PUSH_PROVIDERS
 from app.jobs.queue import enqueue
 from app.modules.sources.repository import SourcesRepository
 from app.modules.sources.schemas import (
@@ -28,7 +29,12 @@ from app.modules.sources.schemas import (
     ChannelSelectRequest,
     SourceConnectionOut,
 )
-from app.shared.errors.app_error import NotFoundError, UnauthorizedError, ValidationError
+from app.shared.errors.app_error import (
+    ConfigurationError,
+    NotFoundError,
+    UnauthorizedError,
+    ValidationError,
+)
 from app.shared.helpers.crypto import hmac_sign, hmac_verify, sha256_hash
 from app.shared.helpers.ids import generate_id
 from app.shared.middleware.authenticate import AuthContext
@@ -60,6 +66,37 @@ def _validate_subdomain(provider: str, subdomain: str | None) -> str | None:
             {"subdomain": f"A valid {provider} subdomain is required (e.g. 'acme')."}
         )
     return normalized
+
+
+# The credentials each provider needs configured before an OAuth flow can start.
+# Missing any → a 501 (provider_not_configured) instead of bouncing the user to the
+# provider with an empty client_id and orphaning an oauth_states row per attempt.
+_REQUIRED_CREDENTIALS: dict[str, tuple[str, ...]] = {
+    "notion": ("notion_client_id", "notion_client_secret"),
+    "slack": ("slack_client_id", "slack_client_secret"),
+    "zendesk": ("zendesk_client_id", "zendesk_client_secret"),
+    "jira": ("jira_client_id", "jira_client_secret"),
+    "gmail": ("google_client_id", "google_client_secret"),
+    "google_drive": ("google_client_id", "google_client_secret"),
+    "github": (
+        "github_app_id",
+        "github_app_private_key",
+        "github_app_slug",
+        "github_app_client_id",
+        "github_app_client_secret",
+    ),
+}
+
+
+def _require_configured(provider: str) -> None:
+    """Raise ``ConfigurationError`` if the provider's OAuth credentials aren't all set."""
+    missing = [
+        name for name in _REQUIRED_CREDENTIALS.get(provider, ()) if not getattr(settings, name, "")
+    ]
+    if missing:
+        raise ConfigurationError(
+            f"The {provider} connector is not configured on this deployment."
+        )
 
 
 def _require_workspace(auth: AuthContext) -> tuple[str, str]:
@@ -94,6 +131,7 @@ class SourcesService:
     ) -> AuthorizeStartOut:
         workspace_id, _ = _require_workspace(auth)
         self._require_known(provider)
+        _require_configured(provider)
         integration = get_integration(provider)
 
         # Subdomain-scoped providers (Zendesk) need a validated subdomain up front:
@@ -130,14 +168,23 @@ class SourcesService:
         state: str,
         code: str | None = None,
         installation_id: str | None = None,
+        error: str | None = None,
     ) -> str:
         """Verify state, exchange the code, persist the connection, enqueue a sync.
 
         ``code`` and ``installation_id`` are provider-specific: code-exchange providers
         (Notion) carry a ``code``; a GitHub App install carries an ``installation_id``.
+        ``error`` is a provider-signalled failure (the user declined consent).
         Returns the workspace's dashboard URL to redirect the browser to.
         """
         self._require_known(provider)
+
+        # 0. The user declined the consent screen (or the provider errored). There is no
+        # code to exchange — redirect back to the sources page with the error and leave
+        # the single-use state untouched (unconsumed) so no spurious "state already used"
+        # appears if the browser retries. Do this before any DB work.
+        if error:
+            return f"{settings.frontend_url}/settings/sources?error={provider}"
 
         # 1. Stateless signature check before any DB work.
         nonce, _, signature = state.partition(".")
@@ -195,7 +242,7 @@ class SourcesService:
 
         # 6. Google connectors register a push channel (Drive changes.watch /
         #    Gmail users.watch) so updates arrive in real time.
-        if provider in ("google_drive", "gmail"):
+        if provider in GOOGLE_PUSH_PROVIDERS:
             await enqueue("watch_register", resolved.workspace_id, connection_id)
 
         return f"{settings.frontend_url}/settings/sources?connected={provider}"
@@ -228,6 +275,33 @@ class SourcesService:
                 await session.commit()
 
     # ── channels ───────────────────────────────────────────────────────────────
+    async def _resolve_access_token(self, session, secrets_row: dict) -> str:
+        """Decrypt the connection's access token, refreshing it if near expiry.
+
+        The channel picker can be opened long after the last sync (GitHub installation
+        and Jira access tokens expire in ~1h). Without this, ``list_channels`` would call
+        the provider with a dead token and 500. Mirrors the jobs layer's ``_resolve_token``:
+        a refreshed token is persisted so it isn't re-refreshed on the next open.
+        """
+        access_token = _dec(secrets_row["access_token_enc"])
+        expires = secrets_row.get("token_expires_at")
+        refresh_enc = secrets_row.get("refresh_token_enc")
+        if expires and expires < datetime.now(UTC) + timedelta(minutes=5) and refresh_enc:
+            integration = get_integration(secrets_row["provider"])
+            refreshed = await integration.refresh(_dec(refresh_enc))
+            access_token = refreshed.access_token
+            await self._repo.update_tokens(
+                session,
+                secrets_row["id"],
+                access_token_enc=_enc(refreshed.access_token),  # type: ignore[arg-type]
+                token_expires_at=refreshed.expires_at,
+                refresh_token_enc=(
+                    _enc(refreshed.refresh_token) if refreshed.refresh_token else None
+                ),
+            )
+            await session.commit()
+        return access_token
+
     async def list_channels(self, auth: AuthContext, source_id: str) -> list[ChannelOut]:
         """Merge provider-discovered channels with persisted selection state."""
         workspace_id, role = _require_workspace(auth)
@@ -237,9 +311,10 @@ class SourcesService:
                 if secrets_row is None:
                     raise NotFoundError("Source connection")
                 persisted = await self._repo.list_channels(session, source_id)
+                access_token = await self._resolve_access_token(session, secrets_row)
 
         integration = get_integration(secrets_row["provider"])
-        discovered = await integration.list_channels(_dec(secrets_row["access_token_enc"]))
+        discovered = await integration.list_channels(access_token)
 
         by_external = {p["external_id"]: p for p in persisted}
         out: list[ChannelOut] = []

@@ -12,8 +12,8 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from app.integrations import base
-from app.integrations import google_common
+from app.integrations import base, google_common
+from app.integrations import google_drive as drive_module
 from app.integrations.google_drive import GoogleDriveIntegration
 
 _GOOGLE_SETTINGS = SimpleNamespace(
@@ -103,6 +103,46 @@ async def test_fetch_since_bootstrap_backfills_and_returns_start_token(
     assert [i.external_id for i in items] == ["f1"]
     assert items[0].payload["_content"] == "exported body"
     assert cursor == "SP1"  # opaque start page token becomes the next cursor
+
+
+async def test_backfill_pauses_at_cap_and_resumes_from_continuation_cursor(
+    drive: GoogleDriveIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Drive larger than the per-run cap must pause with a continuation cursor
+    # (bounding worker memory — every file's content is held in the run's list)
+    # instead of accumulating the whole window and OOMing mid-sweep.
+    monkeypatch.setattr(drive_module, "_BACKFILL_MAX", 1)
+    f1 = _file("f1", "a.txt", "text/plain", "2026-06-10T10:00:00Z")
+    f2 = _file("f2", "b.txt", "text/plain", "2026-06-11T10:00:00Z")
+    start_token_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal start_token_calls
+        path = request.url.path
+        if path == "/drive/v3/changes/startPageToken":
+            start_token_calls += 1
+            return httpx.Response(200, json={"startPageToken": "SP1"})
+        if path == "/drive/v3/files":
+            if request.url.params.get("pageToken") == "P2":
+                return httpx.Response(200, json={"files": [f2]})
+            return httpx.Response(200, json={"files": [f1], "nextPageToken": "P2"})
+        if path in ("/drive/v3/files/f1", "/drive/v3/files/f2"):
+            return httpx.Response(200, text="file body")
+        raise AssertionError(f"unexpected path {path}")
+
+    _install_transport(monkeypatch, handler)
+    channel = base.ChannelRef(external_id="ada@acme.com", name="workspace")
+
+    # Run 1: cap hit → continuation cursor, not the start token.
+    items, cursor = await drive.fetch_since("tok", channel, None)
+    assert [i.external_id for i in items] == ["f1"]
+    assert cursor is not None and cursor.startswith(base.BACKFILL_CURSOR_PREFIX)
+
+    # Run 2: resumes at the stored pageToken and finishes → plain start token.
+    items2, cursor2 = await drive.fetch_since("tok", channel, cursor)
+    assert [i.external_id for i in items2] == ["f2"]
+    assert cursor2 == "SP1"
+    assert start_token_calls == 1  # captured once, carried through the chunks
 
 
 async def test_fetch_since_incremental_uses_changes_feed(

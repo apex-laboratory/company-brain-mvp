@@ -6,6 +6,8 @@ sources (event inserts would dedupe, but the provider API cost would not).
 """
 from __future__ import annotations
 
+from uuid import UUID
+
 from app.config.database import get_session
 from app.jobs.queue import enqueue
 from app.modules.sweeps.repository import SweepsRepository
@@ -50,21 +52,34 @@ class SweepsService:
         async with get_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 active = await self._repo.find_active(session)
-                if active is not None:
-                    return _out(active), False
-                row = await self._repo.create(
-                    session, workspace_id=workspace_id, triggered_by=auth.user_id
-                )
+                if active is None:
+                    active = await self._repo.create(
+                        session, workspace_id=workspace_id, triggered_by=auth.user_id
+                    )
+                    created = True
+                else:
+                    created = False
                 await session.commit()
 
         # Enqueue after commit so the worker can always see the row. Enqueue is
-        # best-effort (queue.py swallows outages); a stuck 'pending' sweep is
-        # re-enqueued by simply calling start again.
-        await enqueue("onboarding_sweep", workspace_id, str(row["id"]))
-        return _out(row), True
+        # best-effort (queue.py swallows outages), so a sweep still 'pending' has never
+        # been picked up — its original enqueue may have been dropped. Re-enqueue it
+        # (a 'running' sweep is already in flight, so leave it alone). ARQ's job id
+        # dedupes a genuine duplicate.
+        if created or active["status"] == "pending":
+            await enqueue(
+                "onboarding_sweep", workspace_id, str(active["id"]),
+                _job_id=f"onboarding-sweep:{active['id']}",
+            )
+        return _out(active), created
 
     async def get(self, auth: AuthContext, sweep_id: str) -> SweepOut:
         workspace_id, role = _require_workspace(auth)
+        # Sweep ids are UUIDs; a non-UUID path param is a 404, not a DB cast error (500).
+        try:
+            UUID(sweep_id)
+        except ValueError:
+            raise NotFoundError("Sweep") from None
         async with get_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 row = await self._repo.get(session, sweep_id)

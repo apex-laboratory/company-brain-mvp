@@ -33,12 +33,22 @@ import httpx
 
 from app.config.settings import settings
 from app.integrations import google_common
-from app.integrations.base import ChannelRef, OAuthTokens, RawEvent, RawItem
+from app.integrations.base import (
+    BACKFILL_CURSOR_PREFIX,
+    ChannelRef,
+    OAuthTokens,
+    RawEvent,
+    RawItem,
+)
 
 _API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 _SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 _PAGE_SIZE = 100
 _BOOTSTRAP_LOOKBACK_DAYS = 90
+# Max messages fetched per bootstrap run before persisting a continuation cursor. Bounds
+# memory + wall time (each message is a serial messages.get) so onboarding resumes across
+# runs instead of restarting from zero on a job timeout.
+_BACKFILL_MAX = 500
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -78,7 +88,10 @@ class GmailIntegration:
         return {"Authorization": f"Bearer {access_token}"}
 
     # ── OAuth (delegated to the shared Google helper) ──────────────────────────────
-    def authorize_url(self, state: str, redirect_uri: str) -> str:
+    def authorize_url(
+        self, state: str, redirect_uri: str, *, config: Mapping[str, str] | None = None
+    ) -> str:
+        # ``config`` is unused — Google's authorize endpoint is global.
         return google_common.authorize_url(_SCOPE, state, redirect_uri)
 
     async def exchange_code(
@@ -112,18 +125,36 @@ class GmailIntegration:
         return str(resp.json()["historyId"])
 
     async def _bootstrap(
-        self, access_token: str, lookback_days: int | None = None
+        self,
+        access_token: str,
+        lookback_days: int | None = None,
+        *,
+        after: int | None = None,
+        history_id: str | None = None,
+        page_token: str | None = None,
     ) -> tuple[list[RawItem], str]:
-        after = int(
-            (
-                datetime.now(UTC) - timedelta(days=lookback_days or _BOOTSTRAP_LOOKBACK_DAYS)
-            ).timestamp()
-        )
-        # Read the cursor first so messages arriving during the backfill aren't missed.
-        cursor = await self._profile_history_id(access_token)
+        """Backfill recent messages, bounded to ``_BACKFILL_MAX`` per run.
+
+        The mailbox ``historyId`` is captured before the first page (so messages arriving
+        during the backfill aren't missed) and carried across chunks. When the per-run cap
+        is hit with more to fetch, we return a ``BACKFILL_CURSOR_PREFIX`` continuation
+        cursor (``after|historyId|pageToken``); ``source_sync`` chains the next chunk. When
+        the mailbox is exhausted we return the plain ``historyId`` and incremental sync
+        takes over. Bounding each run keeps memory + wall time in check so a huge mailbox
+        can't blow the job timeout and retry from zero.
+        """
+        if after is None:
+            after = int(
+                (
+                    datetime.now(UTC) - timedelta(days=lookback_days or _BOOTSTRAP_LOOKBACK_DAYS)
+                ).timestamp()
+            )
+        if history_id is None:
+            # Read the cursor first so messages arriving during the backfill aren't missed.
+            history_id = await self._profile_history_id(access_token)
+
         items: list[RawItem] = []
-        page_token: str | None = None
-        while True:
+        while len(items) < _BACKFILL_MAX:
             params: dict[str, object] = {"q": f"after:{after}", "maxResults": _PAGE_SIZE}
             if page_token:
                 params["pageToken"] = page_token
@@ -135,8 +166,9 @@ class GmailIntegration:
                 items.append(await self._get_message(access_token, msg["id"]))
             page_token = data.get("nextPageToken")
             if not page_token:
-                break
-        return items, cursor
+                return items, history_id  # backfill complete → hand off to incremental
+        # Hit the per-run cap with more pages left — persist a continuation cursor.
+        return items, f"{BACKFILL_CURSOR_PREFIX}{after}|{history_id}|{page_token}"
 
     async def fetch_since(
         self,
@@ -152,6 +184,11 @@ class GmailIntegration:
         """
         if cursor is None:
             return await self._bootstrap(access_token, lookback_days)
+        if cursor.startswith(BACKFILL_CURSOR_PREFIX):
+            after_s, history_id, page_token = cursor[len(BACKFILL_CURSOR_PREFIX):].split("|", 2)
+            return await self._bootstrap(
+                access_token, after=int(after_s), history_id=history_id, page_token=page_token
+            )
 
         items: list[RawItem] = []
         seen: set[str] = set()

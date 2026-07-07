@@ -50,6 +50,17 @@ class ConflictError(AppError):
         super().__init__(409, "conflict", message)
 
 
+class ConfigurationError(AppError):
+    """A server-side misconfiguration (e.g. a provider's OAuth credentials are unset).
+
+    501 Not Implemented: the request is well-formed but the server isn't configured to
+    fulfil it, so retrying with different input won't help — an operator must act.
+    """
+
+    def __init__(self, message: str = "This capability is not configured.") -> None:
+        super().__init__(501, "not_configured", message)
+
+
 class RateLimitError(AppError):
     def __init__(self, retry_after: int) -> None:
         super().__init__(

@@ -221,8 +221,14 @@ class SlackIntegration:
         raise SlackAPIError("rate_limited", transient=True)  # retries exhausted
 
     # ── OAuth ────────────────────────────────────────────────────────────────────
-    def authorize_url(self, state: str, redirect_uri: str) -> str:
-        """Build the Slack v2 consent URL (bot scopes via the ``scope`` param)."""
+    def authorize_url(
+        self, state: str, redirect_uri: str, *, config: Mapping[str, str] | None = None
+    ) -> str:
+        """Build the Slack v2 consent URL (bot scopes via the ``scope`` param).
+
+        ``config`` is unused — Slack has a global authorize endpoint (the param exists
+        only to satisfy the SourceIntegration protocol).
+        """
         query = urlencode(
             {
                 "client_id": settings.slack_client_id,

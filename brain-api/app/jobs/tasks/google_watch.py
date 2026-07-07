@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from app.config.database import get_session
 from app.config.settings import settings
 from app.integrations import get_integration
+from app.integrations.google_common import GOOGLE_PUSH_PROVIDERS
 from app.jobs.repository import JobsRepository
 from app.jobs.tasks.source_sync import _resolve_token
 from app.shared.helpers.crypto import encrypt
@@ -29,7 +30,6 @@ log = logging.getLogger(__name__)
 
 _repo = JobsRepository()
 _RENEW_WINDOW = timedelta(hours=24)  # renew channels expiring within a day
-_GOOGLE_PROVIDERS = ("google_drive", "gmail")
 
 
 def _callback_url(provider: str) -> str:
@@ -86,7 +86,7 @@ async def watch_renew(ctx: dict) -> dict:
 
     renewed = 0
     for sub_id, workspace_id, provider, source_id in expiring:
-        if provider not in _GOOGLE_PROVIDERS:
+        if provider not in GOOGLE_PUSH_PROVIDERS:
             continue
         try:
             async with get_session() as session:

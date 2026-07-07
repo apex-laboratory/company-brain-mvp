@@ -192,6 +192,38 @@ class SourcesRepository:
         ).mappings().first()
         return dict(row) if row else None
 
+    async def update_tokens(
+        self,
+        session: AsyncSession,
+        connection_id: str,
+        *,
+        access_token_enc: bytes,
+        token_expires_at: datetime | None,
+        refresh_token_enc: bytes | None,
+    ) -> None:
+        """Persist a refreshed access token (and rotated refresh token, if any).
+
+        ``refresh_token_enc`` is COALESCE'd so a provider that doesn't rotate its refresh
+        token (returns None) keeps the stored one.
+        """
+        await session.execute(
+            text(
+                """
+                UPDATE source_connections
+                   SET access_token_enc = :access_token_enc,
+                       token_expires_at = :token_expires_at,
+                       refresh_token_enc = COALESCE(:refresh_token_enc, refresh_token_enc),
+                       updated_at = now()
+                 WHERE id = :id
+                """
+            ).bindparams(
+                id=connection_id,
+                access_token_enc=access_token_enc,
+                token_expires_at=token_expires_at,
+                refresh_token_enc=refresh_token_enc,
+            )
+        )
+
     async def delete_connection(self, session: AsyncSession, connection_id: str) -> bool:
         result = await session.execute(
             text("DELETE FROM source_connections WHERE id = :id").bindparams(id=connection_id)

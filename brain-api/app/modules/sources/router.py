@@ -57,14 +57,17 @@ async def callback(
     state: str,
     code: str | None = None,
     installation_id: str | None = None,
+    error: str | None = None,
 ):
     """OAuth redirect target: exchange the code, store the connection, bounce to the dashboard.
 
     ``code`` is optional because a pure GitHub App install redirects here with an
-    ``installation_id`` and no ``code``.
+    ``installation_id`` and no ``code``. ``error`` is set when the user declines the
+    consent screen (e.g. ``error=access_denied``); the service redirects back cleanly
+    instead of trying to exchange a missing code.
     """
     redirect_to = await _service.handle_callback(
-        provider, state=state, code=code, installation_id=installation_id
+        provider, state=state, code=code, installation_id=installation_id, error=error
     )
     return RedirectResponse(url=redirect_to, status_code=302)
 
