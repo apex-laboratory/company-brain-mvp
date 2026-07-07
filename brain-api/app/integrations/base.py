@@ -22,6 +22,13 @@ import httpx
 # read (e.g. large block fetches) pass their own per-request timeout.
 DEFAULT_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
+# Sentinel prefix for an *incomplete* backfill cursor. Opaque-cursor connectors
+# (Gmail/Drive) bound each bootstrap run to a page/item cap and return a continuation
+# cursor with this prefix when there is more to fetch. ``source_sync`` recognizes it and
+# chains the next chunk so a large mailbox/Drive finishes onboarding instead of timing
+# out and restarting from zero. A plain (prefix-less) cursor means the backfill is done.
+BACKFILL_CURSOR_PREFIX = "backfill|"
+
 _client: httpx.AsyncClient | None = None
 
 

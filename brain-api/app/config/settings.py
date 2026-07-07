@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     github_app_private_key: str = ""
     github_app_slug: str = ""  # used to build the install URL
     github_webhook_secret: str = ""  # shared secret for X-Hub-Signature-256
+    # GitHub App OAuth client (the App's own client id/secret, distinct from the numeric
+    # app id). Used for the "Request user authorization (OAuth) during installation" leg:
+    # the callback code is exchanged for a user token so we can verify the caller
+    # actually controls the installation_id they passed (blocks cross-tenant binding).
+    github_app_client_id: str = ""
+    github_app_client_secret: str = ""
     # Google (Drive + Gmail) share one OAuth client (web-server flow). The consent
     # screen is kept in "Testing" status (<=100 users) to avoid Google verification.
     google_client_id: str = ""

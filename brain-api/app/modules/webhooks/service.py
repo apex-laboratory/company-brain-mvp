@@ -19,12 +19,12 @@ from collections.abc import Mapping
 from app.config.database import get_session
 from app.config.settings import settings
 from app.integrations import get_integration
+from app.integrations.google_common import GOOGLE_PUSH_PROVIDERS
 from app.jobs.queue import enqueue
 from app.jobs.repository import JobsRepository
 from app.shared.errors.app_error import NotFoundError, UnauthorizedError, ValidationError
 from app.shared.helpers.crypto import constant_time_compare, decrypt
 
-_GOOGLE_PROVIDERS = ("google_drive", "gmail")
 _repo = JobsRepository()
 
 
@@ -77,7 +77,7 @@ class WebhooksService:
         # Google push (Drive/Gmail) is content-free: verify + route here (we have the
         # headers/query params), then trigger the incremental sweep. It never goes
         # through webhook_ingest/normalize.
-        if provider in _GOOGLE_PROVIDERS:
+        if provider in GOOGLE_PUSH_PROVIDERS:
             return await self._receive_google(provider, headers, raw_body, query_params or {})
 
         if not integration.verify_webhook(headers, raw_body, _secret_for(provider)):
@@ -133,12 +133,13 @@ class WebhooksService:
         if email is None:
             raise ValidationError({"body": "Gmail push body missing emailAddress."})
         async with get_session() as session:
-            resolved = await _repo.resolve_by_account(session, provider, email)
-        if resolved is None:
+            connections = await _repo.resolve_all_by_account(session, provider, email)
+        if not connections:
             # Delivery for a mailbox we no longer track — acknowledge and drop.
             return None
-        source_id, workspace_id = resolved
-        await enqueue("source_sync", workspace_id, source_id)
+        # The same mailbox can be connected in multiple workspaces; sync each one.
+        for source_id, workspace_id in connections:
+            await enqueue("source_sync", workspace_id, source_id)
         return None
 
 

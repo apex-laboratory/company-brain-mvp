@@ -15,8 +15,13 @@ from app.config.settings import settings
 from app.integrations.base import OAuthTokens
 from app.modules.sources.repository import ResolvedState
 from app.modules.sources.service import SourcesService
-from app.shared.errors.app_error import UnauthorizedError, ValidationError
+from app.shared.errors.app_error import (
+    ConfigurationError,
+    UnauthorizedError,
+    ValidationError,
+)
 from app.shared.helpers.crypto import hmac_sign
+from app.shared.middleware.authenticate import AuthContext
 
 
 def _valid_state() -> str:
@@ -108,6 +113,52 @@ async def test_callback_stored_subdomain_wins_over_query_installation_id() -> No
 
     # the malicious query value is ignored; the stored subdomain reaches exchange_code
     assert fake.exchange_code.await_args.kwargs["installation_id"] == "acme"
+
+
+class _NeverConsumeRepo:
+    """Repo that fails the test if the callback tries to consume the state."""
+
+    async def consume_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("state must not be consumed on a consent-cancel callback")
+
+
+async def test_callback_consent_cancel_redirects_without_burning_state() -> None:
+    """A user declining the consent screen (error=access_denied, no code) must get a
+    clean redirect back to the sources page — not a 500 — and the single-use state must
+    stay unconsumed so nothing else breaks if the browser replays the URL."""
+    service = SourcesService(repository=_NeverConsumeRepo())  # type: ignore[arg-type]
+    redirect = await service.handle_callback(
+        "notion", state=_valid_state(), code=None, error="access_denied"
+    )
+    assert redirect == f"{settings.frontend_url}/settings/sources?error=notion"
+
+
+async def test_start_authorization_rejects_unconfigured_provider(monkeypatch) -> None:
+    """With no client credentials configured the flow must 501 up front instead of
+    bouncing the user to the provider with an empty client_id (opaque provider error
+    page + an orphan oauth_states row per attempt)."""
+    # The real settings singleton is frozen; swap the service's module reference for a
+    # stub with empty Slack credentials.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        svc, "settings", SimpleNamespace(slack_client_id="", slack_client_secret="")
+    )
+    auth = AuthContext(user_id="usr_1", workspace_id="wrk_1", role="admin")
+    with pytest.raises(ConfigurationError):
+        await SourcesService().start_authorization(auth, "slack")
+
+
+def test_every_integration_accepts_the_config_kwarg() -> None:
+    """start_authorization always calls ``authorize_url(state, uri, config=...)``; a
+    provider whose signature lacks the kwarg raises TypeError → 500 on every
+    POST /sources/{provider}/authorize (launch blocker: four providers had it)."""
+    from app.integrations import REGISTRY
+
+    for provider, integration in REGISTRY.items():
+        config = {"subdomain": "acme"} if provider == "zendesk" else None
+        url = integration.authorize_url("state-1", "https://api.example.com/cb", config=config)
+        assert isinstance(url, str) and url
 
 
 def test_start_authorization_builds_signed_state_indirectly() -> None:

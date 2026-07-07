@@ -72,6 +72,38 @@ def _page(page_id: str, edited: str, title: str) -> dict:
     }
 
 
+async def test_list_channels_follows_search_pagination(
+    notion: NotionIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # /v1/search caps at 100 per page; a workspace sharing more pages must not have
+    # its channel picker silently truncated at the first page.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/search")
+        body = json.loads(request.content)
+        if body.get("start_cursor") == "CUR2":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [_page("p2", "2026-06-13T10:00:00.000Z", "Page two")],
+                    "has_more": False,
+                    "next_cursor": None,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "results": [_page("p1", "2026-06-12T10:00:00.000Z", "Page one")],
+                "has_more": True,
+                "next_cursor": "CUR2",
+            },
+        )
+
+    _install_transport(monkeypatch, handler)
+    channels = await notion.list_channels("tok")
+    assert [c.external_id for c in channels] == ["p1", "p2"]
+    assert channels[1].name == "Page two"
+
+
 async def test_fetch_since_filters_by_cursor_and_advances(
     notion: NotionIntegration, monkeypatch: pytest.MonkeyPatch
 ) -> None:

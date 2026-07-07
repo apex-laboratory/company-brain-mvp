@@ -29,7 +29,13 @@ from datetime import UTC, datetime, timedelta
 import httpx
 
 from app.integrations import google_common
-from app.integrations.base import ChannelRef, OAuthTokens, RawEvent, RawItem
+from app.integrations.base import (
+    BACKFILL_CURSOR_PREFIX,
+    ChannelRef,
+    OAuthTokens,
+    RawEvent,
+    RawItem,
+)
 from app.shared.helpers.crypto import constant_time_compare
 
 log = logging.getLogger(__name__)
@@ -39,6 +45,10 @@ _SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 _PAGE_SIZE = 100
 _BOOTSTRAP_LOOKBACK_DAYS = 90  # backfill window for the first sweep
 _MAX_CONTENT_BYTES = 5 * 1024 * 1024  # skip downloading binaries/text larger than this
+# Max files fetched (with content) per backfill run before persisting a continuation
+# cursor. Bounds worker memory (each file's text is downloaded and held) so a large
+# Drive can't OOM the worker mid-sweep and restart from zero.
+_BACKFILL_MAX = 200
 
 _FILE_FIELDS = (
     "id,name,mimeType,modifiedTime,webViewLink,size,trashed,"
@@ -76,7 +86,10 @@ class GoogleDriveIntegration:
         return {"Authorization": f"Bearer {access_token}"}
 
     # ── OAuth (delegated to the shared Google helper) ──────────────────────────────
-    def authorize_url(self, state: str, redirect_uri: str) -> str:
+    def authorize_url(
+        self, state: str, redirect_uri: str, *, config: Mapping[str, str] | None = None
+    ) -> str:
+        # ``config`` is unused — Google's authorize endpoint is global.
         return google_common.authorize_url(_SCOPE, state, redirect_uri)
 
     async def exchange_code(
@@ -137,15 +150,35 @@ class GoogleDriveIntegration:
         file = {**file, "_content": await self._content(access_token, file)}
         return RawItem(external_id=file["id"], payload=file)
 
-    async def _backfill(self, access_token: str, lookback_days: int | None = None) -> list[RawItem]:
-        since = (
-            datetime.now(UTC) - timedelta(days=lookback_days or _BOOTSTRAP_LOOKBACK_DAYS)
-        ).replace(microsecond=0)
+    async def _backfill(
+        self,
+        access_token: str,
+        lookback_days: int | None = None,
+        *,
+        since_iso: str | None = None,
+        start_token: str | None = None,
+        page_token: str | None = None,
+    ) -> tuple[list[RawItem], str]:
+        """Backfill recent files, bounded to ``_BACKFILL_MAX`` per run.
+
+        The incremental start token is captured before the first page (so changes during
+        the backfill aren't lost — they reappear on the incremental sweep and dedupe) and
+        carried across chunks. When the per-run cap is hit with more pages left, return a
+        ``BACKFILL_CURSOR_PREFIX`` continuation cursor (``since|startToken|pageToken``) that
+        ``source_sync`` chains; when the window is exhausted, return the plain start token
+        and incremental sync takes over. Bounding each run keeps worker memory in check.
+        """
+        if since_iso is None:
+            since_iso = (
+                datetime.now(UTC) - timedelta(days=lookback_days or _BOOTSTRAP_LOOKBACK_DAYS)
+            ).replace(microsecond=0).isoformat()
+        if start_token is None:
+            start_token = await self._start_page_token(access_token)
+
         items: list[RawItem] = []
-        page_token: str | None = None
-        while True:
+        while len(items) < _BACKFILL_MAX:
             params: dict[str, object] = {
-                "q": f"modifiedTime > '{since.isoformat()}' and trashed = false",
+                "q": f"modifiedTime > '{since_iso}' and trashed = false",
                 "fields": f"nextPageToken, files({_FILE_FIELDS})",
                 "pageSize": _PAGE_SIZE,
                 "orderBy": "modifiedTime",
@@ -160,8 +193,9 @@ class GoogleDriveIntegration:
                 items.append(await self._item_for(access_token, file))
             page_token = data.get("nextPageToken")
             if not page_token:
-                break
-        return items
+                return items, start_token  # backfill complete → incremental takes over
+        # Hit the per-run cap with more pages left — persist a continuation cursor.
+        return items, f"{BACKFILL_CURSOR_PREFIX}{since_iso}|{start_token}|{page_token}"
 
     async def fetch_since(
         self,
@@ -176,11 +210,12 @@ class GoogleDriveIntegration:
         onboarding "how far back?"); it is ignored on incremental syncs.
         """
         if cursor is None:
-            # Capture the start token first so changes during the backfill aren't lost
-            # (they reappear on the next incremental sweep; inserts dedupe).
-            start_token = await self._start_page_token(access_token)
-            items = await self._backfill(access_token, lookback_days)
-            return items, start_token
+            return await self._backfill(access_token, lookback_days)
+        if cursor.startswith(BACKFILL_CURSOR_PREFIX):
+            since_iso, start_token, page_token = cursor[len(BACKFILL_CURSOR_PREFIX):].split("|", 2)
+            return await self._backfill(
+                access_token, since_iso=since_iso, start_token=start_token, page_token=page_token
+            )
 
         items: list[RawItem] = []
         page_token: str | None = cursor

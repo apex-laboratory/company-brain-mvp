@@ -140,6 +140,54 @@ async def test_sync_marks_auth_broken_on_401(monkeypatch: pytest.MonkeyPatch) ->
     assert repo.error_marked is True
 
 
+async def test_sync_rate_limited_403_is_transient_not_auth_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GitHub returns 403 for rate limiting; that must NOT flip the connection to
+    # status='error' (which nothing recovers from) — it re-raises so ARQ retries.
+    class _RateLimited(_FakeIntegration):
+        async def fetch_since(self, token, channel, cursor):  # noqa: ANN001
+            raise httpx.HTTPStatusError(
+                "rate limited",
+                request=httpx.Request("GET", "https://api.github.com/repos/a/b/issues"),
+                response=httpx.Response(403, headers={"x-ratelimit-remaining": "0"}),
+            )
+
+    class _Repo(_FakeRepo):
+        auth_broken: bool | None = None
+
+        async def mark_error(self, session, source_id, *, auth_broken) -> None:  # noqa: ANN001
+            self.error_marked = True
+            self.auth_broken = auth_broken
+
+    repo = _Repo(_state())
+    _wire(monkeypatch, _RateLimited([], None), repo)
+
+    with pytest.raises(httpx.HTTPStatusError):  # re-raised → ARQ retries
+        await job.source_sync({}, "wrk_1", "src_1")
+    assert repo.auth_broken is False  # sync_status flagged, connection NOT bricked
+
+
+async def test_sync_permission_403_still_marks_auth_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 403 with no rate-limit signal is a genuine permission/auth failure.
+    class _Forbidden(_FakeIntegration):
+        async def fetch_since(self, token, channel, cursor):  # noqa: ANN001
+            raise httpx.HTTPStatusError(
+                "forbidden",
+                request=httpx.Request("GET", "https://example.com"),
+                response=httpx.Response(403),
+            )
+
+    repo = _FakeRepo(_state())
+    _wire(monkeypatch, _Forbidden([], None), repo)
+
+    result = await job.source_sync({}, "wrk_1", "src_1")
+    assert result == {"inserted": 0, "error": "auth_broken"}
+    assert repo.error_marked is True
+
+
 class _OpaqueIntegration(_FakeIntegration):
     """A token-cursor provider (like Google) whose cursor is an opaque string."""
 
@@ -174,6 +222,48 @@ async def test_sync_roundtrips_opaque_cursor(monkeypatch: pytest.MonkeyPatch) ->
     assert result == {"inserted": 1}
     assert repo.advanced_cursor == "pageTokenXYZ"  # stored opaque, not parsed
     assert repo.advanced_to is not None  # last_synced_at still bumped for freshness
+
+
+async def test_sync_chains_next_chunk_on_backfill_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An opaque-cursor provider that returns a BACKFILL_CURSOR_PREFIX continuation
+    # cursor must trigger a chained source_sync so a large bootstrap completes without
+    # waiting for the next push/poll.
+    from app.integrations.base import BACKFILL_CURSOR_PREFIX
+
+    continuation = f"{BACKFILL_CURSOR_PREFIX}123|hist-9|pageTok"
+
+    class _Chunked(_FakeIntegration):
+        opaque_cursor = True
+
+        async def fetch_since(self, token, channel, cursor, **kwargs):  # noqa: ANN001, ANN003
+            return self._items, continuation
+
+    state = SyncState(
+        id="src_1",
+        provider="gmail",
+        access_token_enc=encrypt("plain-token").encode(),
+        refresh_token_enc=None,
+        token_expires_at=None,
+        external_account_id="ada@acme.com",
+        last_synced_at=None,
+        sync_cursor=None,
+    )
+    repo = _FakeRepo(state)
+    _wire(monkeypatch, _Chunked([RawItem(external_id="m1", payload={})], None), repo)
+    enqueued: list[tuple] = []
+
+    async def _fake_enqueue(*args, **kwargs):  # noqa: ANN002, ANN003
+        enqueued.append((args, kwargs))
+
+    monkeypatch.setattr(job, "enqueue", _fake_enqueue)
+
+    result = await job.source_sync({}, "wrk_1", "src_1")
+
+    assert result == {"inserted": 1, "backfill": "continues"}
+    assert repo.advanced_cursor == continuation  # continuation persisted first
+    assert enqueued and enqueued[0][0] == ("source_sync", "wrk_1", "src_1")
 
 
 async def test_sync_skips_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:

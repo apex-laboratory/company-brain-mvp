@@ -41,6 +41,14 @@ def test_notion_is_pull_only_in_the_real_registry() -> None:
     assert "slack" not in ps._pull_providers()
 
 
+def test_polling_only_providers_are_registered_pull_only() -> None:
+    # Zendesk/Jira ship polling-first (webhook registration is a follow-up). If either
+    # drops out of the pull set it syncs once at onboarding and then never again.
+    pull = ps._pull_providers()
+    assert "zendesk" in pull
+    assert "jira" in pull
+
+
 @pytest.mark.asyncio
 async def test_enqueues_one_sync_per_connection_with_bucketed_job_id() -> None:
     repo = MagicMock(

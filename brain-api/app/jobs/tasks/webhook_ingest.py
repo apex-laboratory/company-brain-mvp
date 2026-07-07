@@ -34,13 +34,14 @@ async def webhook_ingest(ctx: dict, provider: str, payload: dict) -> dict:
         log.warning("webhook_ingest: %s payload missing account id", provider)
         return {"inserted": 0, "skipped": "no_account"}
 
-    # Resolve owning workspace on a service-role session (no tenant context yet).
+    # Resolve owning workspace(s) on a service-role session (no tenant context yet).
+    # The same account can be connected in multiple workspaces; the event fans out to
+    # each so no workspace is left stale.
     async with get_session() as session:
-        resolved = await _repo.resolve_by_account(session, provider, account_id)
-    if resolved is None:
+        connections = await _repo.resolve_all_by_account(session, provider, account_id)
+    if not connections:
         log.warning("webhook_ingest: no connection for %s/%s", provider, account_id)
         return {"inserted": 0, "skipped": "no_connection"}
-    _source_id, workspace_id = resolved
 
     item = RawItem(external_id=str(payload.get("id", "")), payload=payload)
     try:
@@ -50,13 +51,16 @@ async def webhook_ingest(ctx: dict, provider: str, payload: dict) -> dict:
         log.info("webhook_ingest: %s payload has no ingestible content — skipping", provider)
         return {"inserted": 0, "skipped": "unsupported_event"}
 
-    # Re-open under tenant context to satisfy RLS on the insert.
-    async with get_session() as session:
-        async with run_in_tenant(session, workspace_id, "system", "admin"):
-            inserted = await _repo.insert_event(session, workspace_id, event)
-            await session.commit()
+    inserted = 0
+    for _source_id, workspace_id in connections:
+        # Re-open under each tenant context to satisfy RLS on the insert.
+        async with get_session() as session:
+            async with run_in_tenant(session, workspace_id, "system", "admin"):
+                if await _repo.insert_event(session, workspace_id, event):
+                    inserted += 1
+                await session.commit()
 
-    return {"inserted": int(inserted)}
+    return {"inserted": inserted}
 
 
 def _account_of(provider: str, payload: dict) -> str | None:

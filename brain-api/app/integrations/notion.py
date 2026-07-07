@@ -137,20 +137,36 @@ class NotionIntegration:
 
     # ── fetch ────────────────────────────────────────────────────────────────────
     async def list_channels(self, access_token: str) -> list[ChannelRef]:
-        """List top-level pages and databases the integration can see."""
-        await self._throttle()
-        resp = await http_client().post(
-            f"{_API_BASE}/search",
-            headers=self._headers(access_token),
-            json={"page_size": 100},
-        )
-        resp.raise_for_status()
+        """List every top-level page and database the integration can see.
+
+        ``/v1/search`` is cursor-paginated (100 per page); a workspace can share more
+        than one page, so we follow ``has_more``/``next_cursor`` to the end instead of
+        silently truncating the picker at the first 100.
+        """
         channels: list[ChannelRef] = []
-        for obj in resp.json().get("results", []):
-            name = _title_of(obj) if obj.get("object") == "page" else _rich_text(
-                obj.get("title", [])
+        cursor: str | None = None
+        while True:
+            await self._throttle()
+            body: dict[str, object] = {"page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            resp = await http_client().post(
+                f"{_API_BASE}/search",
+                headers=self._headers(access_token),
+                json=body,
             )
-            channels.append(ChannelRef(external_id=obj["id"], name=name or "(untitled)"))
+            resp.raise_for_status()
+            data = resp.json()
+            for obj in data.get("results", []):
+                name = _title_of(obj) if obj.get("object") == "page" else _rich_text(
+                    obj.get("title", [])
+                )
+                channels.append(ChannelRef(external_id=obj["id"], name=name or "(untitled)"))
+            if not data.get("has_more"):
+                break
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
         return channels
 
     async def fetch_since(

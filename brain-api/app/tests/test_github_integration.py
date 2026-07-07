@@ -38,6 +38,8 @@ def github(monkeypatch: pytest.MonkeyPatch) -> GitHubIntegration:
             github_app_id="123456",
             github_app_private_key=pem,
             github_app_slug="brainite-app",
+            github_app_client_id="Iv1.testclientid",
+            github_app_client_secret="testclientsecret",
         ),
     )
     return GitHubIntegration()
@@ -57,24 +59,93 @@ def test_authorize_url_points_at_install_page(github: GitHubIntegration) -> None
     assert qs["state"] == ["STATE123"]
 
 
-async def test_exchange_code_mints_installation_token(
-    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _ownership_handler(
+    *, user_installations: list[dict], mint_status: int = 201
+):
+    """Transport handler covering the full exchange flow: user-code exchange,
+    /user/installations ownership check, and the installation-token mint."""
+
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "github.com" and request.url.path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "ghu_usertoken"})
+        if request.url.path == "/user/installations":
+            assert request.headers["Authorization"] == "Bearer ghu_usertoken"
+            return httpx.Response(200, json={"installations": user_installations})
         assert request.url.path == "/app/installations/inst-1/access_tokens"
         assert request.headers["Authorization"].startswith("Bearer ")
         return httpx.Response(
-            201,
+            mint_status,
             json={"token": "ghs_installtoken", "expires_at": "2026-06-20T10:00:00Z"},
         )
 
-    _install_transport(monkeypatch, handler)
-    tokens = await github.exchange_code("", "cb", installation_id="inst-1")
+    return handler
+
+
+async def test_exchange_code_mints_installation_token(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_transport(
+        monkeypatch, _ownership_handler(user_installations=[{"id": "inst-1"}])
+    )
+    tokens = await github.exchange_code("code123", "cb", installation_id="inst-1")
     assert tokens.access_token == "ghs_installtoken"
     # The installation_id is stored as the re-mint credential and the account id.
     assert tokens.refresh_token == "inst-1"
     assert tokens.external_account_id == "inst-1"
     assert tokens.expires_at is not None
+
+
+async def test_exchange_code_rejects_foreign_installation(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The authorizing user can see only their own installation; naming a victim's
+    # installation_id must be rejected (cross-tenant takeover guard).
+    _install_transport(
+        monkeypatch, _ownership_handler(user_installations=[{"id": "someone-elses"}])
+    )
+    with pytest.raises(base.ConnectorAuthError):
+        await github.exchange_code("code123", "cb", installation_id="inst-1")
+
+
+async def test_exchange_code_requires_user_code(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No user-authorization code → ownership can't be proven → reject.
+    _install_transport(
+        monkeypatch, _ownership_handler(user_installations=[{"id": "inst-1"}])
+    )
+    with pytest.raises(base.ConnectorAuthError):
+        await github.exchange_code("", "cb", installation_id="inst-1")
+
+
+async def test_exchange_code_requires_oauth_client_config(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without the App OAuth client configured, ownership can't be verified — the
+    # connect must fail closed rather than silently skip the check.
+    monkeypatch.setattr(github_module.settings, "github_app_client_id", "")
+    _install_transport(
+        monkeypatch, _ownership_handler(user_installations=[{"id": "inst-1"}])
+    )
+    with pytest.raises(base.ConnectorAuthError):
+        await github.exchange_code("code123", "cb", installation_id="inst-1")
+
+
+async def test_refresh_skips_ownership_check(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # refresh() re-mints from our own stored installation_id — no user code exists,
+    # and ownership was proven at connect time, so it must not hit the user endpoints.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/app/installations/inst-1/access_tokens"
+        return httpx.Response(
+            201, json={"token": "ghs_fresh", "expires_at": "2026-06-20T10:00:00Z"}
+        )
+
+    _install_transport(monkeypatch, handler)
+    tokens = await github.refresh("inst-1")
+    assert tokens.access_token == "ghs_fresh"
+    assert tokens.refresh_token == "inst-1"
 
 
 async def test_exchange_code_requires_installation_id(github: GitHubIntegration) -> None:
@@ -217,6 +288,31 @@ def test_normalize_maps_pr_and_webhook_envelope(github: GitHubIntegration) -> No
     assert event.source_id == "5"
     assert event.event_type == "issue"
     assert event.url.endswith("/issues/5")
+
+
+def test_normalize_maps_issue_comment_to_the_comment(github: GitHubIntegration) -> None:
+    # An issue_comment delivery carries BOTH the comment and its parent issue; the
+    # comment must win or its text/author are silently replaced by the issue's.
+    envelope = base.RawItem(
+        external_id="",
+        payload={
+            "action": "created",
+            "issue": _issue(5, "2026-06-14T10:00:00Z", "Parent issue"),
+            "comment": {
+                "id": 900,
+                "body": "the actual comment text",
+                "html_url": "https://github.com/acme/repo/issues/5#issuecomment-900",
+                "updated_at": "2026-06-14T11:00:00Z",
+                "user": {"id": 8, "login": "commenter"},
+            },
+            "installation": {"id": 42},
+        },
+    )
+    event = github.normalize(envelope)
+    assert event.event_type == "comment"
+    assert event.source_id == "900"
+    assert "the actual comment text" in event.content
+    assert event.actor["name"] == "commenter"
 
 
 def test_normalize_rejects_non_content_payload(github: GitHubIntegration) -> None:

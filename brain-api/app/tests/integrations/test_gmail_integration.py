@@ -12,8 +12,8 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from app.integrations import base
-from app.integrations import google_common
+from app.integrations import base, google_common
+from app.integrations import gmail as gmail_module
 from app.integrations.gmail import GmailIntegration
 
 _GOOGLE_SETTINGS = SimpleNamespace(
@@ -82,6 +82,48 @@ async def test_fetch_since_bootstrap_reads_profile_history_id(
     items, cursor = await gmail.fetch_since("tok", channel, None)
     assert [i.external_id for i in items] == ["m1"]
     assert cursor == "5000"  # opaque historyId becomes the next cursor
+
+
+async def test_bootstrap_pauses_at_cap_and_resumes_from_continuation_cursor(
+    gmail: GmailIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A mailbox larger than the per-run cap must pause with a continuation cursor
+    # (so the job finishes inside its timeout and the next run resumes) instead of
+    # fetching everything serially and retrying from zero on a timeout.
+    monkeypatch.setattr(gmail_module, "_BACKFILL_MAX", 1)
+    profile_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal profile_calls
+        path = request.url.path
+        if path.endswith("/profile"):
+            profile_calls += 1
+            return httpx.Response(200, json={"historyId": "5000"})
+        if path.endswith("/messages"):
+            if request.url.params.get("pageToken") == "P2":
+                return httpx.Response(200, json={"messages": [{"id": "m2"}]})
+            return httpx.Response(
+                200, json={"messages": [{"id": "m1"}], "nextPageToken": "P2"}
+            )
+        if path.endswith("/messages/m1"):
+            return httpx.Response(200, json=_message("m1", "One", "body 1"))
+        if path.endswith("/messages/m2"):
+            return httpx.Response(200, json=_message("m2", "Two", "body 2"))
+        raise AssertionError(f"unexpected path {path}")
+
+    _install_transport(monkeypatch, handler)
+    channel = base.ChannelRef(external_id="ada@acme.com", name="workspace")
+
+    # Run 1: cap hit → continuation cursor, not the historyId.
+    items, cursor = await gmail.fetch_since("tok", channel, None)
+    assert [i.external_id for i in items] == ["m1"]
+    assert cursor is not None and cursor.startswith(base.BACKFILL_CURSOR_PREFIX)
+
+    # Run 2: resumes at the stored pageToken and finishes → plain historyId cursor.
+    items2, cursor2 = await gmail.fetch_since("tok", channel, cursor)
+    assert [i.external_id for i in items2] == ["m2"]
+    assert cursor2 == "5000"
+    assert profile_calls == 1  # historyId captured once, carried through the chunks
 
 
 async def test_fetch_since_incremental_uses_history(

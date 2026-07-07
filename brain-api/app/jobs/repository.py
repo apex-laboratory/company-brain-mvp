@@ -245,11 +245,18 @@ class JobsRepository:
             )
         )
 
-    async def resolve_by_account(
+    async def resolve_all_by_account(
         self, session: AsyncSession, provider: str, external_account_id: str
-    ) -> tuple[str, str] | None:
-        """Return ``(source_id, workspace_id)`` for a provider account (webhook routing)."""
-        row = (
+    ) -> list[tuple[str, str]]:
+        """Every ``(source_id, workspace_id)`` for a provider account (webhook routing).
+
+        The same provider account (Slack team, Gmail mailbox, GitHub installation) can be
+        connected in more than one workspace. A single webhook delivery must fan out to
+        *all* of them — matching only the first would leave the others permanently stale
+        (push providers are never polled). Runs on a service-role session (no tenant
+        context yet), so it deliberately reads across workspaces.
+        """
+        rows = (
             await session.execute(
                 text(
                     """
@@ -259,8 +266,8 @@ class JobsRepository:
                     """
                 ).bindparams(provider=provider, account=external_account_id)
             )
-        ).first()
-        return (row.id, row.workspace_id) if row else None
+        ).all()
+        return [(r.id, r.workspace_id) for r in rows]
 
     async def list_pollable_connections(
         self, session: AsyncSession, providers: list[str]

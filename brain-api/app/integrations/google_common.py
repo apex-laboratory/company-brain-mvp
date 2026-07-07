@@ -27,6 +27,11 @@ from app.integrations.base import OAuthTokens, http_client
 
 log = logging.getLogger(__name__)
 
+# The Google connectors that deliver via push (Drive changes.watch / Gmail users.watch)
+# and share this OAuth client. Single source of truth so a new Google connector is wired
+# for watch-registration + push routing in one place instead of drifting across call sites.
+GOOGLE_PUSH_PROVIDERS = ("google_drive", "gmail")
+
 _AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _REVOKE_URL = "https://oauth2.googleapis.com/revoke"

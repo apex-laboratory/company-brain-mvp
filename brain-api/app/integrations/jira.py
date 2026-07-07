@@ -154,11 +154,15 @@ class JiraIntegration:
         }
 
     # ── OAuth ──────────────────────────────────────────────────────────────────
-    def authorize_url(self, state: str, redirect_uri: str) -> str:
+    def authorize_url(
+        self, state: str, redirect_uri: str, *, config: Mapping[str, str] | None = None
+    ) -> str:
         """Build the Atlassian 3LO consent URL.
 
         ``audience`` + ``prompt=consent`` are required by Atlassian, and
-        ``offline_access`` (in the scope) is what yields a refresh token.
+        ``offline_access`` (in the scope) is what yields a refresh token. ``config`` is
+        unused — Atlassian's authorize endpoint is global (the cloudId is resolved after
+        the token exchange), so the param exists only to satisfy the protocol.
         """
         query = urlencode(
             {

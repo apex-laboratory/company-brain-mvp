@@ -70,7 +70,9 @@ async def test_start_creates_and_enqueues() -> None:
         sweep, created = await svc.start(_auth())
     assert created is True
     assert sweep.id == _ROW["id"]
-    enqueue.assert_awaited_once_with("onboarding_sweep", "wrk_1", _ROW["id"])
+    enqueue.assert_awaited_once_with(
+        "onboarding_sweep", "wrk_1", _ROW["id"], _job_id=f"onboarding-sweep:{_ROW['id']}"
+    )
 
 
 @pytest.mark.asyncio
@@ -84,6 +86,32 @@ async def test_start_returns_inflight_sweep_without_enqueuing() -> None:
     assert sweep.status == "running"
     repo.create.assert_not_awaited()
     enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_start_reenqueues_stuck_pending_sweep() -> None:
+    # A sweep still 'pending' has never been picked up (its enqueue may have been
+    # dropped — queue.py swallows outages). Calling start again must re-enqueue it,
+    # or onboarding spins on "Building your brain…" forever with no recovery path.
+    repo = MagicMock(find_active=AsyncMock(return_value=dict(_ROW)), create=AsyncMock())
+    svc, enqueue, patches = _service_with(repo)
+    with patches[0], patches[1], patches[2]:
+        sweep, created = await svc.start(_auth())
+    assert created is False
+    repo.create.assert_not_awaited()  # no duplicate sweep row
+    enqueue.assert_awaited_once_with(
+        "onboarding_sweep", "wrk_1", _ROW["id"], _job_id=f"onboarding-sweep:{_ROW['id']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_non_uuid_sweep_id_raises_not_found() -> None:
+    # A non-UUID path param must 404, not surface an asyncpg cast error as a 500.
+    repo = MagicMock(get=AsyncMock(return_value=None))
+    svc, _, patches = _service_with(repo)
+    with patches[0], patches[1], patches[2], pytest.raises(NotFoundError):
+        await svc.get(_auth(), "not-a-uuid")
+    repo.get.assert_not_awaited()  # rejected before any SQL ran
 
 
 @pytest.mark.asyncio
