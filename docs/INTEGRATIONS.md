@@ -173,9 +173,11 @@ Location: {FRONTEND_URL}/settings/sources?connected={provider}
 
 Query params: `state` (required), `code` (optional — a GitHub App install
 redirects with `installation_id` and no `code`), `installation_id` (optional,
-GitHub). The frontend does not call this; it only needs to render the
-`?connected={provider}` landing on `/settings/sources` and refetch the source
-list. Rate limited to `20/minute`.
+GitHub), `error` (optional — set when the user declines the consent screen, e.g.
+`error=access_denied`; the server redirects back to the dashboard cleanly
+instead of attempting a token exchange). The frontend does not call this; it
+only needs to render the `?connected={provider}` landing on `/settings/sources`
+and refetch the source list. Rate limited to `20/minute`.
 
 Errors surfaced during the redirect: `401` if the `state` is invalid, expired,
 or already used.
