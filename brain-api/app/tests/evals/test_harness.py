@@ -199,3 +199,24 @@ def test_boundary_dataset_exercises_no_llm_path() -> None:
     below = [r for r in bnd if r["similarity"] <= SIMILARITY_THRESHOLD]
     assert below, "boundary dataset must include below-threshold NEW cases"
     assert all(r["label"] == "NEW" for r in below)
+
+
+def test_datasets_cover_github_engineering_knowledge() -> None:
+    """The brain extracts engineering knowledge (review policies, deploy rules,
+    rollback thresholds) from GitHub, not just business logic — the eval
+    datasets must measure that, in both classes, in every suite."""
+    rel = load_dataset("relevance")
+    gh = [r for r in rel if r["provider"] == "github"]
+    assert sum(1 for r in gh if r["label"]) >= 4, "need ≥4 relevant github items"
+    assert sum(1 for r in gh if not r["label"]) >= 4, "need ≥4 irrelevant github items"
+
+    # Engineering-flavored boundary cases across all four labels (bnd-15..18).
+    bnd = load_dataset("boundary")
+    eng = [r for r in bnd if r["existing"] and r["existing"]["id"].startswith("skill_g")]
+    assert {r["label"] for r in eng} == {"NEW", "UPDATE", "DUPLICATE", "EXCEPTION"}
+
+    # Engineering contradiction pairs in both classes (con-11..14).
+    con = load_dataset("contradiction")
+    eng_ids = {"con-11", "con-12", "con-13", "con-14"}
+    eng_con = [r for r in con if r["id"] in eng_ids]
+    assert {r["label"] for r in eng_con} == {True, False}

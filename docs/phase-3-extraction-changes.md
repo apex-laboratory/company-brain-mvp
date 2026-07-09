@@ -176,6 +176,23 @@ migrations to head the same way, then add `E2E_ALLOW_REMOTE=1` (the suite TRUNCA
 tables, so this must never point at real data). As of 2026-07-10 the project
 `zimxokenvfsovnmnyesf` is paused/unreachable — restore it from the dashboard first.
 
+### GitHub / engineering knowledge coverage (2026-07-10)
+
+The pipeline is provider-agnostic by design — the relevance-gate prompt explicitly
+includes "code discussion", GitHub is a threaded provider (LLM decision-identifier
+pass), and it has a comments expander — so engineering rules (review policies, deploy
+freezes, rollback thresholds) extract exactly like business logic. Now verified:
+
+- **E2E** `test_github_knowledge_sweep`: a bare issue, an `issue_comment` webhook
+  envelope, and a PR flow through the sweep. Confirms engineering skills land in the
+  review queue provider-tagged `github` with the YAML authority tier, a comment
+  restating a pending rule dedupes DUPLICATE, and the comment's *own* text is what
+  gets ingested (the parent issue in the envelope carries no decision — reaching
+  DUPLICATE proves the PR #9 comment-unwrap fix end-to-end).
+- **Eval datasets** extended with engineering items in both classes of every suite:
+  relevance 24→32 (12 GitHub items), boundary 14→18 (all four labels), contradiction
+  10→14. A dataset-validity test pins this coverage so it can't silently regress.
+
 **Real bug found by the suite:** `GET /reviews` with no filters 500'd —
 `ReviewsRepository.list` bound NULL `status`/`kind` params without casts, and asyncpg
 can't infer NULL parameter types (`AmbiguousParameterError`). Unit tests stubbed the

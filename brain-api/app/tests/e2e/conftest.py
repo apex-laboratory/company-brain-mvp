@@ -197,6 +197,8 @@ tiers:
     sources:
       - type: slack
         signals: []
+      - type: github
+        signals: []
 routing: {}
 sweep:
   rate_per_minute: 60000

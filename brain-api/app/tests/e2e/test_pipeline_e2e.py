@@ -27,6 +27,7 @@ from sqlalchemy import text
 
 from app.config.database import get_session
 from app.integrations.base import RawItem
+from app.integrations.github import GitHubIntegration
 from app.integrations.slack import SlackIntegration
 from app.jobs.repository import JobsRepository
 from app.jobs.tasks.extract_event import extract_event
@@ -37,6 +38,7 @@ WS = "wrk_e2e"
 USER = "usr_e2e"
 
 _slack = SlackIntegration()
+_github = GitHubIntegration()
 _jobs = JobsRepository()
 
 
@@ -328,6 +330,143 @@ async def test_sweep_to_approval_full_flow(e2e_stubs: dict, api: AsyncClient) ->
     stats = resp.json()["data"]
     assert stats["approved"] == 2 and stats["rejected"] == 1
     assert stats["rejectionRate"] == pytest.approx(1 / 3, abs=1e-3)
+
+
+# ── GitHub knowledge extraction ───────────────────────────────────────────────
+def _github_issue(
+    issue_id: int, title: str, body: str, *, updated: str, pr: bool = False
+) -> dict:
+    """A bare issue/PR object as the polling ``/issues`` endpoint returns it."""
+    obj = {
+        "id": issue_id,
+        "number": issue_id,
+        "title": title,
+        "body": body,
+        "html_url": f"https://github.com/acme/platform/issues/{issue_id}",
+        "updated_at": updated,
+        "created_at": updated,
+        "user": {"id": 7, "login": "octocat"},
+    }
+    if pr:
+        obj["pull_request"] = {"url": "https://api.github.com/..."}
+    return obj
+
+
+def _github_comment_envelope(issue: dict, comment_id: int, body: str, updated: str) -> dict:
+    """An ``issue_comment`` webhook delivery: parent issue + the comment."""
+    return {
+        "action": "created",
+        "issue": issue,
+        "comment": {
+            "id": comment_id,
+            "body": body,
+            "html_url": f"{issue['html_url']}#issuecomment-{comment_id}",
+            "updated_at": updated,
+            "user": {"id": 9, "login": "review-lead"},
+        },
+        "installation": {"id": 42},
+    }
+
+
+async def _ingest_github(payload: dict, sweep_id: str | None) -> str:
+    event = _github.normalize(RawItem(external_id="", payload=payload))
+    async with get_session() as session:
+        event_id = await _jobs.insert_event(session, WS, event, sweep_id=sweep_id)
+        await session.commit()
+    assert event_id, "seed event unexpectedly deduplicated"
+    return event_id
+
+
+async def test_github_knowledge_sweep(e2e_stubs: dict) -> None:
+    """Engineering knowledge from GitHub flows through the same pipeline as
+    business content: issues, PRs, and issue_comment deliveries all become
+    skills, and a comment restating a pending rule dedupes against it."""
+    await _reset_db()
+    sweep_id = await _seed_workspace()
+
+    # G1 — engineering policy stated in an issue → NEW review-status skill.
+    g1 = await _ingest_github(
+        _github_issue(
+            101,
+            "Codify the auth-review rule",
+            "DECISION: any PR touching the auth middleware requires a second "
+            "reviewer from the platform team. "
+            + _skill_marker(
+                "Auth middleware review rule",
+                "PRs touching auth middleware need a second platform-team reviewer. "
+                "vec=authreview:1.0 BOUNDARY=NEW",
+            ),
+            updated="2026-07-01T10:00:00Z",
+        ),
+        sweep_id,
+    )
+
+    # G2 — an issue_comment delivery restating the same rule. The parent issue
+    # body carries NO markers, so if normalize resolved to the issue instead of
+    # the comment (the PR #9 unwrap bug) the gate would discard this event —
+    # reaching DUPLICATE proves the comment's text is what got ingested.
+    parent = _github_issue(
+        102, "Follow-up question", "just checking process", updated="2026-07-01T11:00:00Z"
+    )
+    g2 = await _ingest_github(
+        _github_comment_envelope(
+            parent,
+            9001,
+            "DECISION: reminder — auth middleware changes need a platform reviewer. "
+            + _skill_marker(
+                "Auth review restated",
+                "Auth middleware PRs require a platform-team reviewer. "
+                "vec=authreview:0.95 BOUNDARY=DUPLICATE",
+            ),
+            updated="2026-07-01T12:00:00Z",
+        ),
+        sweep_id,
+    )
+
+    # G3 — a PR describing an unrelated engineering rule → its own NEW skill.
+    g3 = await _ingest_github(
+        _github_issue(
+            103,
+            "Add auto-rollback to the deploy pipeline",
+            "DECISION: if the error rate exceeds 5% within 10 minutes of a deploy, "
+            "the deploy auto-rolls back and pages the on-call. "
+            + _skill_marker(
+                "Deploy auto-rollback rule",
+                "Error rate >5% within 10m of deploy triggers auto-rollback and "
+                "pages on-call. vec=rollback:1.0 BOUNDARY=NEW",
+            ),
+            updated="2026-07-02T09:00:00Z",
+            pr=True,
+        ),
+        sweep_id,
+    )
+
+    tally = await sweep_extract({}, WS, sweep_id)
+    assert tally["processed"] == 3
+    assert tally["review"] == 2 and tally["duplicates"] == 1 and tally["failed"] == 0
+
+    # G1: an engineering skill, provider-tagged github, embedded, review status.
+    row1 = await _event_row(g1)
+    assert row1["outcome"] == "review"
+    skill1 = await _one(
+        "SELECT status, source_providers, source_authority, "
+        "embedding IS NOT NULL AS has_vec FROM skills WHERE id = :id",
+        id=row1["skill_id"],
+    )
+    assert skill1["status"] == "review"
+    assert "github" in skill1["source_providers"]
+    assert skill1["source_authority"] == "high"  # from the authority YAML
+    assert skill1["has_vec"] is True
+
+    # G2: the comment (not its parent issue) deduped against G1's pending skill.
+    row2 = await _event_row(g2)
+    assert row2["outcome"] == "duplicate"
+    assert row2["skill_id"] == row1["skill_id"]
+
+    # G3: a distinct engineering skill from a PR.
+    row3 = await _event_row(g3)
+    assert row3["outcome"] == "review"
+    assert row3["skill_id"] != row1["skill_id"]
 
 
 async def test_live_path_auto_publishes_at_high_confidence(e2e_stubs: dict) -> None:
