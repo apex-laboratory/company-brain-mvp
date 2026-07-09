@@ -1,6 +1,6 @@
 # Phase 3 — Extraction Pipeline: Change Log
 
-Branch: `feature/phase-3-extraction` · Commits: `471ad5b` → `487378d` · Tests: **474 passing, ruff clean**
+Branch: `feature/phase-3-extraction` · Commits: `471ad5b` → HEAD · Tests: **483 unit + 2 E2E passing, ruff clean**
 
 Phase 3 turns ingested `source_events` into published/reviewable **skills** via a
 6-step LLM pipeline (PRD Features 8–10): relevance gate → context expansion →
@@ -122,6 +122,69 @@ Conflict resolutions worth knowing:
 - **Alembic** — Phase 3's `pipeline_deadletter` migration renumbered `0013 → 0014`
   (main's `0013` `NULLS NOT DISTINCT` migration is published). Chain verified linear,
   single head `0014`.
+
+## M6 — Synthetic validation dataset + eval harness (2026-07-10)
+
+The last unbuilt PRD deliverable: **extraction quality measured, not assumed**.
+
+- **`brain-api/evals/`** — labeled synthetic datasets + a runner that executes the
+  *real* stage functions (real prompts, real LLM calls) and scores them against the
+  PRD gates:
+  | Dataset | Items | Metric | PRD gate |
+  |---|---|---|---|
+  | `datasets/relevance.jsonl` | 24 (12 relevant / 12 chatter, 6 providers) | precision (+recall/accuracy) | **precision ≥ 70%** |
+  | `datasets/boundary.jsonl` | 14 (all 4 labels incl. below-threshold no-LLM NEW cases) | accuracy + per-label recall | reported, not gated |
+  | `datasets/contradiction.jsonl` | 10 (5 conflicts / 5 refinements) | recall (+precision) | **recall ≥ 80%** |
+- **CLI**: `cd brain-api && python -m evals` (or `--suite relevance --json`); exits
+  non-zero when a gate fails — this is the regression suite for every prompt change.
+  Requires real `GROQ_API_KEY`/`ANTHROPIC_API_KEY` (it measures prompt quality; there
+  is nothing meaningful to run against mocks).
+- **Harness logic unit-tested** with fakes (`app/tests/evals/`): metric math, gate
+  evaluation, error-counts-as-miss, the boundary no-LLM path, dataset validity.
+- Rejection-rate instrumentation (PRD §15's third gate, ≤ 25%) already ships via
+  `GET /reviews/stats` (M5).
+
+## End-to-end acceptance suite (2026-07-10)
+
+`app/tests/e2e/` — the full Phase 3 acceptance run against a **real
+Postgres+pgvector** with all migrations applied. Everything is real (ingest via the
+Slack connector, `sweep_extract`/`extract_event`, orchestrator, stages, retry/backoff,
+JSON reprompt, pgvector HNSW boundary search, reviews HTTP API); only the outermost
+LLM/embedding transports are scripted via a marker DSL (see `e2e/conftest.py`).
+
+Covered PRD acceptance criteria, all passing:
+- sweep produces review-queue skills; nothing auto-publishes during a sweep
+- restated policy classified **DUPLICATE against a still-pending skill** (sweep scope)
+- contradiction detected on the UPDATE route → review card with **both sources populated**
+- every written skill has a non-null 1536-dim embedding
+- forced transient LLM failure (429) retried by the real backoff and succeeds
+- forced permanent failure dead-letters (`outcome='failed'`, attempts+1, error meta)
+  and is visible in `sweeps.progress['extraction'].failed`
+- per-event stage costs + per-sweep `cost_usd` rollup reported
+- approve (new_decision → active + v1; contradiction → v2 re-embedded logic swap),
+  reject (demotes review skill to draft), double-resolve 409, stats rejection rate
+- non-sweep path: confidence ≥ 0.90 at ≥ medium authority auto-publishes with no review
+
+Run it (see `e2e/conftest.py` header for the full recipe):
+
+    docker run -d --name brain-e2e-pg -e POSTGRES_PASSWORD=e2e -p 55432:5432 pgvector/pgvector:pg16
+    DATABASE_URL=postgresql+asyncpg://postgres:e2e@localhost:55432/postgres python -m alembic upgrade head
+    E2E=1 DATABASE_URL=postgresql+asyncpg://postgres:e2e@localhost:55432/postgres python -m pytest app/tests/e2e/ -q
+
+To run against the Supabase project instead (pre-launch, no live data): bring its
+migrations to head the same way, then add `E2E_ALLOW_REMOTE=1` (the suite TRUNCATEs
+tables, so this must never point at real data). As of 2026-07-10 the project
+`zimxokenvfsovnmnyesf` is paused/unreachable — restore it from the dashboard first.
+
+**Real bug found by the suite:** `GET /reviews` with no filters 500'd —
+`ReviewsRepository.list` bound NULL `status`/`kind` params without casts, and asyncpg
+can't infer NULL parameter types (`AmbiguousParameterError`). Unit tests stubbed the
+repository, so only the E2E run caught it. Fixed with explicit `CAST(... AS text)` in
+the NULL checks.
+
+The fresh-database migration run (`alembic upgrade head`, 0001→0014) is itself part
+of the validation: it required shimming Supabase's `auth.uid()` (created by the
+platform, referenced by migration 0002) — documented in the E2E recipe.
 
 ## Architectural invariants (hold these in future work)
 

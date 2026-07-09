@@ -38,8 +38,10 @@ class ReviewsRepository:
                 text(
                     f"""
                     SELECT {_COLUMNS} FROM reviews
-                     WHERE (:status IS NULL OR status = CAST(:status AS review_status))
-                       AND (:kind IS NULL OR kind = CAST(:kind AS review_kind))
+                     WHERE (CAST(:status AS text) IS NULL
+                            OR status = CAST(:status AS review_status))
+                       AND (CAST(:kind AS text) IS NULL
+                            OR kind = CAST(:kind AS review_kind))
                      ORDER BY (kind = 'contradiction') DESC, created_at DESC
                      LIMIT :limit
                     """
