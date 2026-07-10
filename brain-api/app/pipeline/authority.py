@@ -23,6 +23,7 @@ from app.config.settings import settings
 log = logging.getLogger(__name__)
 
 _DEFAULT_WEIGHTS = {"high": 1.0, "medium": 0.7, "low": 0.4}
+_DEFAULT_ORDER = ["notion", "google_drive", "gmail", "github", "jira", "slack", "zendesk"]
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,6 @@ class RoutingConfig:
 class SweepConfig:
     rate_per_minute: int = 10
     semaphore_limit: int = 5
-    auto_publish_during_sweep: bool = False
 
 
 class AuthorityAnnotator:
@@ -92,15 +92,22 @@ class AuthorityAnnotator:
             ),
         )
 
+    def processing_order(self) -> list[str]:
+        """Provider names in sweep priority order (always includes every known
+        provider — ones the YAML omits are appended in the built-in default order).
+
+        Same parsed config + fail-soft policy as the rest of this loader, so the
+        sweep order and the authority tiers can't disagree about the file's state."""
+        sweep = self._config.get("sweep") or {}
+        order = [str(p) for p in (sweep.get("processing_order") or [])]
+        return order + [p for p in _DEFAULT_ORDER if p not in order]
+
     def sweep_config(self) -> SweepConfig:
         sweep = self._config.get("sweep") or {}
         defaults = SweepConfig()
         return SweepConfig(
             rate_per_minute=int(sweep.get("rate_per_minute", defaults.rate_per_minute)),
             semaphore_limit=int(sweep.get("semaphore_limit", defaults.semaphore_limit)),
-            auto_publish_during_sweep=bool(
-                sweep.get("auto_publish_during_sweep", defaults.auto_publish_during_sweep)
-            ),
         )
 
     # ── private ─────────────────────────────────────────────────────────────
@@ -118,7 +125,9 @@ class AuthorityAnnotator:
         if key == "path_prefix":
             return str(payload.get("path", "")).startswith(value)
         if key == "tag":
-            return value in payload.get("tags", [])
+            # `or []` guards an explicit `"tags": null` (fail-soft: fall through to
+            # tier low, never TypeError → dead-letter the whole event).
+            return value in (payload.get("tags") or [])
         return str(payload.get(key, "")).lower() == value.lower()
 
 
@@ -144,3 +153,7 @@ def routing_config() -> RoutingConfig:
 
 def sweep_config() -> SweepConfig:
     return get_annotator().sweep_config()
+
+
+def processing_order() -> list[str]:
+    return get_annotator().processing_order()

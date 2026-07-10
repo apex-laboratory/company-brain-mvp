@@ -1,13 +1,12 @@
 """Unit tests for app/pipeline/stages/skill_writer.py — routing table + write paths."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.pipeline.authority import RoutingConfig
 from app.pipeline.repository import SimilarSkill
-from app.pipeline.stages import skill_writer
 from app.pipeline.stages.skill_writer import (
     next_version,
     route,
@@ -81,35 +80,33 @@ def _repo() -> MagicMock:
     )
 
 
-async def test_published_path_writes_version_and_invalidates() -> None:
+async def test_published_path_writes_version() -> None:
     repo = _repo()
-    with patch.object(skill_writer.cache, "invalidate_skills", AsyncMock()) as inval:
-        result = await write_new_skill(
-            MagicMock(), repo,
-            workspace_id="wrk_1", event_id="evt_1", sweep_id=None,
-            provider="notion", source_url="http://x", draft=_draft(),
-            embedding=[0.0] * 1536, confidence=0.95, authority="high",
-            sweep_sourced=False, routing=_ROUTING, evidence=None,
-        )
+    result = await write_new_skill(
+        MagicMock(), repo,
+        workspace_id="wrk_1", event_id="evt_1", sweep_id=None,
+        provider="notion", source_url="http://x", draft=_draft(),
+        embedding=[0.0] * 1536, confidence=0.95, authority="high",
+        sweep_sourced=False, routing=_ROUTING, evidence=None,
+    )
     assert result.outcome == "published"
     assert result.skill_id == "skl_1"
     repo.insert_skill.assert_awaited_once()
     repo.insert_skill_version.assert_awaited_once()
     repo.insert_review.assert_not_awaited()
-    inval.assert_awaited_once_with("wrk_1")
+    # Cache invalidation now happens post-commit in the orchestrator, not here.
 
 
 async def test_review_path_writes_review_row_and_bumps_sweep() -> None:
     repo = _repo()
     evidence = DecisionMoment("m1", "Lead", "t1", "Refund within 30 days")
-    with patch.object(skill_writer.cache, "invalidate_skills", AsyncMock()):
-        result = await write_new_skill(
-            MagicMock(), repo,
-            workspace_id="wrk_1", event_id="evt_1", sweep_id="swp_1",
-            provider="slack", source_url="http://x", draft=_draft(),
-            embedding=[0.0] * 1536, confidence=0.80, authority="medium",
-            sweep_sourced=True, routing=_ROUTING, evidence=evidence,
-        )
+    result = await write_new_skill(
+        MagicMock(), repo,
+        workspace_id="wrk_1", event_id="evt_1", sweep_id="swp_1",
+        provider="slack", source_url="http://x", draft=_draft(),
+        embedding=[0.0] * 1536, confidence=0.80, authority="medium",
+        sweep_sourced=True, routing=_ROUTING, evidence=evidence,
+    )
     assert result.outcome == "review"
     assert result.review_id == "rev_1"
     repo.insert_skill_version.assert_not_awaited()  # version row created on approve
@@ -160,21 +157,19 @@ async def test_duplicate_appends_source_and_stops() -> None:
 async def test_update_published_mutates_skill_and_versions() -> None:
     repo = _repo()
     repo.update_skill_logic = AsyncMock()
-    with patch.object(skill_writer.cache, "invalidate_skills", AsyncMock()) as inval:
-        result = await write_update(
-            MagicMock(), repo,
-            workspace_id="wrk_1", provider="notion", source_url="http://x",
-            matched=_match("v1"), draft=_draft(), embedding=[0.0] * 1536,
-            confidence=0.95, authority="high", sweep_sourced=False, sweep_id=None,
-            routing=_ROUTING, evidence=None,
-        )
+    result = await write_update(
+        MagicMock(), repo,
+        workspace_id="wrk_1", provider="notion", source_url="http://x",
+        matched=_match("v1"), draft=_draft(), embedding=[0.0] * 1536,
+        confidence=0.95, authority="high", sweep_sourced=False, sweep_id=None,
+        routing=_ROUTING, evidence=None,
+    )
     assert result.outcome == "published"
     # New version row + logic mutation to v2; no review row on the publish branch.
     assert repo.insert_skill_version.await_args.kwargs["version"] == "v2"
     assert repo.insert_skill_version.await_args.kwargs["change_type"] == "update"
     repo.update_skill_logic.assert_awaited_once()
     repo.insert_review.assert_not_awaited()
-    inval.assert_awaited_once()
 
 
 async def test_update_review_branch_does_not_mutate_skill() -> None:
@@ -197,13 +192,12 @@ async def test_exception_published_appends_and_keeps_base_logic() -> None:
     repo = _repo()
     repo.apply_exception = AsyncMock()
     draft = SkillDraft("R", "t", "b", [{"condition": "gov", "action": "waive"}], [], 0.9)
-    with patch.object(skill_writer.cache, "invalidate_skills", AsyncMock()):
-        result = await write_exception(
-            MagicMock(), repo,
-            workspace_id="wrk_1", provider="notion", source_url="",
-            matched=_match(), draft=draft, confidence=0.95, authority="high",
-            sweep_sourced=False, sweep_id=None, routing=_ROUTING, evidence=None,
-        )
+    result = await write_exception(
+        MagicMock(), repo,
+        workspace_id="wrk_1", provider="notion", source_url="",
+        matched=_match(), draft=draft, confidence=0.95, authority="high",
+        sweep_sourced=False, sweep_id=None, routing=_ROUTING, evidence=None,
+    )
     assert result.outcome == "published"
     # Existing carve-out preserved + the new one appended (base_logic untouched).
     applied = repo.apply_exception.await_args.kwargs["exceptions_block"]

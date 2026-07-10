@@ -15,9 +15,9 @@ import logging
 from app.config.database import get_session
 from app.integrations import get_integration
 from app.integrations.base import RawEvent, RawItem
-from app.jobs.token_helper import token_for_provider
+from app.jobs.token_helper import token_for_connection, token_for_provider
 from app.pipeline import authority as authority_mod
-from app.pipeline import confidence_scorer, embedder
+from app.pipeline import cache, confidence_scorer, embedder
 from app.pipeline.expanders import ExpandRequest, get_expander, needs_expansion
 from app.pipeline.repository import EventRow, PipelineRepository, SimilarSkill
 from app.pipeline.stages import (
@@ -66,7 +66,14 @@ async def _expand(event: EventRow, raw: RawEvent) -> tuple[str, str | None]:
     if not needs_expansion(event.provider):
         return raw.content, None
     try:
-        creds = await token_for_provider(event.workspace_id, event.provider)
+        # Resolve the token from the connection that produced the event (stamped at
+        # ingest). Legacy rows without it fall back to first-connection-per-provider.
+        if event.source_connection_id:
+            creds = await token_for_connection(
+                event.workspace_id, event.source_connection_id
+            )
+        else:
+            creds = await token_for_provider(event.workspace_id, event.provider)
         if creds is None:
             return raw.content, "no_connection"
         token, account_id = creds
@@ -160,6 +167,12 @@ async def _commit(
             pipeline_meta=meta,
         )
         await session.commit()
+    # Invalidate AFTER the commit, never before: an invalidation inside the write
+    # transaction lets a concurrent reader miss the cache, read the still-committed
+    # old skill, and repopulate it — serving the superseded rule until TTL. It also
+    # keeps Redis I/O out of the pooled DB connection's transaction.
+    if result.outcome == "published":
+        await cache.invalidate_skills(event.workspace_id)
     return result
 
 
@@ -180,9 +193,7 @@ async def _route(
 ) -> PipelineResult:
     """Dispatch a scored draft by its boundary classification."""
     ws = event.workspace_id
-    confidence = confidence_scorer.score(
-        draft.extraction_confidence, annotation.tier, sweep_sourced=sweep_sourced
-    )
+    confidence = confidence_scorer.score(draft.extraction_confidence, annotation.tier)
 
     # DUPLICATE: record the event as another source of the matched skill, stop.
     if boundary.classification == "DUPLICATE" and matched is not None:

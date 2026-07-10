@@ -209,6 +209,7 @@ async def test_sweep_to_approval_full_flow(e2e_stubs: dict, api: AsyncClient) ->
     assert tally == {
         "processed": 6, "published": 0, "review": 2, "draft": 0,
         "discarded": 1, "duplicates": 1, "contradictions": 1, "failed": 1,
+        "queued_remaining": 0,  # all six processed in one run → no continuation
     }
 
     # E1: review-status skill with a non-null embedding.

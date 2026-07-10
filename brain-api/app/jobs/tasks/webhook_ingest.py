@@ -53,11 +53,13 @@ async def webhook_ingest(ctx: dict, provider: str, payload: dict) -> dict:
         return {"inserted": 0, "skipped": "unsupported_event"}
 
     inserted = 0
-    for _source_id, workspace_id in connections:
+    for source_id, workspace_id in connections:
         # Re-open under each tenant context to satisfy RLS on the insert.
         async with get_session() as session:
             async with run_in_tenant(session, workspace_id, "system", "admin"):
-                event_id = await _repo.insert_event(session, workspace_id, event)
+                event_id = await _repo.insert_event(
+                    session, workspace_id, event, source_connection_id=source_id
+                )
                 await session.commit()
         if event_id:
             inserted += 1

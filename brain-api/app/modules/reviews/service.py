@@ -72,17 +72,37 @@ class ReviewsService:
         self, auth: AuthContext, review_id: str, comment: str | None
     ) -> ResolveResult:
         workspace_id, role = _require_workspace(auth)
+
+        # Phase 1 (no write lock): read the pending review + skill and do any
+        # network I/O (re-embedding) OUTSIDE a transaction — an embedding call must
+        # never hold a pooled connection / open tenant transaction (orchestrator
+        # rule), or an OpenAI outage pins them for the whole retry window.
         async with get_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             review = await self._load_pending(session, review_id)
             skill_id = review["skill_id"]
+            skill = await self._skills.get_skill(session, skill_id) if skill_id else None
+
+        embedding: list[float] | None = None
+        if skill is not None and review["kind"] in ("policy_change", "contradiction"):
+            new_logic = review["after_text"] or skill["base_logic"]
+            embedding, _ = await embedder.embed_text(f"{skill['trigger']}\n{new_logic}")
+
+        # Phase 2 (write): lock the review row so a concurrent approve/reject
+        # serializes behind us and then sees the resolved status (no double-apply).
+        async with get_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            review = await self._load_pending(session, review_id, for_update=True)
             if skill_id:
-                await self._apply_approval(session, review)
-            await self._repo.resolve(
+                await self._apply_approval(session, review, embedding=embedding)
+            resolved = await self._repo.resolve(
                 session, review_id, status="approved", verdict="approve",
                 comment=comment, resolved_by=auth.user_id, resolved_at=datetime.now(UTC),
             )
+            if not resolved:
+                raise ConflictError("Review already resolved.")
             await session.commit()
         if skill_id:
             await cache.invalidate_skills(workspace_id)
@@ -95,7 +115,7 @@ class ReviewsService:
         async with get_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
-            review = await self._load_pending(session, review_id)
+            review = await self._load_pending(session, review_id, for_update=True)
             skill_id = review["skill_id"]
             # Only a new_decision's own review-status skill is demoted; UPDATE/
             # EXCEPTION/contradiction never mutated the live skill, so leave it.
@@ -103,25 +123,34 @@ class ReviewsService:
                 skill = await self._skills.get_skill(session, skill_id)
                 if skill and skill["status"] == "review":
                     await self._skills.set_skill_status(session, skill_id, "draft")
-            await self._repo.resolve(
+            resolved = await self._repo.resolve(
                 session, review_id, status="rejected", verdict="reject",
                 comment=comment, resolved_by=auth.user_id, resolved_at=datetime.now(UTC),
             )
+            if not resolved:
+                raise ConflictError("Review already resolved.")
             await session.commit()
         return ResolveResult(id=review_id, status="rejected", verdict="reject", skill_id=skill_id)
 
     # ── internals ──────────────────────────────────────────────────────────────
 
-    async def _load_pending(self, session, review_id: str) -> dict:
-        review = await self._repo.get(session, review_id)
+    async def _load_pending(
+        self, session, review_id: str, *, for_update: bool = False
+    ) -> dict:
+        review = await self._repo.get(session, review_id, for_update=for_update)
         if review is None:
             raise NotFoundError("Review")
         if review["status"] != "pending":
             raise ConflictError(f"Review already {review['status']}.")
         return review
 
-    async def _apply_approval(self, session, review: dict) -> None:
-        """Mutate the skill per review kind (skill_id known to be set)."""
+    async def _apply_approval(
+        self, session, review: dict, *, embedding: list[float] | None
+    ) -> None:
+        """Mutate the skill per review kind (skill_id known to be set).
+
+        ``embedding`` is precomputed by the caller for the policy_change/
+        contradiction kinds (network I/O must stay out of this transaction)."""
         kind = review["kind"]
         skill_id = review["skill_id"]
         skill = await self._skills.get_skill(session, skill_id)
@@ -130,19 +159,21 @@ class ReviewsService:
         ws = skill["workspace_id"]
 
         if kind == "new_decision":
-            # Skill already holds the extracted logic; confirm it (v1 version + activate).
+            # Skill already holds the extracted logic; confirm it (v1 version +
+            # activate) and raise its confidence to the human-approved 1.0.
             await self._skills.insert_skill_version(
                 session, workspace_id=ws, skill_id=skill_id, version=skill["version"] or "v1",
                 base_logic=skill["base_logic"], exceptions_block=skill["exceptions_block"] or [],
                 confidence=_HUMAN_CONFIDENCE, change_type="create",
             )
-            await self._skills.set_skill_status(session, skill_id, "active")
+            await self._skills.set_skill_status(
+                session, skill_id, "active", confidence=_HUMAN_CONFIDENCE
+            )
 
         elif kind in ("policy_change", "contradiction"):
             # Apply the proposed base_logic (after_text) as a new version + re-embed.
             new_logic = review["after_text"] or skill["base_logic"]
             new_version = next_version(skill["version"])
-            embedding, _ = await embedder.embed_text(f"{skill['trigger']}\n{new_logic}")
             await self._skills.insert_skill_version(
                 session, workspace_id=ws, skill_id=skill_id, version=new_version,
                 base_logic=new_logic, exceptions_block=skill["exceptions_block"] or [],
@@ -155,9 +186,18 @@ class ReviewsService:
             )
 
         elif kind == "exception":
-            proposed = ((review.get("payload") or {}).get("proposed_skill") or {}).get(
-                "exceptions"
-            ) or []
+            proposed_skill = (review.get("payload") or {}).get("proposed_skill") or {}
+            proposed = proposed_skill.get("exceptions") or []
+            if not proposed:
+                # Mirror skill_writer.write_exception's auto-publish fallback so an
+                # EXCEPTION with no explicit carve-outs still records one on approve
+                # instead of silently dropping the boundary the pipeline detected.
+                proposed = [
+                    {
+                        "condition": proposed_skill.get("trigger") or skill["trigger"],
+                        "action": proposed_skill.get("base_logic") or skill["base_logic"],
+                    }
+                ]
             new_exceptions = (skill["exceptions_block"] or []) + proposed
             new_version = next_version(skill["version"])
             await self._skills.insert_skill_version(

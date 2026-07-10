@@ -23,7 +23,8 @@ _USAGE = StageUsage(stage="s", model="m", input_tokens=1, output_tokens=1, cost_
 def _event(processed: bool = False, sweep_id: str | None = None) -> EventRow:
     return EventRow(
         id="evt_1", workspace_id="wrk_1", provider="slack", event_type="message",
-        source_id="c1", external_event_id="c1:1", payload={"channel": "policy"},
+        source_id="c1", external_event_id="c1:1", source_connection_id="src_1",
+        payload={"channel": "policy"},
         processed=processed, sweep_id=sweep_id, attempts=0,
         created_at=datetime(2026, 7, 1, tzinfo=UTC),
     )
@@ -111,6 +112,33 @@ async def test_happy_path_writes_skill_and_finalizes(wired, monkeypatch) -> None
     final = wired.finalize_event.await_args
     assert final.kwargs["outcome"] == "review"
     assert final.kwargs["pipeline_meta"]["costs"]["total_usd"] > 0
+
+
+async def test_published_outcome_invalidates_cache_after_commit(wired, monkeypatch) -> None:
+    await _mock_stages(monkeypatch)
+    writer = AsyncMock(return_value=PipelineResult(outcome="published", skill_id="skl_1"))
+    monkeypatch.setattr(orchestrator.skill_writer, "write_new_skill", writer)
+    inval = AsyncMock()
+    monkeypatch.setattr(orchestrator.cache, "invalidate_skills", inval)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "published"
+    # Invalidation runs post-commit (finalize happened first) and only on publish.
+    wired.finalize_event.assert_awaited_once()
+    inval.assert_awaited_once_with("wrk_1")
+
+
+async def test_review_outcome_does_not_invalidate_cache(wired, monkeypatch) -> None:
+    await _mock_stages(monkeypatch)
+    writer = AsyncMock(return_value=PipelineResult(outcome="review", skill_id="skl_1"))
+    monkeypatch.setattr(orchestrator.skill_writer, "write_new_skill", writer)
+    inval = AsyncMock()
+    monkeypatch.setattr(orchestrator.cache, "invalidate_skills", inval)
+
+    await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    inval.assert_not_awaited()
 
 
 async def test_irrelevant_content_discarded_before_extraction(wired, monkeypatch) -> None:

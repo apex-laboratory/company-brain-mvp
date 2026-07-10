@@ -203,6 +203,61 @@ The fresh-database migration run (`alembic upgrade head`, 0001→0014) is itself
 of the validation: it required shimming Supabase's `auth.uid()` (created by the
 platform, referenced by migration 0002) — documented in the E2E recipe.
 
+## PR #26 code review — correctness + cleanup fixes (2026-07-11)
+
+Resolved the 25 surviving findings (13 correctness, 12 cleanup) from daud4653's
+review of `feature/phase-3-extraction`.
+
+**Correctness**
+
+- **Stranded `queued` events backstop** (findings #1/#2/#6) — ingestion commits an
+  event `queued` and *then* enqueues extraction as a separate step that can silently
+  never run (Redis outage swallowed by `queue.enqueue`, chained-backfill chunks
+  deferred to a one-shot `sweep_extract`, a `sweep_extract` timeout). New cron
+  `reenqueue_stale_events` (`app/jobs/tasks/reconcile_events.py`, every 15 min)
+  re-enqueues `extract_event` for any event `queued` past a grace window; the
+  pipeline's `processed` guard makes re-runs idempotent.
+- **`sweep_extract` bounded + self-continuing** (#3) — the paced launch loop capped a
+  single job at ~600 events before the 1 h timeout, leaving large sweeps stuck and
+  the final progress flush unreached. Now launches at most `_MAX_PER_RUN` (300) per
+  invocation and re-enqueues a continuation while `count_sweep_queued_events > 0`.
+- **Reviews approval** (`app/modules/reviews/service.py`) — exception approval with an
+  empty `exceptions` list now applies the same `{condition, action}` fallback as
+  auto-publish instead of dropping the carve-out (#4); the re-embedding OpenAI call
+  moved out of the open tenant transaction into a pre-write phase (#5); the review
+  row is locked `FOR UPDATE` and `resolve` is guarded on `status='pending'` (rowcount
+  check) so concurrent approve/reject can't double-apply (#7); new_decision approval
+  raises `skills.confidence` to 1.0 like the other kinds (#9).
+- **Cache invalidation after commit** (#8) — moved out of the `skill_writer` write
+  transaction into `orchestrator._commit`, post-`commit()`, keyed on `published`.
+- **Fail-soft `tags: null`** (#10) — `authority._check_signal` guards
+  `payload.get("tags") or []` so a null tag list degrades to tier `low`, not a
+  dead-lettered event.
+- **`integration_check.py`** (#11) — assertions updated for `insert_event`'s
+  `str | None` return.
+- **Wrong-connection expander token** (#12) — new nullable `source_connection_id` on
+  `source_events` (migration 0015) stamped at ingest; the expander resolves *that*
+  connection's token (`token_for_connection`) instead of first-connection-per-provider,
+  fixing silent 401 degradation with two same-provider connections.
+- **Cost telemetry fails loud** (#13) — `pricing.ensure_priced` runs at worker startup
+  so rotating a model via env raises at boot instead of zeroing every cost rollup.
+
+**Cleanup** — deduped the sweeps-progress UPDATE (#14) and the `EventRow` SELECT/
+coercion shared by `load_event`/`skill_provenance` (#18); expanders reuse the
+integration's pinned header/API-version constants (#15/#16); one YAML loader —
+`sweep_order` delegates to `authority` (#17); dropped the unread
+`auto_publish_during_sweep` flag (#19) and `confidence_scorer.score`'s three dead
+params (#20); extracted `_proposed_skill` + `_insert_matched_review` in `skill_writer`
+(the copy-paste that caused #4) (#21); removed the unreachable `_Passthrough` so
+`needs_expansion` is the single "no expander" mechanism (#22); deleted the dead
+`ContradictionResult` dataclass (#23); `threaded` is now a per-connector capability
+flag instead of a hardcoded frozenset (#24); and the `outcome` vocabulary is pinned
+by a CHECK constraint (migration 0016) + the canonical `pipeline.types.ALL_OUTCOMES`
+set that `sweep_extract._COUNTERS` asserts against (#25). Finding #26 was refuted by
+the reviewer.
+
+Tests: **484 unit + 3 E2E passing, ruff clean** (migrations 0015–0016 added).
+
 ## Architectural invariants (hold these in future work)
 
 1. **No DB connection across an LLM call** — read tx, then LLM stages, then one write tx.

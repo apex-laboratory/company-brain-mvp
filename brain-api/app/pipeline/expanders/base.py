@@ -5,9 +5,10 @@ connection's ``external_account_id`` for providers that need account context —
 Jira cloudId, Google email — the raw event payload, and the already-normalized
 content) and returns an :class:`ExpandedContext` (``app.pipeline.types``).
 
-``get_expander`` returns a passthrough for any provider without a registered
-expander (Gmail — the fetched message is already the full body), so the caller
-never special-cases "no expander".
+Providers without a registered expander (Gmail — the fetched message is already
+the full body) are handled by the caller gating on ``needs_expansion`` before ever
+calling ``get_expander``; that membership check is the single "no expander"
+mechanism.
 """
 from __future__ import annotations
 
@@ -29,16 +30,6 @@ class ExpandRequest:
 @runtime_checkable
 class ContextExpander(Protocol):
     async def expand(self, req: ExpandRequest) -> ExpandedContext: ...
-
-
-class _Passthrough:
-    """No-op expander: the raw content is already the full context."""
-
-    async def expand(self, req: ExpandRequest) -> ExpandedContext:
-        return ExpandedContext(text=req.content, url=req.payload.get("url", ""))
-
-
-_PASSTHROUGH = _Passthrough()
 
 
 def _build_registry() -> dict[str, ContextExpander]:
@@ -78,5 +69,9 @@ def needs_expansion(provider: str) -> bool:
 
 
 def get_expander(provider: str) -> ContextExpander:
-    """Return the expander for ``provider``, or the passthrough if none is registered."""
-    return _registry().get(provider, _PASSTHROUGH)
+    """Return the registered expander for ``provider``.
+
+    Callers must gate on ``needs_expansion(provider)`` first (the orchestrator
+    does); a provider without an expander is a programming error here, not a
+    silent passthrough."""
+    return _registry()[provider]

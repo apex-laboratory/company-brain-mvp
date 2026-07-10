@@ -28,11 +28,28 @@ class EventRow:
     event_type: str
     source_id: str | None
     external_event_id: str | None
+    source_connection_id: str | None
     payload: dict
     processed: bool
     sweep_id: str | None
     attempts: int
     created_at: datetime
+
+
+# Shared SELECT list + row→EventRow coercion so load_event and skill_provenance
+# (which differ only in WHERE/ORDER BY) can't drift out of sync when a column is added.
+_EVENT_COLUMNS = (
+    "id, workspace_id, provider, event_type, source_id, external_event_id, "
+    "source_connection_id, payload, processed, sweep_id, attempts, created_at"
+)
+
+
+def _to_event_row(row) -> EventRow:
+    data = dict(row)
+    data["id"] = str(data["id"])
+    data["sweep_id"] = str(data["sweep_id"]) if data["sweep_id"] else None
+    data["payload"] = data["payload"] or {}
+    return EventRow(**data)
 
 
 @dataclass(frozen=True)
@@ -61,23 +78,11 @@ class PipelineRepository:
         row = (
             await session.execute(
                 text(
-                    """
-                    SELECT id, workspace_id, provider, event_type, source_id,
-                           external_event_id, payload, processed, sweep_id,
-                           attempts, created_at
-                      FROM source_events
-                     WHERE id = CAST(:id AS uuid)
-                    """
+                    f"SELECT {_EVENT_COLUMNS} FROM source_events WHERE id = CAST(:id AS uuid)"
                 ).bindparams(id=event_id)
             )
         ).mappings().first()
-        if row is None:
-            return None
-        data = dict(row)
-        data["id"] = str(data["id"])
-        data["sweep_id"] = str(data["sweep_id"]) if data["sweep_id"] else None
-        data["payload"] = data["payload"] or {}
-        return EventRow(**data)
+        return _to_event_row(row) if row is not None else None
 
     async def finalize_event(
         self,
@@ -120,11 +125,8 @@ class PipelineRepository:
         row = (
             await session.execute(
                 text(
-                    """
-                    SELECT id, workspace_id, provider, event_type, source_id,
-                           external_event_id, payload, processed, sweep_id,
-                           attempts, created_at
-                      FROM source_events
+                    f"""
+                    SELECT {_EVENT_COLUMNS} FROM source_events
                      WHERE skill_id = :skill_id
                      ORDER BY created_at DESC
                      LIMIT 1
@@ -132,13 +134,7 @@ class PipelineRepository:
                 ).bindparams(skill_id=skill_id)
             )
         ).mappings().first()
-        if row is None:
-            return None
-        data = dict(row)
-        data["id"] = str(data["id"])
-        data["sweep_id"] = str(data["sweep_id"]) if data["sweep_id"] else None
-        data["payload"] = data["payload"] or {}
-        return EventRow(**data)
+        return _to_event_row(row) if row is not None else None
 
     # ── skills ────────────────────────────────────────────────────────────────
 
@@ -292,16 +288,29 @@ class PipelineRepository:
         return dict(row) if row else None
 
     async def set_skill_status(
-        self, session: AsyncSession, skill_id: str, status: str
+        self,
+        session: AsyncSession,
+        skill_id: str,
+        status: str,
+        *,
+        confidence: float | None = None,
     ) -> None:
+        """Set a skill's status, optionally raising its stored confidence too.
+
+        Human approval of a new_decision must propagate 1.0 to ``skills.confidence``
+        (like the policy_change/exception branches) so downstream confidence
+        thresholds don't treat an approved skill as low-confidence. ``NULL``
+        confidence leaves the column untouched (the reject→draft demotion path)."""
         await session.execute(
             text(
                 """
                 UPDATE skills
-                   SET status = CAST(:status AS skill_status), updated_at = now()
+                   SET status = CAST(:status AS skill_status),
+                       confidence = COALESCE(:confidence, confidence),
+                       updated_at = now()
                  WHERE id = :skill_id
                 """
-            ).bindparams(skill_id=skill_id, status=status)
+            ).bindparams(skill_id=skill_id, status=status, confidence=confidence)
         )
 
     async def resolve_skill_name(
@@ -472,13 +481,16 @@ class PipelineRepository:
     # ── sweep extraction ──────────────────────────────────────────────────────
 
     async def list_sweep_queued_events(
-        self, session: AsyncSession, sweep_id: str
+        self, session: AsyncSession, sweep_id: str, *, limit: int | None = None
     ) -> list[tuple[str, str]]:
         """``(event_id, provider)`` for a sweep's un-extracted events, oldest first.
 
         The caller re-orders by provider authority rank; ``created_at`` breaks ties
         within a provider. Re-selects on every (re)entry, so a crashed sweep_extract
         resumes exactly where it left off — finalized events drop out of the set.
+        ``limit`` bounds one invocation's work so a huge historical sweep can't
+        exceed the job timeout during the paced launch loop (the caller re-enqueues
+        a continuation while any remain).
         """
         rows = (
             await session.execute(
@@ -489,28 +501,43 @@ class PipelineRepository:
                        AND processed = FALSE
                        AND outcome = 'queued'
                      ORDER BY created_at
+                     LIMIT :limit
                     """
-                ).bindparams(sweep_id=sweep_id)
+                ).bindparams(sweep_id=sweep_id, limit=limit)
             )
         ).all()
         return [(str(r.id), r.provider) for r in rows]
 
+    async def count_sweep_queued_events(
+        self, session: AsyncSession, sweep_id: str
+    ) -> int:
+        """How many of a sweep's events are still ``queued`` (drives the
+        continuation decision + the ``queued_remaining`` progress figure)."""
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS n FROM source_events
+                     WHERE sweep_id = CAST(:sweep_id AS uuid)
+                       AND processed = FALSE
+                       AND outcome = 'queued'
+                    """
+                ).bindparams(sweep_id=sweep_id)
+            )
+        ).first()
+        return int(row.n) if row else 0
+
     async def write_extraction_progress(
         self, session: AsyncSession, sweep_id: str, progress: dict
     ) -> None:
-        """Write the extraction rollup into ``sweeps.progress['extraction']``."""
-        await session.execute(
-            text(
-                """
-                UPDATE sweeps
-                   SET progress = jsonb_set(
-                           COALESCE(progress, '{}'::jsonb),
-                           ARRAY['extraction'],
-                           CAST(:progress AS jsonb)
-                       )
-                 WHERE id = CAST(:id AS uuid)
-                """
-            ).bindparams(id=sweep_id, progress=json.dumps(progress))
+        """Write the extraction rollup into ``sweeps.progress['extraction']``.
+
+        Delegates to the shared per-provider progress writer (keyed ``extraction``)
+        so the ``jsonb_set`` UPDATE lives in exactly one place."""
+        from app.jobs.repository import JobsRepository
+
+        await JobsRepository().update_sweep_source_progress(
+            session, sweep_id, "extraction", progress
         )
 
     # ── sweep counters ────────────────────────────────────────────────────────

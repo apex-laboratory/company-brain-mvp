@@ -8,11 +8,14 @@ extraction to here so it can be rate-limited and progress-tracked as one batch:
 * **Concurrency** — an ``asyncio.Semaphore`` caps concurrent pipeline runs; launches
   are paced at ``rate_per_minute`` (both from ``source_authority.yaml`` ``sweep:``).
 * **Sweep-sourced** — every event runs with ``sweep_sourced=True`` so nothing
-  auto-publishes (``auto_publish_during_sweep=false``) and boundary search includes
-  the sweep's own pending skills.
+  auto-publishes (``skill_writer.route`` never publishes a sweep-sourced draft) and
+  boundary search includes the sweep's own pending skills.
 * **Progress + cost** — a rollup lands in ``sweeps.progress['extraction']``.
-* **Resumable** — a crash + ARQ retry re-selects only the still-queued events, so
-  finished work is never re-run (per-event finalize is transactional).
+* **Bounded + resumable** — each invocation launches at most ``_MAX_PER_RUN``
+  events (so the paced launch loop stays under the job timeout even at a slow
+  ``rate_per_minute``) and re-enqueues a continuation while any remain. A crash +
+  ARQ retry re-selects only the still-queued events, so finished work is never
+  re-run (per-event finalize is transactional).
 """
 from __future__ import annotations
 
@@ -20,17 +23,25 @@ import asyncio
 import logging
 
 from app.config.database import get_session
+from app.jobs.queue import enqueue
 from app.jobs.sweep_order import processing_order
 from app.pipeline.authority import sweep_config
 from app.pipeline.orchestrator import run_event_safely
 from app.pipeline.repository import PipelineRepository
+from app.pipeline.types import TERMINAL_OUTCOMES
 from app.shared.middleware.with_tenant import run_in_tenant
 
 log = logging.getLogger(__name__)
 
 _repo = PipelineRepository()
 
-# Outcome → the sweeps.progress['extraction'] counter it increments.
+# Cap events launched per invocation so the paced launch loop stays under the
+# job timeout even at a slow rate_per_minute; a continuation handles the rest.
+_MAX_PER_RUN = 300
+
+# Outcome → the sweeps.progress['extraction'] counter it increments. Keyed by the
+# canonical terminal-outcome set so adding a new outcome without a counter here
+# fails at import (the assert), not silently at runtime.
 _COUNTERS = {
     "published": "published",
     "review": "review",
@@ -40,6 +51,9 @@ _COUNTERS = {
     "contradiction": "contradictions",
     "failed": "failed",
 }
+assert set(_COUNTERS) == set(TERMINAL_OUTCOMES), (
+    "sweep_extract._COUNTERS is out of sync with pipeline.types.TERMINAL_OUTCOMES"
+)
 _PROGRESS_EVERY = 10  # flush the rollup at most every N processed events
 
 
@@ -66,7 +80,7 @@ async def sweep_extract(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
     async with get_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
-        events = await _repo.list_sweep_queued_events(session, sweep_id)
+        events = await _repo.list_sweep_queued_events(session, sweep_id, limit=_MAX_PER_RUN)
 
     if not events:
         log.info("sweep_extract: sweep %s has no queued events", sweep_id)
@@ -105,9 +119,21 @@ async def sweep_extract(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
             await asyncio.sleep(launch_delay)  # pace launches at rate_per_minute
     await asyncio.gather(*tasks)
 
-    await _flush(workspace_id, sweep_id, tally, 0, cost["usd"])
+    # Events beyond this run's cap (or newly ingested by a still-chaining backfill)
+    # remain queued; report the true remaining count and chain a continuation so the
+    # sweep finishes without any single job exceeding its timeout.
+    async with get_session() as session, run_in_tenant(
+        session, workspace_id, "system", "admin"
+    ):
+        remaining = await _repo.count_sweep_queued_events(session, sweep_id)
+    await _flush(workspace_id, sweep_id, tally, remaining, cost["usd"])
+    if remaining:
+        # No stable _job_id: this is the sole continuation producer, and reusing an
+        # id would collide with this finishing job's own retained result and stall
+        # the chain. The pipeline's processed-guard keeps a stray re-run harmless.
+        await enqueue("sweep_extract", workspace_id, sweep_id)
     log.info(
-        "sweep_extract: sweep %s processed %d events (%d failed)",
-        sweep_id, tally["processed"], tally["failed"],
+        "sweep_extract: sweep %s processed %d events (%d failed, %d remaining)",
+        sweep_id, tally["processed"], tally["failed"], remaining,
     )
-    return tally
+    return {**tally, "queued_remaining": remaining}

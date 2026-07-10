@@ -20,21 +20,3 @@ def test_low_authority_multiplier() -> None:
 
 def test_unknown_authority_treated_as_low() -> None:
     assert score(1.0, "wat") == pytest.approx(0.65)
-
-
-def test_human_authored_always_one() -> None:
-    assert score(0.1, "low", human_authored=True) == 1.0
-
-
-def test_contradiction_forces_zero() -> None:
-    assert score(0.99, "high", contradiction_detected=True) == 0.0
-
-
-def test_human_authored_beats_contradiction() -> None:
-    # Evaluated in order: human_authored wins.
-    assert score(0.5, "low", contradiction_detected=True, human_authored=True) == 1.0
-
-
-def test_sweep_sourced_does_not_change_score() -> None:
-    # Sweep routing is the caller's job; the score itself is unchanged.
-    assert score(0.9, "high", sweep_sourced=True) == score(0.9, "high")

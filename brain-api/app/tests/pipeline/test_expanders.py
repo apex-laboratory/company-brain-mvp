@@ -4,9 +4,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 from app.pipeline.expanders import get_expander, needs_expansion
-from app.pipeline.expanders.base import ExpandRequest, _Passthrough
+from app.pipeline.expanders.base import ExpandRequest
 
 
 def _req(
@@ -40,12 +41,11 @@ def test_registry_membership() -> None:
     assert not needs_expansion("gmail")
 
 
-async def test_gmail_uses_passthrough() -> None:
-    exp = get_expander("gmail")
-    assert isinstance(exp, _Passthrough)
-    out = await exp.expand(_req("gmail", {"url": "u"}, content="body"))
-    assert out.text == "body"
-    assert out.url == "u"
+def test_unregistered_provider_raises() -> None:
+    # Callers gate on needs_expansion; asking for an unregistered expander is a bug.
+    assert not needs_expansion("gmail")
+    with pytest.raises(KeyError):
+        get_expander("gmail")
 
 
 # ── slack ─────────────────────────────────────────────────────────────────────

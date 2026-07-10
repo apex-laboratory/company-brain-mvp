@@ -89,3 +89,21 @@ async def token_for_provider(
         token = await resolve_token(session, state)
         await session.commit()  # persist a refreshed token, if any
         return token, state.external_account_id
+
+
+async def token_for_connection(
+    workspace_id: str, connection_id: str
+) -> tuple[str, str | None] | None:
+    """Return ``(access_token, external_account_id)`` for the *specific* connection
+    that produced an event, refreshing the token if needed. ``None`` if the
+    connection is gone or tokenless. Preferred over ``token_for_provider`` so a
+    second same-provider connection doesn't expand with the wrong token."""
+    async with get_session() as session, run_in_tenant(
+        session, workspace_id, "system", "admin"
+    ):
+        state = await _repo.get_sync_state(session, connection_id)
+        if state is None or state.access_token_enc is None:
+            return None
+        token = await resolve_token(session, state)
+        await session.commit()  # persist a refreshed token, if any
+        return token, state.external_account_id

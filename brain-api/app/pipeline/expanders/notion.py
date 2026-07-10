@@ -7,12 +7,14 @@ block budget — deep pages contribute their top structure without unbounded fan
 from __future__ import annotations
 
 from app.integrations.base import http_client
+from app.integrations.notion import _NOTION_VERSION
 from app.pipeline.expanders.base import ExpandRequest
 from app.pipeline.types import ExpandedContext
 
 _API = "https://api.notion.com/v1"
-_NOTION_VERSION = "2022-06-28"
 _MAX_BLOCKS = 200  # cap total blocks fetched per page (bounds recursion cost)
+# _NOTION_VERSION is imported from the integration so the pinned API version can't
+# drift between the sync and the expander.
 
 
 def _rich_text(block: dict) -> str:

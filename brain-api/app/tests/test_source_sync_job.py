@@ -69,8 +69,11 @@ class _FakeRepo:
     async def get_sync_state(self, session, source_id):  # noqa: ANN001
         return self._state
 
-    async def insert_event(self, session, workspace_id, event, sweep_id=None) -> str | None:  # noqa: ANN001
+    async def insert_event(  # noqa: ANN001
+        self, session, workspace_id, event, sweep_id=None, *, source_connection_id=None
+    ) -> str | None:
         self.last_sweep_id = sweep_id
+        self.last_connection_id = source_connection_id
         # Real repo returns the new event id (or None on duplicate).
         return None if event.source_id in self._dup_ids else f"evt_{event.source_id}"
 

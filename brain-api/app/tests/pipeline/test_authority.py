@@ -54,7 +54,6 @@ sweep:
   processing_order: [notion, github, jira, slack, zendesk]
   rate_per_minute: 10
   semaphore_limit: 5
-  auto_publish_during_sweep: false
 """
 
 
@@ -128,9 +127,7 @@ def test_routing_config_from_yaml(annotator: AuthorityAnnotator) -> None:
 
 
 def test_sweep_config_from_yaml(annotator: AuthorityAnnotator) -> None:
-    assert annotator.sweep_config() == SweepConfig(
-        rate_per_minute=10, semaphore_limit=5, auto_publish_during_sweep=False
-    )
+    assert annotator.sweep_config() == SweepConfig(rate_per_minute=10, semaphore_limit=5)
 
 
 # ── fail-soft ────────────────────────────────────────────────────────────────

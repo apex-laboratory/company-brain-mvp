@@ -14,27 +14,17 @@ _AUTHORITY_MULTIPLIERS: dict[str, float] = {
 }
 
 
-def score(
-    extraction_confidence: float,
-    authority: str,
-    sweep_sourced: bool = False,
-    contradiction_detected: bool = False,
-    human_authored: bool = False,
-) -> float:
-    """
-    Pure function: compute final routing confidence score.
+def score(extraction_confidence: float, authority: str) -> float:
+    """Pure function: final routing confidence = extraction_confidence × authority
+    multiplier.
 
-    Overrides (evaluated in order):
-      human_authored=True         → 1.0  (always publishes, bypasses routing)
-      contradiction_detected=True → 0.0  (forces review)
-      sweep_sourced=True          → score is computed normally but caller
-                                    must route to review regardless
-
-    Formula: extraction_confidence × authority_multiplier
+    The two overrides this once carried live elsewhere, closer to their single
+    source of truth, so they can't drift from this formula:
+      * human approval → 1.0 directly in ``reviews.service`` (``_HUMAN_CONFIDENCE``)
+      * detected contradiction → the draft never routes here; ``skill_writer`` opens
+        a two-source review card at confidence 0
+    ``sweep_sourced`` doesn't change the number (the caller routes a sweep to review
+    regardless), so it's no longer a parameter.
     """
-    if human_authored:
-        return 1.0
-    if contradiction_detected:
-        return 0.0
     multiplier = _AUTHORITY_MULTIPLIERS.get(authority, _AUTHORITY_MULTIPLIERS["low"])
     return extraction_confidence * multiplier

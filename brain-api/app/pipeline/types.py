@@ -8,6 +8,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# Canonical ``source_events.outcome`` vocabulary — the single source of truth for
+# the DB CHECK (migration 0016), the sweep-progress counter map, and this module's
+# ``PipelineResult``. A value outside this set is a bug, not data.
+QUEUED_OUTCOME = "queued"
+TERMINAL_OUTCOMES = (
+    "published", "review", "draft", "discarded", "duplicate", "contradiction", "failed",
+)
+ALL_OUTCOMES = (QUEUED_OUTCOME, *TERMINAL_OUTCOMES)
+
 
 @dataclass
 class StageUsage:
@@ -104,15 +113,6 @@ class BoundaryResult:
     classification: str  # UPDATE | EXCEPTION | DUPLICATE | NEW
     matched_skill_id: str | None
     similarity: float
-
-
-@dataclass
-class ContradictionResult:
-    """Conflict comparison between a proposed change and the existing skill."""
-
-    has_contradiction: bool
-    source_a: dict | None = None  # {url, author, timestamp, excerpt, authority}
-    source_b: dict | None = None
 
 
 @dataclass

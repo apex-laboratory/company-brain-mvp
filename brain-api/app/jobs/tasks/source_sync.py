@@ -109,7 +109,8 @@ async def source_sync(
                 for item in items:
                     event = integration.normalize(item)
                     event_id = await _repo.insert_event(
-                        session, workspace_id, event, sweep_id=sweep_id
+                        session, workspace_id, event, sweep_id=sweep_id,
+                        source_connection_id=source_id,
                     )
                     if event_id:
                         inserted += 1

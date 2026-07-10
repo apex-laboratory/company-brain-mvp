@@ -4,8 +4,8 @@
 Routing (thresholds from ``source_authority.yaml`` ``routing:``):
 
 * ``conf >= 0.90`` AND authority >= medium AND not sweep_sourced
-      → skill ``active`` + ``skill_versions`` (create, v1) + cache invalidate
-      → event outcome ``published``
+      → skill ``active`` + ``skill_versions`` (create, v1)
+      → event outcome ``published`` (the orchestrator invalidates cache post-commit)
 * ``0.70 <= conf`` (or low authority, or sweep_sourced)
       → skill ``review`` + ``reviews`` row (``new_decision``)
       → event outcome ``review``
@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.pipeline import cache
 from app.pipeline.authority import RoutingConfig
 from app.pipeline.repository import PipelineRepository, SimilarSkill
 from app.pipeline.types import DecisionMoment, PipelineResult, SkillDraft
@@ -106,7 +105,6 @@ async def write_new_skill(
             confidence=confidence,
             change_type="create",
         )
-        await cache.invalidate_skills(workspace_id)
     elif outcome == "review":
         review_id = await repo.insert_review(
             session,
@@ -121,17 +119,7 @@ async def write_new_skill(
             evidence_author=(evidence.author if evidence else None),
             confidence=to_review_confidence(confidence),
             skill_id=skill_id,
-            payload={
-                "proposed_skill": {
-                    "name": name,
-                    "trigger": draft.trigger,
-                    "base_logic": draft.base_logic,
-                    "exceptions": draft.exceptions,
-                    "actions": draft.actions,
-                    "uncertainty_notes": draft.uncertainty_notes,
-                },
-                "boundary": "NEW",
-            },
+            payload={"proposed_skill": _proposed_skill(draft, name), "boundary": "NEW"},
         )
         if sweep_id:
             await repo.bump_sweep_counters(session, sweep_id, queued=1)
@@ -139,19 +127,62 @@ async def write_new_skill(
     return PipelineResult(outcome=outcome, skill_id=skill_id, review_id=review_id)
 
 
+def _proposed_skill(draft: SkillDraft, name: str) -> dict:
+    """The ``proposed_skill`` review-payload block (one source of truth for both the
+    NEW payload and the matched-skill payload)."""
+    return {
+        "name": name,
+        "trigger": draft.trigger,
+        "base_logic": draft.base_logic,
+        "exceptions": draft.exceptions,
+        "actions": draft.actions,
+        "uncertainty_notes": draft.uncertainty_notes,
+    }
+
+
 def _proposed_payload(draft: SkillDraft, name: str, boundary: str, matched_id: str) -> dict:
     return {
-        "proposed_skill": {
-            "name": name,
-            "trigger": draft.trigger,
-            "base_logic": draft.base_logic,
-            "exceptions": draft.exceptions,
-            "actions": draft.actions,
-            "uncertainty_notes": draft.uncertainty_notes,
-        },
+        "proposed_skill": _proposed_skill(draft, name),
         "matched_skill_id": matched_id,
         "boundary": boundary,
     }
+
+
+async def _insert_matched_review(
+    session: AsyncSession,
+    repo: PipelineRepository,
+    *,
+    workspace_id: str,
+    provider: str,
+    source_url: str,
+    matched: SimilarSkill,
+    draft: SkillDraft,
+    confidence: float,
+    evidence: DecisionMoment | None,
+    kind: str,
+    boundary: str,
+    sweep_id: str | None,
+) -> PipelineResult:
+    """Open a review against an existing skill (UPDATE/EXCEPTION) without mutating
+    it — the change applies on approve. Shared by both matched-skill review branches."""
+    review_id = await repo.insert_review(
+        session,
+        workspace_id=workspace_id,
+        title=matched.name,
+        kind=kind,
+        provider=provider,
+        source_location=source_url or None,
+        before_text=matched.base_logic,
+        after_text=draft.base_logic,
+        evidence_quote=(evidence.decision_text[:500] if evidence else None),
+        evidence_author=(evidence.author if evidence else None),
+        confidence=to_review_confidence(confidence),
+        skill_id=matched.id,
+        payload=_proposed_payload(draft, matched.name, boundary, matched.id),
+    )
+    if sweep_id:
+        await repo.bump_sweep_counters(session, sweep_id, queued=1)
+    return PipelineResult(outcome="review", skill_id=matched.id, review_id=review_id)
 
 
 async def write_duplicate(
@@ -213,30 +244,16 @@ async def write_update(
             confidence=confidence,
             embedding=embedding,
         )
-        await cache.invalidate_skills(workspace_id)
         return PipelineResult(outcome="published", skill_id=matched.id)
 
     if outcome == "draft":
         return PipelineResult(outcome="draft", skill_id=matched.id)
 
-    review_id = await repo.insert_review(
-        session,
-        workspace_id=workspace_id,
-        title=matched.name,
-        kind="policy_change",
-        provider=provider,
-        source_location=source_url or None,
-        before_text=matched.base_logic,
-        after_text=draft.base_logic,
-        evidence_quote=(evidence.decision_text[:500] if evidence else None),
-        evidence_author=(evidence.author if evidence else None),
-        confidence=to_review_confidence(confidence),
-        skill_id=matched.id,
-        payload=_proposed_payload(draft, matched.name, "UPDATE", matched.id),
+    return await _insert_matched_review(
+        session, repo, workspace_id=workspace_id, provider=provider, source_url=source_url,
+        matched=matched, draft=draft, confidence=confidence, evidence=evidence,
+        kind="policy_change", boundary="UPDATE", sweep_id=sweep_id,
     )
-    if sweep_id:
-        await repo.bump_sweep_counters(session, sweep_id, queued=1)
-    return PipelineResult(outcome="review", skill_id=matched.id, review_id=review_id)
 
 
 async def write_exception(
@@ -284,30 +301,16 @@ async def write_exception(
             version=new_version,
             confidence=confidence,
         )
-        await cache.invalidate_skills(workspace_id)
         return PipelineResult(outcome="published", skill_id=matched.id)
 
     if outcome == "draft":
         return PipelineResult(outcome="draft", skill_id=matched.id)
 
-    review_id = await repo.insert_review(
-        session,
-        workspace_id=workspace_id,
-        title=matched.name,
-        kind="exception",
-        provider=provider,
-        source_location=source_url or None,
-        before_text=matched.base_logic,
-        after_text=draft.base_logic,
-        evidence_quote=(evidence.decision_text[:500] if evidence else None),
-        evidence_author=(evidence.author if evidence else None),
-        confidence=to_review_confidence(confidence),
-        skill_id=matched.id,
-        payload=_proposed_payload(draft, matched.name, "EXCEPTION", matched.id),
+    return await _insert_matched_review(
+        session, repo, workspace_id=workspace_id, provider=provider, source_url=source_url,
+        matched=matched, draft=draft, confidence=confidence, evidence=evidence,
+        kind="exception", boundary="EXCEPTION", sweep_id=sweep_id,
     )
-    if sweep_id:
-        await repo.bump_sweep_counters(session, sweep_id, queued=1)
-    return PipelineResult(outcome="review", skill_id=matched.id, review_id=review_id)
 
 
 async def write_contradiction(

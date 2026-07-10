@@ -181,6 +181,8 @@ class SlackIntegration:
     """Slack channels + messages integration (OAuth v2 bot token)."""
 
     provider = "slack"
+    # A Slack thread is a discussion → the decision_identifier runs its LLM pass.
+    threaded = True
     # ``source_sync`` passes the onboarding picker's selection as
     # ``allowed_channels`` so unselected channels are never fetched.
     supports_channel_filter = True

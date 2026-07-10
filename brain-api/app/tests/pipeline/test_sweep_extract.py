@@ -23,6 +23,7 @@ def _wire(monkeypatch, queued, run_results, *, cfg=None):
     """Wire the repo + collaborators. ``run_results`` maps event_id → PipelineResult."""
     repo = MagicMock(
         list_sweep_queued_events=AsyncMock(return_value=queued),
+        count_sweep_queued_events=AsyncMock(return_value=0),  # nothing left → no continuation
         write_extraction_progress=AsyncMock(),
     )
     ran: list[tuple[str, bool]] = []
@@ -38,6 +39,7 @@ def _wire(monkeypatch, queued, run_results, *, cfg=None):
     monkeypatch.setattr(job, "run_event_safely", fake_run)
     monkeypatch.setattr(job, "sweep_config", lambda: default_cfg)
     monkeypatch.setattr(job, "processing_order", lambda: ["notion", "slack", "zendesk"])
+    monkeypatch.setattr(job, "enqueue", AsyncMock())
     return repo, ran
 
 
@@ -77,6 +79,22 @@ async def test_tally_counts_outcomes_and_cost(monkeypatch) -> None:
     final = repo.write_extraction_progress.await_args.args[2]
     assert final["queued_remaining"] == 0
     assert final["cost_usd"] == 0.06
+
+
+async def test_remaining_events_enqueue_a_continuation(monkeypatch) -> None:
+    queued = [("e1", "notion"), ("e2", "notion")]
+    repo, _ = _wire(monkeypatch, queued, {})
+    repo.count_sweep_queued_events = AsyncMock(return_value=5)  # more still queued
+    result = await job.sweep_extract({}, "wrk_1", "swp_1")
+    assert result["queued_remaining"] == 5
+    # A continuation sweep_extract is chained (no stable job id → new run each time).
+    job.enqueue.assert_awaited_once_with("sweep_extract", "wrk_1", "swp_1")
+
+
+async def test_no_remaining_events_does_not_chain(monkeypatch) -> None:
+    repo, _ = _wire(monkeypatch, [("e1", "notion")], {})  # count mock returns 0
+    await job.sweep_extract({}, "wrk_1", "swp_1")
+    job.enqueue.assert_not_awaited()
 
 
 async def test_semaphore_bounds_concurrency(monkeypatch) -> None:

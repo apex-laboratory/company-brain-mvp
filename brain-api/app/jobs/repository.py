@@ -53,18 +53,24 @@ class JobsRepository:
         workspace_id: str,
         event: RawEvent,
         sweep_id: str | None = None,
+        *,
+        source_connection_id: str | None = None,
     ) -> str | None:
         """Insert one normalized event. Returns the new event id, or ``None`` for a
-        duplicate. The id is what the caller enqueues ``extract_event`` with."""
+        duplicate. The id is what the caller enqueues ``extract_event`` with.
+
+        ``source_connection_id`` records which connection produced the event so the
+        pipeline's expander resolves that connection's token (not just the first
+        connection for the provider)."""
         result = await session.execute(
             text(
                 """
                 INSERT INTO source_events
                     (workspace_id, provider, event_type, source_id,
-                     external_event_id, payload, outcome, sweep_id)
+                     external_event_id, source_connection_id, payload, outcome, sweep_id)
                 VALUES
                     (:workspace_id, CAST(:provider AS source_provider), :event_type, :source_id,
-                     :external_event_id, CAST(:payload AS jsonb), 'queued',
+                     :external_event_id, :source_connection_id, CAST(:payload AS jsonb), 'queued',
                      CAST(:sweep_id AS uuid))
                 ON CONFLICT ON CONSTRAINT source_events_workspace_provider_event_key
                 DO NOTHING
@@ -76,6 +82,7 @@ class JobsRepository:
                 event_type=event.event_type,
                 source_id=event.source_id,
                 external_event_id=event.external_event_id,
+                source_connection_id=source_connection_id,
                 payload=json.dumps(event.raw),
                 sweep_id=sweep_id,
             )
@@ -298,6 +305,37 @@ class JobsRepository:
             )
         ).all()
         return [(r.id, r.workspace_id) for r in rows]
+
+    async def list_stale_queued_events(
+        self, session: AsyncSession, *, older_than: str, limit: int
+    ) -> list[tuple[str, str, str | None]]:
+        """``(event_id, workspace_id, sweep_id)`` for events stranded at
+        ``outcome='queued'`` past a grace window (cross-tenant, service role).
+
+        Backstop for the enqueue-after-commit gap: an event row is committed
+        ``queued`` and then its follow-up ``extract_event`` may never fire (Redis
+        outage, chained backfill, sweep_extract timeout). The reconciliation cron
+        re-enqueues these; the pipeline's own ``processed`` guard makes a re-run of
+        an event that did extract a no-op, so this is safe to run repeatedly.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, workspace_id, sweep_id FROM source_events
+                     WHERE processed = FALSE
+                       AND outcome = 'queued'
+                       AND created_at < now() - CAST(:older_than AS interval)
+                     ORDER BY created_at
+                     LIMIT :limit
+                    """
+                ).bindparams(older_than=older_than, limit=limit)
+            )
+        ).all()
+        return [
+            (str(r.id), r.workspace_id, str(r.sweep_id) if r.sweep_id else None)
+            for r in rows
+        ]
 
     # ── onboarding sweeps ──────────────────────────────────────────────────────────
     async def list_connected_sources(self, session: AsyncSession) -> list[dict]:

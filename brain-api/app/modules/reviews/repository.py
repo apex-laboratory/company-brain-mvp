@@ -50,10 +50,18 @@ class ReviewsRepository:
         ).mappings().all()
         return [dict(r) for r in rows]
 
-    async def get(self, session: AsyncSession, review_id: str) -> dict | None:
+    async def get(
+        self, session: AsyncSession, review_id: str, *, for_update: bool = False
+    ) -> dict | None:
+        """Load one review. ``for_update`` takes a row lock so a concurrent
+        approve/reject serializes behind this one (the second caller then sees the
+        already-resolved status and 409s) instead of both applying the change."""
+        lock = " FOR UPDATE" if for_update else ""
         row = (
             await session.execute(
-                text(f"SELECT {_COLUMNS} FROM reviews WHERE id = :id").bindparams(id=review_id)
+                text(f"SELECT {_COLUMNS} FROM reviews WHERE id = :id{lock}").bindparams(
+                    id=review_id
+                )
             )
         ).mappings().first()
         return dict(row) if row else None
@@ -68,8 +76,11 @@ class ReviewsRepository:
         comment: str | None,
         resolved_by: str | None,
         resolved_at: datetime,
-    ) -> None:
-        await session.execute(
+    ) -> bool:
+        """Resolve a still-``pending`` review. Returns ``False`` (no row changed)
+        if it was already resolved by a concurrent request — the caller treats that
+        as a conflict rather than double-applying the skill mutation."""
+        result = await session.execute(
             text(
                 """
                 UPDATE reviews
@@ -78,7 +89,7 @@ class ReviewsRepository:
                        comment = :comment,
                        resolved_by = :resolved_by,
                        resolved_at = :resolved_at
-                 WHERE id = :id
+                 WHERE id = :id AND status = 'pending'
                 """
             ).bindparams(
                 id=review_id,
@@ -89,6 +100,7 @@ class ReviewsRepository:
                 resolved_at=resolved_at,
             )
         )
+        return result.rowcount == 1
 
     async def stats(self, session: AsyncSession) -> dict[str, int]:
         """Counts by status + rejection rate instrumentation (PRD §15)."""

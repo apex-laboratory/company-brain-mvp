@@ -9,11 +9,21 @@ analyze, and the extractor sees the full content anyway.
 """
 from __future__ import annotations
 
+from app.integrations import get_integration
 from app.pipeline.llm.clients import groq_json
 from app.pipeline.prompts import decision_identifier as prompts
 from app.pipeline.types import DecisionMoment, StageUsage
 
-THREADED_PROVIDERS = frozenset({"slack", "zendesk", "github", "jira"})
+
+def _is_threaded(provider: str) -> bool:
+    """Whether ``provider``'s content is a discussion thread (LLM decision pass) vs.
+    a single document (wrapped as one moment, no LLM call).
+
+    Declared per-connector via ``threaded = True`` on the integration, alongside its
+    other capability flags (``push_delivery``, ``opaque_cursor``), so a new threaded
+    connector opts in where it's written instead of in a frozenset that's easy to
+    forget here."""
+    return getattr(get_integration(provider), "threaded", False)
 
 
 def _moment_from(entry: dict) -> DecisionMoment:
@@ -40,7 +50,7 @@ async def identify_decisions(
     An empty list means "no authoritative decision found" — the caller discards
     the event.
     """
-    if provider not in THREADED_PROVIDERS:
+    if not _is_threaded(provider):
         return (
             [
                 DecisionMoment(

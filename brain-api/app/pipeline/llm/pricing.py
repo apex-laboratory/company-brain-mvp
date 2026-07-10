@@ -32,3 +32,20 @@ def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
         return 0.0
     in_price, out_price = prices
     return (input_tokens * in_price + output_tokens * out_price) / 1_000_000
+
+
+def ensure_priced(*models: str) -> None:
+    """Raise if any configured model lacks a price entry.
+
+    The price table is keyed by hardcoded model names while the model names are
+    env-configurable (``settings.groq_model`` / ``anthropic_model`` /
+    ``embedding_model``). Without this check, rotating a model via env silently
+    makes every cost rollup read $0 while real spend continues. Call it at worker
+    startup so a model bump fails loudly at boot instead of corrupting telemetry."""
+    missing = sorted({m for m in models if m not in _PRICES})
+    if missing:
+        raise RuntimeError(
+            f"pricing: no price entry for configured model(s) {missing}. "
+            f"Add them to app/pipeline/llm/pricing.py._PRICES so cost telemetry "
+            f"stays accurate."
+        )

@@ -7,10 +7,13 @@ works for both issues and PRs without reconstructing the repo/number.
 from __future__ import annotations
 
 from app.integrations.base import http_client
+from app.integrations.github import _BASE_HEADERS
 from app.pipeline.expanders.base import ExpandRequest
 from app.pipeline.types import ExpandedContext
 
-_HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+# Reuse the integration's pinned API headers so an API-version bump reaches the
+# expander too (they must stay in lock-step).
+_HEADERS = _BASE_HEADERS
 
 
 def _core(payload: dict) -> dict:
