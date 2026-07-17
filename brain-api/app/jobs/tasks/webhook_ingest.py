@@ -17,6 +17,7 @@ import logging
 from app.config.database import get_session
 from app.integrations import get_integration
 from app.integrations.base import RawItem
+from app.jobs.queue import enqueue
 from app.jobs.repository import JobsRepository
 from app.shared.middleware.with_tenant import run_in_tenant
 
@@ -52,13 +53,18 @@ async def webhook_ingest(ctx: dict, provider: str, payload: dict) -> dict:
         return {"inserted": 0, "skipped": "unsupported_event"}
 
     inserted = 0
-    for _source_id, workspace_id in connections:
+    for source_id, workspace_id in connections:
         # Re-open under each tenant context to satisfy RLS on the insert.
         async with get_session() as session:
             async with run_in_tenant(session, workspace_id, "system", "admin"):
-                if await _repo.insert_event(session, workspace_id, event):
-                    inserted += 1
+                event_id = await _repo.insert_event(
+                    session, workspace_id, event, source_connection_id=source_id
+                )
                 await session.commit()
+        if event_id:
+            inserted += 1
+            # Extraction runs off this ingest path (Phase 3); enqueue is best-effort.
+            await enqueue("extract_event", workspace_id, event_id)
 
     return {"inserted": inserted}
 

@@ -115,6 +115,9 @@ def _unwrap(payload: dict) -> tuple[dict | None, str]:
 
 class GitHubIntegration:
     provider = "github"
+    # Issue/PR comment chains are a discussion thread → the decision_identifier
+    # runs its LLM pass to find authoritative moments.
+    threaded = True
 
     def _headers(self, access_token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {access_token}", **_BASE_HEADERS}

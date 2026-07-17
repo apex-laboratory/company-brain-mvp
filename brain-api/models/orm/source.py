@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ARRAY, Boolean, DateTime, Enum, ForeignKey, Index, Integer, LargeBinary, Text, UniqueConstraint, text
+from sqlalchemy import ARRAY, Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Index, Integer, LargeBinary, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -109,6 +109,15 @@ class SourceEvent(Base):
         Index("ix_source_events_workspace_id_provider_processed",
               "workspace_id", "provider", "processed"),
         Index("ix_source_events_workspace_id_sweep_id", "workspace_id", "sweep_id"),
+        # Partial index for the dead-letter listing (0013):
+        Index("ix_source_events_workspace_failed", "workspace_id",
+              postgresql_where=text("outcome = 'failed'")),
+        # Pin the outcome vocabulary (0016); mirrors pipeline.types.ALL_OUTCOMES.
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN ('queued', 'published', 'review', 'draft', "
+            "'discarded', 'duplicate', 'contradiction', 'failed')",
+            name="source_events_outcome_check",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -121,10 +130,22 @@ class SourceEvent(Base):
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     source_id: Mapped[str | None] = mapped_column(Text)
     external_event_id: Mapped[str | None] = mapped_column(Text)          # for deduplication
+    # Connection that ingested this event; the expander resolves its token from it
+    # (SET NULL on connection delete → falls back to first-connection-per-provider).
+    source_connection_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("source_connections.id", ondelete="SET NULL")
+    )
     payload: Mapped[dict | None] = mapped_column(JSONB)
     processed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("FALSE"))
     skill_id: Mapped[str | None] = mapped_column(Text, ForeignKey("skills.id", ondelete="SET NULL"))
-    outcome: Mapped[str | None] = mapped_column(Text)                    # published|queued|draft|discarded|duplicate
+    # queued → published|review|draft|discarded|duplicate|contradiction|failed.
+    # processed=true on every terminal outcome incl. failed; re-run resets to
+    # processed=false, outcome='queued'.
+    outcome: Mapped[str | None] = mapped_column(Text)
+    # Pipeline dead-letter bookkeeping (0013): full-pipeline attempts (each one
+    # already retried transient LLM failures internally) + per-stage costs/errors.
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    pipeline_meta: Mapped[dict | None] = mapped_column(JSONB)
     sweep_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")

@@ -140,6 +140,8 @@ class JiraIntegration:
     """Jira Cloud issues integration (OAuth 2.0 3LO, polling)."""
 
     provider = "jira"
+    # An issue's comment chain is a discussion → decision_identifier LLM pass.
+    threaded = True
     # No webhooks in v1: updates only arrive by polling, so the poll cron enqueues
     # periodic source_sync runs for this connection.
     push_delivery = False
