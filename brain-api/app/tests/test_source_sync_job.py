@@ -64,12 +64,18 @@ class _FakeRepo:
         self.advanced_to: datetime | None = None
         self.advanced_cursor: str | None = None
         self.error_marked = False
+        self.last_sweep_id: str | None = None
 
     async def get_sync_state(self, session, source_id):  # noqa: ANN001
         return self._state
 
-    async def insert_event(self, session, workspace_id, event) -> bool:  # noqa: ANN001
-        return event.source_id not in self._dup_ids
+    async def insert_event(  # noqa: ANN001
+        self, session, workspace_id, event, sweep_id=None, *, source_connection_id=None
+    ) -> str | None:
+        self.last_sweep_id = sweep_id
+        self.last_connection_id = source_connection_id
+        # Real repo returns the new event id (or None on duplicate).
+        return None if event.source_id in self._dup_ids else f"evt_{event.source_id}"
 
     async def advance_sync(self, session, source_id, synced_at, sync_cursor=None) -> None:  # noqa: ANN001
         self.advanced_to = synced_at
@@ -91,10 +97,22 @@ def _state() -> SyncState:
     )
 
 
-def _wire(monkeypatch: pytest.MonkeyPatch, integration: _FakeIntegration, repo: _FakeRepo) -> None:
+def _wire(
+    monkeypatch: pytest.MonkeyPatch,
+    integration: _FakeIntegration,
+    repo: _FakeRepo,
+) -> list[tuple]:
+    """Wire the fakes; return a list that captures ``enqueue`` calls."""
+    enqueued: list[tuple] = []
+
+    async def _fake_enqueue(function, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        enqueued.append((function, args, kwargs))
+
     monkeypatch.setattr(job, "get_session", _fake_get_session)
     monkeypatch.setattr(job, "get_integration", lambda provider: integration)
     monkeypatch.setattr(job, "_repo", repo)
+    monkeypatch.setattr(job, "enqueue", _fake_enqueue)
+    return enqueued
 
 
 async def test_sync_inserts_new_events_and_advances_cursor(
@@ -103,12 +121,30 @@ async def test_sync_inserts_new_events_and_advances_cursor(
     items = [RawItem(external_id=f"p{i}", payload={}) for i in range(3)]
     integration = _FakeIntegration(items, "2026-06-13T10:00:00+00:00")
     repo = _FakeRepo(_state())
-    _wire(monkeypatch, integration, repo)
+    enqueued = _wire(monkeypatch, integration, repo)
 
     result = await job.source_sync({}, "wrk_1", "src_1")
 
     assert result == {"inserted": 3}
     assert repo.advanced_to == datetime(2026, 6, 13, 10, 0, tzinfo=UTC)
+    # Non-sweep sync extracts each new event immediately.
+    assert [c[0] for c in enqueued] == ["extract_event"] * 3
+    assert enqueued[0][1] == ("wrk_1", "evt_p0")
+
+
+async def test_sweep_sync_defers_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When invoked with a sweep_id, events are stamped and extraction is left to
+    # the batched sweep_extract pass — no per-event enqueue here.
+    items = [RawItem(external_id="p1", payload={})]
+    integration = _FakeIntegration(items, "2026-06-13T10:00:00+00:00")
+    repo = _FakeRepo(_state())
+    enqueued = _wire(monkeypatch, integration, repo)
+
+    result = await job.source_sync({}, "wrk_1", "src_1", sweep_id="swp_1")
+
+    assert result == {"inserted": 1}
+    assert repo.last_sweep_id == "swp_1"
+    assert enqueued == []
 
 
 async def test_sync_is_idempotent_on_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,19 +287,18 @@ async def test_sync_chains_next_chunk_on_backfill_continuation(
         sync_cursor=None,
     )
     repo = _FakeRepo(state)
-    _wire(monkeypatch, _Chunked([RawItem(external_id="m1", payload={})], None), repo)
-    enqueued: list[tuple] = []
-
-    async def _fake_enqueue(*args, **kwargs):  # noqa: ANN002, ANN003
-        enqueued.append((args, kwargs))
-
-    monkeypatch.setattr(job, "enqueue", _fake_enqueue)
+    enqueued = _wire(monkeypatch, _Chunked([RawItem(external_id="m1", payload={})], None), repo)
 
     result = await job.source_sync({}, "wrk_1", "src_1")
 
     assert result == {"inserted": 1, "backfill": "continues"}
     assert repo.advanced_cursor == continuation  # continuation persisted first
-    assert enqueued and enqueued[0][0] == ("source_sync", "wrk_1", "src_1")
+    # Non-sweep run: the inserted event still extracts, then the next chunk chains.
+    assert [(fn, args) for fn, args, _ in enqueued] == [
+        ("extract_event", ("wrk_1", "evt_m1")),
+        ("source_sync", ("wrk_1", "src_1", None)),
+    ]
+    assert enqueued[1][2] == {"_job_id": "backfill-chain:src_1"}
 
 
 async def test_sync_skips_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:

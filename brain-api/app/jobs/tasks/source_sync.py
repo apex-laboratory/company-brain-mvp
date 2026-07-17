@@ -16,20 +16,18 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.database import get_session
 from app.integrations import get_integration
 from app.integrations.base import BACKFILL_CURSOR_PREFIX, ChannelRef, ConnectorAuthError
 from app.jobs.queue import enqueue
-from app.jobs.repository import JobsRepository, SyncState
-from app.shared.helpers.crypto import decrypt, encrypt
+from app.jobs.repository import JobsRepository
+from app.jobs.token_helper import resolve_token
 from app.shared.middleware.with_tenant import run_in_tenant
 
 log = logging.getLogger(__name__)
 
 _repo = JobsRepository()
-_REFRESH_SKEW = timedelta(minutes=5)
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -52,35 +50,19 @@ def _is_rate_limited(response: httpx.Response) -> bool:
     )
 
 
-async def _resolve_token(session: AsyncSession, state: SyncState) -> str:
-    """Decrypt the access token, refreshing proactively when near expiry.
+async def source_sync(
+    ctx: dict, workspace_id: str, source_id: str, sweep_id: str | None = None
+) -> dict:
+    """ARQ entrypoint. ``ctx`` is the ARQ job context (unused).
 
-    A refreshed token is persisted (`update_tokens`) so providers with short-lived
-    access tokens (Google: ~1h) don't re-refresh every sweep, and a rotated refresh
-    token is never lost.
+    ``sweep_id`` is set when invoked from ``onboarding_sweep``: events are
+    stamped with it and extraction is deferred to the batched ``sweep_extract``
+    job (M3). Without it (webhook/poll paths) each inserted event enqueues its
+    own ``extract_event``.
     """
-    integration = get_integration(state.provider)
-    token = decrypt(state.access_token_enc.decode())  # type: ignore[union-attr]
-    expires = state.token_expires_at
-    if expires and expires < datetime.now(UTC) + _REFRESH_SKEW and state.refresh_token_enc:
-        refreshed = await integration.refresh(decrypt(state.refresh_token_enc.decode()))
-        token = refreshed.access_token
-        await _repo.update_tokens(
-            session,
-            state.id,
-            access_token_enc=encrypt(refreshed.access_token).encode(),
-            token_expires_at=refreshed.expires_at,
-            refresh_token_enc=(
-                encrypt(refreshed.refresh_token).encode() if refreshed.refresh_token else None
-            ),
-        )
-    return token
-
-
-async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
-    """ARQ entrypoint. ``ctx`` is the ARQ job context (unused)."""
     integration = None
     inserted = 0
+    inserted_ids: list[str] = []
     chain_backfill = False  # opaque-cursor backfill still has more chunks to fetch
     async with get_session() as session:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
@@ -95,7 +77,7 @@ async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
             # deriving the cursor from last_synced_at.
             opaque_cursor = getattr(integration, "opaque_cursor", False)
             try:
-                token = await _resolve_token(session, state)
+                token = await resolve_token(session, state)
                 channel = ChannelRef(
                     external_id=state.external_account_id or "workspace", name="workspace"
                 )
@@ -126,8 +108,13 @@ async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
 
                 for item in items:
                     event = integration.normalize(item)
-                    if await _repo.insert_event(session, workspace_id, event):
+                    event_id = await _repo.insert_event(
+                        session, workspace_id, event, sweep_id=sweep_id,
+                        source_connection_id=source_id,
+                    )
+                    if event_id:
                         inserted += 1
+                        inserted_ids.append(event_id)
 
                 if opaque_cursor:
                     await _repo.advance_sync(
@@ -167,13 +154,21 @@ async def source_sync(ctx: dict, workspace_id: str, source_id: str) -> dict:
                 await session.commit()
                 raise
 
+    # Non-sweep syncs (webhook backstop / 15-min poll) extract immediately;
+    # sweep events wait for the batched, rate-limited sweep_extract pass.
+    if sweep_id is None:
+        for event_id in inserted_ids:
+            await enqueue("extract_event", workspace_id, event_id)
+
     if chain_backfill:
         # The backfill is bounded per run and stored a continuation cursor; chain the
         # next chunk so onboarding completes without waiting for the next push/poll. Each
         # run makes forward progress, so this terminates when the window is exhausted.
         # A stable job id keeps a duplicate chunk from stacking within the same bucket.
+        # ``sweep_id`` is threaded through so chained sweep chunks keep stamping events
+        # for the batched sweep_extract pass instead of leaking per-event extractions.
         await enqueue(
-            "source_sync", workspace_id, source_id,
+            "source_sync", workspace_id, source_id, sweep_id,
             _job_id=f"backfill-chain:{source_id}",
         )
         log.info("source_sync: %s inserted %d events (backfill continues)", source_id, inserted)

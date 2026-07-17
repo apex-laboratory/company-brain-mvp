@@ -99,6 +99,8 @@ def _parse_ts(value: str | None) -> datetime | None:
 
 class ZendeskIntegration:
     provider = "zendesk"
+    # A ticket's comment chain is a discussion → decision_identifier LLM pass.
+    threaded = True
     # Webhook registration is a follow-up (see module docstring), so until it lands
     # updates only arrive by polling — opt this connection into the poll cron.
     push_delivery = False

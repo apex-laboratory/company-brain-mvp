@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     # Base domain for per-workspace MCP/brain endpoints.
     mcp_base_domain: str = "brainites.com"
 
+    # ── extraction pipeline LLMs (Phase 3) ───────────────────────────────────
+    # Empty-string defaults so the API/worker boot without keys; the LLM client
+    # raises at first use if a stage needs a missing key (pipeline-only failure).
+    groq_api_key: str = ""
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    anthropic_model: str = "claude-sonnet-5"
+    embedding_model: str = "text-embedding-3-small"
+    llm_max_attempts: int = 3  # per-call attempts inside the pipeline retry wrapper
+
     # source_authority.yaml (sweep processing order etc.); lives at the repo root
     # in dev. A missing file falls back to the built-in default order.
     source_authority_path: str = "../source_authority.yaml"

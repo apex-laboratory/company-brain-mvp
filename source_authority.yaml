@@ -50,5 +50,5 @@ sweep:
   processing_order: [notion, google_drive, github, jira, slack, zendesk]
   rate_per_minute: 10       # items processed per source per minute
   semaphore_limit: 5        # concurrent LLM calls
-  auto_publish_during_sweep: false
   # all sweep extractions go to review_queue regardless of confidence
+  # (enforced by skill_writer.route via sweep_sourced, not a config flag)

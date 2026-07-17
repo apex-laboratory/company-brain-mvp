@@ -125,8 +125,9 @@ async def test_event_idempotency() -> None:
             second = await jobs.insert_event(s, WS, event)  # duplicate
             await jobs.advance_sync(s, "src_1", datetime.now(UTC))
             await s.commit()
-    check("first insert succeeds", first is True)
-    check("duplicate insert is a no-op (idempotent)", second is False)
+    # insert_event returns the new event id (str) or None for a duplicate.
+    check("first insert succeeds", first is not None)
+    check("duplicate insert is a no-op (idempotent)", second is None)
 
 
 async def main() -> None:

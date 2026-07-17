@@ -11,11 +11,22 @@ from arq.worker import func
 
 from app.config.settings import settings
 from app.integrations.base import close_http_client
+from app.jobs.tasks.extract_event import extract_event
 from app.jobs.tasks.google_watch import watch_register, watch_renew
 from app.jobs.tasks.onboarding_sweep import onboarding_sweep
 from app.jobs.tasks.poll_sync import poll_pull_sources
+from app.jobs.tasks.reconcile_events import reenqueue_stale_events
 from app.jobs.tasks.source_sync import source_sync
+from app.jobs.tasks.sweep_extract import sweep_extract
 from app.jobs.tasks.webhook_ingest import webhook_ingest
+
+
+async def startup(ctx: dict) -> None:
+    """Fail loudly at boot if a configured LLM model has no price entry, so a
+    model rotation can't silently zero the pipeline's cost telemetry."""
+    from app.pipeline.llm.pricing import ensure_priced
+
+    ensure_priced(settings.groq_model, settings.anthropic_model, settings.embedding_model)
 
 
 async def shutdown(ctx: dict) -> None:
@@ -27,14 +38,29 @@ class WorkerSettings:
     # The sweep backfills every source's history sequentially, so it gets an hour
     # instead of the default 10-minute job_timeout; a timeout kill is resumed by
     # the ARQ retry (completed sources are skipped).
-    functions = [source_sync, webhook_ingest, watch_register, func(onboarding_sweep, timeout=3600)]
+    # extract_event dead-letters internally (outcome='failed') and never re-raises,
+    # so ARQ's retry_jobs won't stack on top of the pipeline's own LLM retries.
+    functions = [
+        source_sync,
+        webhook_ingest,
+        watch_register,
+        extract_event,
+        func(onboarding_sweep, timeout=3600),
+        # A large historical backfill can take a while to extract; give it an hour
+        # like the sweep itself. A timeout kill resumes on retry (queued events only).
+        func(sweep_extract, timeout=3600),
+    ]
     # Daily renewal of Google push channels (Drive/Gmail watch expires <= 7 days);
     # 15-minute polling for providers without push delivery (Notion).
     cron_jobs = [
         cron(watch_renew, hour=3, minute=0),
         cron(poll_pull_sources, minute={0, 15, 30, 45}),
+        # Backstop: re-enqueue events stranded at outcome='queued' (swallowed
+        # extract enqueue, chained-backfill chunks, sweep_extract timeout).
+        cron(reenqueue_stale_events, minute={5, 20, 35, 50}),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
+    on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10
     job_timeout = 600
