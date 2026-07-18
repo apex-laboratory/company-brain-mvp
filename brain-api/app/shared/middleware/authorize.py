@@ -52,3 +52,33 @@ def require_scope(*scopes: str) -> Callable[[AuthContext], Awaitable[None]]:
             raise ForbiddenError()
 
     return dependency
+
+
+def require_brain_access(scope: str) -> Callable[[AuthContext], Awaitable[None]]:
+    """Gate the agent-facing brain surface, failing closed by credential kind.
+
+    The delivery endpoints (skill search/read, ``query_brain``, override feedback)
+    are reachable by two caller types, and each is held to its own contract:
+
+    * **API keys** (agents) must hold ``scope`` — least privilege per key, so a
+      leaked key is bounded to exactly the brain surface it was granted, not the
+      whole dashboard (an API key's role is always ``viewer``, which would
+      otherwise pass ``require_role`` for every read route).
+    * **JWT** (dashboard users) must be role ≥ ``viewer``; dashboard sessions
+      don't carry brain scopes, and any signed-in member may read their own
+      workspace's skills.
+
+    RLS still backstops every query, so this is defense in depth, not the only
+    guard. Full-corpus export is intentionally *not* routed through here — it is
+    admin-only (see the skills router).
+    """
+    required_rank = _ROLE_RANK["viewer"]
+
+    async def dependency(auth: AuthContext = Depends(get_auth_context)) -> None:
+        if auth.kind == "api_key":
+            if scope not in set(auth.scopes):
+                raise ForbiddenError()
+        elif _ROLE_RANK.get(auth.role or "", 0) < required_rank:
+            raise ForbiddenError()
+
+    return dependency

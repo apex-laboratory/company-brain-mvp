@@ -10,11 +10,46 @@ worker process does not run the API lifespan that initializes the client.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from typing import Any
 
 from app.config.redis import init_redis
 
 log = logging.getLogger(__name__)
+
+# query_brain / search read-cache TTL (PRD Feature 13: 5-min TTL, invalidated on
+# any publish — which ``invalidate_skills`` does by clearing this whole keyspace).
+SEARCH_TTL_SECONDS = 300
+
+
+def search_key(workspace_id: str, query: str) -> str:
+    """Cache key for a query result, on the invalidated ``skills:{ws}:*`` keyspace."""
+    digest = hashlib.sha256(query.strip().lower().encode()).hexdigest()
+    return f"skills:{workspace_id}:query:{digest}"
+
+
+async def get_cached_search(workspace_id: str, query: str) -> dict | None:
+    """Return a cached query result, or ``None`` on miss/outage (best-effort)."""
+    try:
+        redis = await init_redis()
+        raw = await redis.get(search_key(workspace_id, query))
+        return json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 — a cache outage must never fail a query
+        log.warning("cache: search read failed for %s", workspace_id, exc_info=True)
+        return None
+
+
+async def set_cached_search(workspace_id: str, query: str, value: dict[str, Any]) -> None:
+    """Cache a query result for ``SEARCH_TTL_SECONDS`` (best-effort)."""
+    try:
+        redis = await init_redis()
+        await redis.set(
+            search_key(workspace_id, query), json.dumps(value), ex=SEARCH_TTL_SECONDS
+        )
+    except Exception:  # noqa: BLE001 — best-effort by design
+        log.warning("cache: search write failed for %s", workspace_id, exc_info=True)
 
 
 async def invalidate_skills(workspace_id: str) -> None:

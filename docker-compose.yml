@@ -25,5 +25,44 @@ services:
       timeout: 3s
       retries: 5
 
+  # FastAPI REST — the mature app under brain-api/app. Serves the delivery
+  # (/skills, /interactions), review, sources, and onboarding surfaces.
+  api:
+    build: ./brain-api
+    env_file: ./brain-api/.env
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # FastMCP query_brain server (its own process; agents auth via X-API-Key).
+  mcp:
+    build: ./brain-api
+    env_file: ./brain-api/.env
+    command: ["python", "-m", "app.mcp.server"]
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ARQ worker: extraction pipeline, sweeps, webhook ingest, async query-driven
+  # extraction, and the renewal/reconcile crons.
+  worker:
+    build: ./brain-api
+    env_file: ./brain-api/.env
+    command: ["arq", "app.jobs.worker.WorkerSettings"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:

@@ -20,6 +20,11 @@ DASHBOARD_LIMIT = "300/minute"
 # API-key creation is expensive and security-sensitive (each mints a live
 # credential); cap it per admin (API_DOCUMENTATION.md §Rate Limits).
 API_KEY_CREATE_LIMIT = "5/hour"
+# Agent-facing brain surface (search, skill reads, override feedback). Keyed by
+# workspace so one workspace's agents can't exhaust another's budget.
+BRAIN_LIMIT = "120/minute"
+# Full-corpus export is heavy and dumps all organizational knowledge; cap hard.
+EXPORT_LIMIT = "10/hour"
 
 # AUTH_LIMIT expressed as raw numbers for the manual API-key check below.
 _API_KEY_LIMIT = 10

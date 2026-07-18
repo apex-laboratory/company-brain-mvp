@@ -15,11 +15,24 @@ from datetime import UTC, datetime
 
 from app.config.database import get_session
 from app.modules.reviews.repository import ReviewsRepository
-from app.modules.reviews.schemas import ResolveResult, ReviewOut, ReviewStats
+from app.modules.reviews.schemas import (
+    BulkApproveItem,
+    BulkApproveResult,
+    ContradictionResolveRequest,
+    ResolveResult,
+    ReviewOut,
+    ReviewStats,
+    WriteRequest,
+)
 from app.pipeline import cache, embedder
 from app.pipeline.repository import PipelineRepository
 from app.pipeline.stages.skill_writer import next_version
-from app.shared.errors.app_error import ConflictError, NotFoundError
+from app.shared.errors.app_error import (
+    AppError,
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
 from app.shared.middleware.authenticate import AuthContext
 from app.shared.middleware.with_tenant import run_in_tenant
 
@@ -67,6 +80,20 @@ class ReviewsService:
         resolved = counts["approved"] + counts["rejected"]
         rate = counts["rejected"] / resolved if resolved else 0.0
         return ReviewStats(**counts, rejection_rate=round(rate, 4))
+
+    async def get(self, auth: AuthContext, review_id: str) -> ReviewOut:
+        """One review with its full source context (the card the UI renders).
+
+        For a contradiction the two conflicting sources live in ``payload``
+        (``source_a``/``source_b``); ``_out`` passes ``payload`` through verbatim."""
+        workspace_id, role = _require_workspace(auth)
+        async with get_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            review = await self._repo.get(session, review_id)
+        if review is None:
+            raise NotFoundError("Review")
+        return _out(review)
 
     async def approve(
         self, auth: AuthContext, review_id: str, comment: str | None
@@ -132,7 +159,144 @@ class ReviewsService:
             await session.commit()
         return ResolveResult(id=review_id, status="rejected", verdict="reject", skill_id=skill_id)
 
+    async def write(
+        self, auth: AuthContext, review_id: str, body: WriteRequest
+    ) -> ResolveResult:
+        """Human writes the correct skill logic directly (PRD Feature 21 / Process 6).
+
+        Publishes at confidence 1.0 regardless of the pipeline's routing — a human
+        confirmation is the strongest signal we have. Re-embeds on the corrected
+        logic so semantic search reflects the human's version."""
+        return await self._apply_write(
+            auth, review_id, base_logic=body.base_logic,
+            exceptions=body.exceptions, comment=body.comment,
+        )
+
+    async def resolve_contradiction(
+        self, auth: AuthContext, review_id: str, body: ContradictionResolveRequest
+    ) -> ResolveResult:
+        """Resolve a contradiction card (PRD Process 6).
+
+        ``source_a`` adopts the current/higher-authority side (the review's
+        ``before_text``); ``source_b`` adopts the newer conflicting side
+        (``after_text``); ``write`` delegates to a human-authored correction.
+        The winning side is applied as a new human-confirmed version."""
+        # Peek the kind so we fail fast on a non-contradiction review before any
+        # write; the authoritative pending-state check happens under the row lock.
+        workspace_id, role = _require_workspace(auth)
+        async with get_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            review = await self._load_pending(session, review_id)
+        if review["kind"] != "contradiction":
+            raise ValidationError("Review is not a contradiction.")
+
+        if body.choice == "write":
+            if body.correction is None:
+                raise ValidationError("A correction is required when choice is 'write'.")
+            return await self._apply_write(
+                auth, review_id, base_logic=body.correction.base_logic,
+                exceptions=body.correction.exceptions, comment=body.comment,
+            )
+
+        # source_a → current logic (before_text); source_b → proposed (after_text).
+        chosen = review["before_text"] if body.choice == "source_a" else review["after_text"]
+        if not chosen:
+            raise ValidationError(f"Contradiction has no text for {body.choice}.")
+        return await self._apply_write(
+            auth, review_id, base_logic=chosen, exceptions=None, comment=body.comment,
+        )
+
+    async def bulk_approve(
+        self, auth: AuthContext, ids: list[str], comment: str | None
+    ) -> BulkApproveResult:
+        """Approve many reviews at once (PRD Feature 23 bulk sweep review).
+
+        Each item runs through the single-item ``approve`` so it gets the same
+        row-lock + skill-mutation guarantees; a per-item failure (already resolved,
+        not found) is reported, never aborting the batch. De-dupes ids so a
+        repeated id can't double-apply."""
+        results: list[BulkApproveItem] = []
+        for review_id in dict.fromkeys(ids):
+            try:
+                await self.approve(auth, review_id, comment)
+                results.append(BulkApproveItem(id=review_id, status="approved"))
+            except (ConflictError, NotFoundError) as exc:
+                results.append(
+                    BulkApproveItem(id=review_id, status="skipped", detail=exc.message)
+                )
+            except AppError as exc:  # unexpected but bounded — report, don't abort
+                results.append(
+                    BulkApproveItem(id=review_id, status="error", detail=exc.message)
+                )
+        approved = sum(1 for r in results if r.status == "approved")
+        return BulkApproveResult(
+            results=results, approved=approved, skipped=len(results) - approved
+        )
+
     # ── internals ──────────────────────────────────────────────────────────────
+
+    async def _apply_write(
+        self,
+        auth: AuthContext,
+        review_id: str,
+        *,
+        base_logic: str,
+        exceptions: list[dict] | None,
+        comment: str | None,
+    ) -> ResolveResult:
+        """Shared human-authored publish path for ``write`` and contradiction picks.
+
+        Two-phase like ``approve``: re-embed outside any transaction (network I/O
+        must never pin a pooled connection), then apply + resolve under a row lock."""
+        workspace_id, role = _require_workspace(auth)
+
+        # Phase 1: read the pending review + skill; embed the corrected logic.
+        async with get_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            review = await self._load_pending(session, review_id)
+            skill_id = review["skill_id"]
+            if not skill_id:
+                raise ValidationError("Review has no skill to write.")
+            skill = await self._skills.get_skill(session, skill_id)
+            if skill is None:
+                raise NotFoundError("Skill")
+        embedding, _ = await embedder.embed_text(f"{skill['trigger']}\n{base_logic}")
+
+        # Phase 2: lock the review, apply the human version, resolve.
+        async with get_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            review = await self._load_pending(session, review_id, for_update=True)
+            skill = await self._skills.get_skill(session, skill_id)
+            if skill is None:
+                raise NotFoundError("Skill")
+            new_exceptions = (
+                exceptions if exceptions is not None else (skill["exceptions_block"] or [])
+            )
+            new_version = next_version(skill["version"])
+            await self._skills.insert_skill_version(
+                session, workspace_id=skill["workspace_id"], skill_id=skill_id,
+                version=new_version, base_logic=base_logic, exceptions_block=new_exceptions,
+                confidence=_HUMAN_CONFIDENCE, change_type="human_edit",
+            )
+            await self._skills.update_skill_logic(
+                session, skill_id, base_logic=base_logic, exceptions_block=new_exceptions,
+                version=new_version, confidence=_HUMAN_CONFIDENCE, embedding=embedding,
+                status="active",
+            )
+            resolved = await self._repo.resolve(
+                session, review_id, status="approved", verdict="approve",
+                comment=comment, resolved_by=auth.user_id, resolved_at=datetime.now(UTC),
+            )
+            if not resolved:
+                raise ConflictError("Review already resolved.")
+            await session.commit()
+        await cache.invalidate_skills(workspace_id)
+        return ResolveResult(
+            id=review_id, status="approved", verdict="approve", skill_id=skill_id
+        )
 
     async def _load_pending(
         self, session, review_id: str, *, for_update: bool = False

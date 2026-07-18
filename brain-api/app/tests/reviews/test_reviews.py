@@ -15,10 +15,17 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.modules.reviews import service as service_module
-from app.modules.reviews.schemas import ResolveResult, ReviewOut, ReviewStats
+from app.modules.reviews.schemas import (
+    BulkApproveResult,
+    ContradictionResolveRequest,
+    ResolveResult,
+    ReviewOut,
+    ReviewStats,
+    WriteRequest,
+)
 from app.modules.reviews.service import ReviewsService
 from app.pipeline.types import StageUsage
-from app.shared.errors.app_error import ConflictError, NotFoundError
+from app.shared.errors.app_error import ConflictError, NotFoundError, ValidationError
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
 
 _NOW = datetime(2026, 7, 5, 10, 0, tzinfo=UTC)
@@ -156,6 +163,163 @@ async def test_approve_contradiction_applies_new_source() -> None:
     assert skills.update_skill_logic.await_args.kwargs["base_logic"] == "never refund after 14 days"
 
 
+# ── get ──────────────────────────────────────────────────────────────────────
+
+async def test_get_returns_review_with_payload() -> None:
+    review = _review(
+        kind="contradiction",
+        payload={"source_a": {"author": "Sarah"}, "source_b": {"author": "Mike"}},
+    )
+    svc, _repo, _skills, patches = _svc(review)
+    _enter(patches)
+    try:
+        out = await svc.get(_auth(), "rev_1")
+    finally:
+        _exit(patches)
+    assert isinstance(out, ReviewOut)
+    assert out.payload["source_a"]["author"] == "Sarah"
+
+
+async def test_get_unknown_is_not_found() -> None:
+    svc, _repo, _skills, patches = _svc(None)
+    _enter(patches)
+    try:
+        with pytest.raises(NotFoundError):
+            await svc.get(_auth(), "rev_x")
+    finally:
+        _exit(patches)
+
+
+# ── write (human correction) ────────────────────────────────────────────────────
+
+async def test_write_publishes_human_version() -> None:
+    svc, repo, skills, patches = _svc(
+        _review(kind="policy_change"), _skill(version="v1", status="active")
+    )
+    _enter(patches)
+    try:
+        result = await svc.write(
+            _auth(), "rev_1", WriteRequest(base_logic="refund within 60 days")
+        )
+    finally:
+        _exit(patches)
+    assert result.status == "approved"
+    upd = skills.update_skill_logic.await_args
+    assert upd.kwargs["base_logic"] == "refund within 60 days"
+    assert upd.kwargs["confidence"] == 1.0  # human-confirmed
+    assert upd.kwargs["version"] == "v2"
+    assert len(upd.kwargs["embedding"]) == 1536
+    assert skills.insert_skill_version.await_args.kwargs["change_type"] == "human_edit"
+    repo.resolve.assert_awaited_once()
+
+
+async def test_write_without_skill_is_validation_error() -> None:
+    svc, _repo, _skills, patches = _svc(_review(skill_id=None))
+    _enter(patches)
+    try:
+        with pytest.raises(ValidationError):
+            await svc.write(_auth(), "rev_1", WriteRequest(base_logic="x"))
+    finally:
+        _exit(patches)
+
+
+# ── contradiction resolution ────────────────────────────────────────────────────
+
+async def test_resolve_contradiction_source_b_applies_after_text() -> None:
+    review = _review(kind="contradiction", before_text="A logic", after_text="B logic")
+    svc, _repo, skills, patches = _svc(review, _skill(status="active"))
+    _enter(patches)
+    try:
+        await svc.resolve_contradiction(
+            _auth(), "rev_1", ContradictionResolveRequest(choice="source_b")
+        )
+    finally:
+        _exit(patches)
+    assert skills.update_skill_logic.await_args.kwargs["base_logic"] == "B logic"
+
+
+async def test_resolve_contradiction_source_a_applies_before_text() -> None:
+    review = _review(kind="contradiction", before_text="A logic", after_text="B logic")
+    svc, _repo, skills, patches = _svc(review, _skill(status="active"))
+    _enter(patches)
+    try:
+        await svc.resolve_contradiction(
+            _auth(), "rev_1", ContradictionResolveRequest(choice="source_a")
+        )
+    finally:
+        _exit(patches)
+    assert skills.update_skill_logic.await_args.kwargs["base_logic"] == "A logic"
+
+
+async def test_resolve_contradiction_write_uses_correction() -> None:
+    review = _review(kind="contradiction", before_text="A", after_text="B")
+    svc, _repo, skills, patches = _svc(review, _skill(status="active"))
+    _enter(patches)
+    try:
+        await svc.resolve_contradiction(
+            _auth(), "rev_1",
+            ContradictionResolveRequest(
+                choice="write", correction=WriteRequest(base_logic="C logic")
+            ),
+        )
+    finally:
+        _exit(patches)
+    assert skills.update_skill_logic.await_args.kwargs["base_logic"] == "C logic"
+
+
+async def test_resolve_contradiction_rejects_non_contradiction() -> None:
+    svc, _repo, _skills, patches = _svc(_review(kind="new_decision"), _skill())
+    _enter(patches)
+    try:
+        with pytest.raises(ValidationError):
+            await svc.resolve_contradiction(
+                _auth(), "rev_1", ContradictionResolveRequest(choice="source_a")
+            )
+    finally:
+        _exit(patches)
+
+
+async def test_resolve_contradiction_write_requires_correction() -> None:
+    svc, _repo, _skills, patches = _svc(_review(kind="contradiction"), _skill())
+    _enter(patches)
+    try:
+        with pytest.raises(ValidationError):
+            await svc.resolve_contradiction(
+                _auth(), "rev_1", ContradictionResolveRequest(choice="write")
+            )
+    finally:
+        _exit(patches)
+
+
+# ── bulk approve ─────────────────────────────────────────────────────────────────
+
+async def test_bulk_approve_reports_per_item() -> None:
+    svc, _repo, _skills, patches = _svc(None)
+    _enter(patches)
+    # Stub the single-item approve: rev_1 succeeds, rev_2 already resolved, rev_3 missing.
+    outcomes = {
+        "rev_1": ResolveResult(id="rev_1", status="approved", verdict="approve"),
+        "rev_2": ConflictError("Review already approved."),
+        "rev_3": NotFoundError("Review"),
+    }
+
+    async def fake_approve(auth, review_id, comment):
+        val = outcomes[review_id]
+        if isinstance(val, Exception):
+            raise val
+        return val
+
+    try:
+        with patch.object(svc, "approve", side_effect=fake_approve):
+            result = await svc.bulk_approve(_auth(), ["rev_1", "rev_2", "rev_3", "rev_1"], None)
+    finally:
+        _exit(patches)
+    assert isinstance(result, BulkApproveResult)
+    assert result.approved == 1 and result.skipped == 2  # rev_1 de-duped
+    by_id = {r.id: r.status for r in result.results}
+    assert by_id == {"rev_1": "approved", "rev_2": "skipped", "rev_3": "skipped"}
+
+
 # ── reject ─────────────────────────────────────────────────────────────────────
 
 async def test_reject_new_decision_demotes_skill_to_draft() -> None:
@@ -230,6 +394,22 @@ class _StubService:
     async def reject(self, auth, review_id, comment):
         return ResolveResult(id=review_id, status="rejected", verdict="reject", skill_id="skl_1")
 
+    async def get(self, auth, review_id):
+        return ReviewOut(id=review_id, title="Refund", kind="contradiction",
+                         status="pending", created_at=_NOW,
+                         payload={"source_a": {"author": "Sarah"}})
+
+    async def write(self, auth, review_id, body):
+        return ResolveResult(id=review_id, status="approved", verdict="approve", skill_id="skl_1")
+
+    async def resolve_contradiction(self, auth, review_id, body):
+        return ResolveResult(id=review_id, status="approved", verdict="approve", skill_id="skl_1")
+
+    async def bulk_approve(self, auth, ids, comment):
+        from app.modules.reviews.schemas import BulkApproveItem
+        items = [BulkApproveItem(id=i, status="approved") for i in ids]
+        return BulkApproveResult(results=items, approved=len(items), skipped=0)
+
 
 def _set_auth(role: str) -> None:
     from app.main import app
@@ -279,3 +459,36 @@ async def test_non_admin_gets_403(client: AsyncClient) -> None:
     _set_auth("editor")
     resp = await client.post("/api/v1/reviews/rev_1/reject")
     assert resp.status_code == 403
+
+
+async def test_get_review_route(client: AsyncClient) -> None:
+    resp = await client.get("/api/v1/reviews/rev_1")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["payload"]["source_a"]["author"] == "Sarah"
+
+
+async def test_write_route(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/api/v1/reviews/rev_1/write", json={"baseLogic": "refund within 60 days"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "approved"
+
+
+async def test_resolve_route(client: AsyncClient) -> None:
+    resp = await client.post("/api/v1/reviews/rev_1/resolve", json={"choice": "source_b"})
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "approved"
+
+
+async def test_bulk_approve_route(client: AsyncClient) -> None:
+    resp = await client.post(
+        "/api/v1/reviews/bulk-approve", json={"ids": ["rev_1", "rev_2"]}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["approved"] == 2
+
+
+async def test_write_route_rejects_empty_body(client: AsyncClient) -> None:
+    resp = await client.post("/api/v1/reviews/rev_1/write", json={})
+    assert resp.status_code == 422  # base_logic required

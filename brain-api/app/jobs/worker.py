@@ -15,6 +15,7 @@ from app.jobs.tasks.extract_event import extract_event
 from app.jobs.tasks.google_watch import watch_register, watch_renew
 from app.jobs.tasks.onboarding_sweep import onboarding_sweep
 from app.jobs.tasks.poll_sync import poll_pull_sources
+from app.jobs.tasks.query_extract import query_extract
 from app.jobs.tasks.reconcile_events import reenqueue_stale_events
 from app.jobs.tasks.source_sync import source_sync
 from app.jobs.tasks.sweep_extract import sweep_extract
@@ -49,6 +50,7 @@ class WorkerSettings:
         # A large historical backfill can take a while to extract; give it an hour
         # like the sweep itself. A timeout kill resumes on retry (queued events only).
         func(sweep_extract, timeout=3600),
+        query_extract,
     ]
     # Daily renewal of Google push channels (Drive/Gmail watch expires <= 7 days);
     # 15-minute polling for providers without push delivery (Notion).

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     environment: Literal["development", "test", "production"] = "development"
     port: int = 4000
+    mcp_port: int = 8001  # FastMCP query_brain server (its own process)
 
     database_url: str  # postgresql+asyncpg://...
     redis_url: str  # redis://...

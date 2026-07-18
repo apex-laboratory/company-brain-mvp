@@ -7,10 +7,12 @@ reject decision itself is API-only in Phase 3.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
+
+from app.shared.schemas import CamelRequestModel
 
 
 class _Camel(BaseModel):
@@ -49,6 +51,47 @@ class ResolveResult(_Camel):
     status: Literal["approved", "rejected"]
     verdict: Literal["approve", "reject"]
     skill_id: str | None = None
+
+
+class WriteRequest(CamelRequestModel):
+    """A reviewer-authored correction: the human writes the skill's logic directly.
+
+    Publishes at confidence 1.0 (human-confirmed) regardless of the pipeline's
+    original routing — PRD Feature 21 / Process 6 "Write correction"."""
+
+    base_logic: Annotated[str, Field(min_length=1, max_length=20_000)]
+    exceptions: list[dict] | None = None  # replaces the block when provided
+    comment: str | None = None
+
+
+class ContradictionResolveRequest(CamelRequestModel):
+    """Resolve a contradiction card: pick a source as authoritative, or write one.
+
+    ``source_a`` / ``source_b`` adopt that side's proposed text (from the review's
+    ``payload``) as the new base logic; ``write`` requires ``correction``."""
+
+    choice: Literal["source_a", "source_b", "write"]
+    correction: WriteRequest | None = None
+    comment: str | None = None
+
+
+class BulkApproveRequest(CamelRequestModel):
+    """Approve many sweep-sourced reviews at once (PRD Feature 23)."""
+
+    ids: Annotated[list[str], Field(min_length=1, max_length=200)]
+    comment: str | None = None
+
+
+class BulkApproveItem(_Camel):
+    id: str
+    status: Literal["approved", "skipped", "error"]
+    detail: str | None = None  # reason for skipped/error
+
+
+class BulkApproveResult(_Camel):
+    results: list[BulkApproveItem]
+    approved: int
+    skipped: int
 
 
 class ReviewStats(_Camel):
