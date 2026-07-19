@@ -324,10 +324,11 @@ class AuthService:
         if provider == "saml":
             raise AppError(501, "not_implemented", "SAML is not yet supported.")
 
-        redirect_uri = (
-            f"{settings.oauth_redirect_base_url}"
-            f"/api/v1/auth/oauth/{provider}/callback"
-        )
+        # Login SSO is frontend-driven: the provider redirects the browser to the
+        # FE callback page (not the backend), which then POSTs {code, state} to
+        # /auth/oauth/{provider}/callback. So the redirect_uri registered with the
+        # provider — and echoed here + in the token exchange — is the FE page.
+        redirect_uri = f"{settings.frontend_url}{settings.frontend_oauth_callback_path}"
 
         expires_at = datetime.now(UTC) + timedelta(
             seconds=settings.oauth_state_ttl_seconds

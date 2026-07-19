@@ -61,19 +61,30 @@ GET /api/v1/auth/me
 
 Two distinct flows, do not conflate:
 
-- **Login SSO** (`POST /auth/oauth/{provider}/callback`) is **frontend-driven**: the
-  provider redirects to a **frontend** page, which extracts `code` + `state` and
-  POSTs them to the backend. So the redirect URI registered in the Google/GitHub
-  console for **login** must be a **frontend** URL (see `FRONTEND_URL`).
-  Flow: FE calls `GET /auth/oauth/{provider}/start?mode=signin|signup` → gets
-  `{ authorizationUrl, state }` → redirects the browser there → provider bounces
-  back to the FE callback page → FE POSTs `{ code, state }` to the callback route.
+- **Login SSO** (Google/GitHub) is **frontend-driven**. The backend builds the
+  provider `redirect_uri` as **`{FRONTEND_URL}{FRONTEND_OAUTH_CALLBACK_PATH}`**
+  (default `http://localhost:3000/auth/callback`) — a **frontend** page, not a
+  backend route. Register exactly that URL as the Authorized redirect URI in the
+  Google/GitHub console.
+
+  Flow:
+  1. FE calls `GET /auth/oauth/{provider}/start?mode=signin|signup` → `{ authorizationUrl, state }`.
+  2. FE remembers the provider (e.g. sessionStorage) and redirects the browser to `authorizationUrl`.
+  3. Provider bounces back to `{FRONTEND_URL}/auth/callback?code=…&state=…`.
+  4. The FE callback page POSTs `{ code, state }` to `POST /auth/oauth/{provider}/callback`.
+  5. BE verifies state, exchanges the code, upserts the user, returns a session (+ sets the refresh cookie) — same shape as signin.
+
+  **Setup (Google):** Cloud Console → OAuth consent screen (scopes `openid email
+  profile`; add test users while in Testing) → Credentials → OAuth client ID (Web
+  application) → Authorized redirect URI = the FE callback URL above → put the
+  client id/secret in `LOGIN_GOOGLE_CLIENT_ID` / `LOGIN_GOOGLE_CLIENT_SECRET`.
+
 - **Source connectors** (Slack/Notion/GitHub-App/Google/Zendesk/Jira) use **backend**
   GET callbacks built from `OAUTH_REDIRECT_BASE_URL`
   (`{base}/api/v1/sources/{provider}/callback`). These are not the login flow.
 
-Align the console redirect URIs with `FRONTEND_URL` (login) and
-`OAUTH_REDIRECT_BASE_URL` (connectors) for each environment.
+Align the console redirect URIs with `FRONTEND_URL` + `FRONTEND_OAUTH_CALLBACK_PATH`
+(login) and `OAUTH_REDIRECT_BASE_URL` (connectors) for each environment.
 
 ## Endpoint summary
 

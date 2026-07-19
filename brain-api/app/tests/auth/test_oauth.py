@@ -273,6 +273,29 @@ async def test_start_github_returns_authorization_url_and_state(
 
 
 @pytest.mark.asyncio
+async def test_start_uses_frontend_callback_redirect_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from urllib.parse import quote
+
+    repo = FakeRepo()
+    service = AuthService(repository=repo)
+    monkeypatch.setattr("app.modules.auth.service.get_session", _fake_session_ctx)
+
+    result = await service.start_oauth(
+        provider="google", mode="signin", user_id=None, workspace_id=None
+    )
+
+    # Login is frontend-driven: the redirect_uri sent to the provider is the FE
+    # callback page, not a backend route.
+    expected = quote(
+        f"{settings.frontend_url}{settings.frontend_oauth_callback_path}", safe=""
+    )
+    assert expected in result.authorization_url
+    assert "%2Fapi%2Fv1%2Fauth" not in result.authorization_url
+
+
+@pytest.mark.asyncio
 async def test_start_saml_raises_501() -> None:
     service = AuthService(repository=FakeRepo())
 

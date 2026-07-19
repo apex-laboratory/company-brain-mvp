@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     # providers. Must match a redirect registered in each provider's app config.
     oauth_redirect_base_url: str = "http://localhost:4000"
     frontend_url: str = "http://localhost:3000"
+    # Login SSO (Google/GitHub) redirects the browser to this FRONTEND page, which
+    # reads ?code&state and POSTs them to /auth/oauth/{provider}/callback. Must be
+    # registered verbatim as the "Authorized redirect URI" in each provider's
+    # console. Distinct from oauth_redirect_base_url (that's for source-connector
+    # callbacks, which the backend receives directly).
+    frontend_oauth_callback_path: str = "/auth/callback"
     notion_client_id: str = ""
     notion_client_secret: str = ""
     # GitHub App (KAN-7). Auth is App-JWT (RS256) → per-installation tokens, so no
