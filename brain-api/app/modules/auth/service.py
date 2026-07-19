@@ -26,6 +26,7 @@ from app.modules.auth.schemas import (
     AuthSessionOut,
     EmailSigninRequest,
     EmailSignupRequest,
+    MeOut,
     OAuthStartOut,
     UserOut,
     WorkspaceOut,
@@ -175,6 +176,34 @@ class AuthService:
             workspace=workspace,
             access_token=access_token,
             refresh_token=refresh_token,
+            next_step="dashboard" if membership is not None else "onboarding",
+        )
+
+    async def me(self, *, user_id: str) -> MeOut:
+        """Return the caller's user + primary workspace + role (GET /auth/me).
+
+        The FE calls this on reload to rebuild session state from the access
+        token instead of trusting a localStorage snapshot. Mirrors the session
+        payload's user/workspace/next_step, plus ``role`` for route guards, and
+        omits tokens. Opens its own session (like signup/signin)."""
+        async with get_session() as session:
+            user = await self._repository.find_user_by_id(session, user_id)
+            if user is None:
+                raise UnauthorizedError("User not found")
+            membership = await self._repository.find_primary_membership(session, user_id)
+        workspace = (
+            WorkspaceOut(
+                id=membership.workspace_id,
+                name=membership.workspace_name,
+                slug=membership.workspace_slug,
+            )
+            if membership is not None
+            else None
+        )
+        return MeOut(
+            user=UserOut(id=user.id, email=user.email, name=user.name),
+            workspace=workspace,
+            role=membership.role if membership is not None else None,
             next_step="dashboard" if membership is not None else "onboarding",
         )
 

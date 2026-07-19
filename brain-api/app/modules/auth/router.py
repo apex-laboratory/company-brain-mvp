@@ -61,11 +61,20 @@ def _optional_auth(
         raise UnauthorizedError("Invalid or expired access token")
     return auth
 
-# The raw refresh token is delivered as an httpOnly, secure, samesite=strict
-# cookie (BACKEND_BEST_PRACTICES.md §7) so it is never readable by JS. Scoped to
-# the auth path so it is only sent where it is needed.
+# The raw refresh token is delivered as an httpOnly, secure cookie
+# (BACKEND_BEST_PRACTICES.md §7) so it is never readable by JS. Scoped to the auth
+# path so it is only sent where it is needed.
+#
+# SameSite is environment-driven: `strict` in dev (FE and BE share the localhost
+# site) is the safest default, but a production deployment with the FE and BE on
+# *different registrable domains* needs `none` (with Secure) or the browser drops
+# the cookie on the cross-site refresh call. If FE and BE are same-site
+# subdomains in prod, `strict` still works — override via topology if so.
 _REFRESH_COOKIE = "refresh_token"
 _REFRESH_COOKIE_PATH = "/api/v1/auth"
+_REFRESH_COOKIE_SAMESITE: Literal["strict", "none"] = (
+    "none" if settings.environment == "production" else "strict"
+)
 
 
 def get_auth_service() -> AuthService:
@@ -94,7 +103,7 @@ def _set_refresh_cookie(response: Response, raw_token: str) -> None:
         max_age=settings.refresh_token_ttl_seconds,
         httponly=True,
         secure=True,
-        samesite="strict",
+        samesite=_REFRESH_COOKIE_SAMESITE,
         path=_REFRESH_COOKIE_PATH,
     )
 
@@ -138,6 +147,27 @@ async def signin(
         ip=_client_ip(request),
     )
     return ok(request, session.model_dump(by_alias=True))
+
+
+@router.get("/me")
+@limiter.limit(AUTH_LIMIT)
+async def me(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    service: AuthService = Depends(get_auth_service),
+) -> Response:
+    """Return the caller's user + workspace + role from the access token.
+
+    Requires a valid dashboard JWT (not an API key) — it is the "who am I" the FE
+    calls on reload to rehydrate session state instead of trusting localStorage.
+    """
+    auth = _optional_auth(credentials)
+    if auth is None:
+        return error_response(
+            request, status=401, code="unauthorized", message="Authentication required.",
+        )
+    result = await service.me(user_id=auth.user_id)
+    return ok(request, result.model_dump(by_alias=True))
 
 
 @router.post("/refresh")
