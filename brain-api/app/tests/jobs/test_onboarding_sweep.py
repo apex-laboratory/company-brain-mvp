@@ -62,7 +62,7 @@ async def _run(
         return outcome  # type: ignore[return-value]
 
     session = MagicMock(commit=AsyncMock())
-    with patch.object(job, "get_session", return_value=_AsyncCtx(session)), patch.object(
+    with patch.object(job, "get_tenant_session", return_value=_AsyncCtx(session)), patch.object(
         job, "run_in_tenant", return_value=_AsyncCtx(None)
     ), patch.object(job, "_repo", repo), patch.object(
         job, "source_sync", fake_sync

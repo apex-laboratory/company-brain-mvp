@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.config.database import get_session
+from app.config.database import get_tenant_session
 from app.modules.reviews.repository import ReviewsRepository
 from app.modules.reviews.schemas import (
     BulkApproveItem,
@@ -65,7 +65,7 @@ class ReviewsService:
         self, auth: AuthContext, *, status: str | None, kind: str | None, limit: int
     ) -> list[ReviewOut]:
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             rows = await self._repo.list(session, status=status, kind=kind, limit=limit)
@@ -73,7 +73,7 @@ class ReviewsService:
 
     async def stats(self, auth: AuthContext) -> ReviewStats:
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             counts = await self._repo.stats(session)
@@ -87,7 +87,7 @@ class ReviewsService:
         For a contradiction the two conflicting sources live in ``payload``
         (``source_a``/``source_b``); ``_out`` passes ``payload`` through verbatim."""
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             review = await self._repo.get(session, review_id)
@@ -104,7 +104,7 @@ class ReviewsService:
         # network I/O (re-embedding) OUTSIDE a transaction — an embedding call must
         # never hold a pooled connection / open tenant transaction (orchestrator
         # rule), or an OpenAI outage pins them for the whole retry window.
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             review = await self._load_pending(session, review_id)
@@ -118,7 +118,7 @@ class ReviewsService:
 
         # Phase 2 (write): lock the review row so a concurrent approve/reject
         # serializes behind us and then sees the resolved status (no double-apply).
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             review = await self._load_pending(session, review_id, for_update=True)
@@ -139,7 +139,7 @@ class ReviewsService:
         self, auth: AuthContext, review_id: str, comment: str | None
     ) -> ResolveResult:
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             review = await self._load_pending(session, review_id, for_update=True)
@@ -184,7 +184,7 @@ class ReviewsService:
         # Peek the kind so we fail fast on a non-contradiction review before any
         # write; the authoritative pending-state check happens under the row lock.
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             review = await self._load_pending(session, review_id)
@@ -252,7 +252,7 @@ class ReviewsService:
         workspace_id, role = _require_workspace(auth)
 
         # Phase 1: read the pending review + skill; embed the corrected logic.
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             review = await self._load_pending(session, review_id)
@@ -265,7 +265,7 @@ class ReviewsService:
         embedding, _ = await embedder.embed_text(f"{skill['trigger']}\n{base_logic}")
 
         # Phase 2: lock the review, apply the human version, resolve.
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             review = await self._load_pending(session, review_id, for_update=True)

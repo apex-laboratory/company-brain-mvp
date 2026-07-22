@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-from app.config.database import get_session
+from app.config.database import get_tenant_session
 from app.integrations import get_integration
 from app.integrations.base import BACKFILL_CURSOR_PREFIX, ChannelRef, ConnectorAuthError
 from app.jobs.queue import enqueue
@@ -64,7 +64,7 @@ async def source_sync(
     inserted = 0
     inserted_ids: list[str] = []
     chain_backfill = False  # opaque-cursor backfill still has more chunks to fetch
-    async with get_session() as session:
+    async with get_tenant_session() as session:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
             state = await _repo.get_sync_state(session, source_id)
             if state is None or state.access_token_enc is None:

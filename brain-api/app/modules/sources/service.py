@@ -16,7 +16,7 @@ import re
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from app.config.database import get_session
+from app.config.database import get_session, get_tenant_session
 from app.config.settings import settings
 from app.integrations import get_integration
 from app.integrations.base import OAuthTokens
@@ -219,7 +219,7 @@ class SourcesService:
 
         # 4. Encrypt + persist under the resolving workspace (admin-managed table).
         connection_id = generate_id("source")
-        async with get_session() as session:
+        async with get_tenant_session() as session:
             async with run_in_tenant(session, resolved.workspace_id, resolved.user_id, "admin"):
                 connection_id = await self._repo.upsert_connection(
                     session,
@@ -250,14 +250,14 @@ class SourcesService:
     # ── connections ──────────────────────────────────────────────────────────────
     async def list_connections(self, auth: AuthContext) -> list[SourceConnectionOut]:
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session:
+        async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 rows = await self._repo.list_connections(session)
         return [SourceConnectionOut(**row) for row in rows]
 
     async def disconnect(self, auth: AuthContext, source_id: str) -> None:
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session:
+        async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 secrets_row = await self._repo.get_connection_secrets(session, source_id)
                 if secrets_row is None:
@@ -305,7 +305,7 @@ class SourcesService:
     async def list_channels(self, auth: AuthContext, source_id: str) -> list[ChannelOut]:
         """Merge provider-discovered channels with persisted selection state."""
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session:
+        async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 secrets_row = await self._repo.get_connection_secrets(session, source_id)
                 if secrets_row is None:
@@ -335,7 +335,7 @@ class SourcesService:
         self, auth: AuthContext, source_id: str, req: ChannelSelectRequest
     ) -> list[ChannelOut]:
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session:
+        async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 provider = await self._repo.get_connection_provider(session, source_id)
                 if provider is None:

@@ -104,6 +104,8 @@ async def test_callback_stored_subdomain_wins_over_query_installation_id() -> No
     session = MagicMock(commit=AsyncMock())
     with patch.object(svc, "get_integration", return_value=fake), patch.object(
         svc, "get_session", return_value=_AsyncCtx(session)
+    ), patch.object(
+        svc, "get_tenant_session", return_value=_AsyncCtx(session)
     ), patch.object(svc, "run_in_tenant", return_value=_AsyncCtx(None)), patch.object(
         svc, "enqueue", AsyncMock()
     ):

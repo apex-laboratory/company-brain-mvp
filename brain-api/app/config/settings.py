@@ -26,7 +26,13 @@ class Settings(BaseSettings):
     port: int = 4000
     mcp_port: int = 8001  # FastMCP query_brain server (its own process)
 
-    database_url: str  # postgresql+asyncpg://...
+    database_url: str  # postgresql+asyncpg://... — PRIVILEGED role (may BYPASSRLS)
+    # Restricted, RLS-subject role used for ALL tenant-scoped traffic
+    # (tenant_session / run_in_tenant). Provision it with
+    # scripts/provision_tenant_role.py. When unset the app falls back to
+    # database_url and logs a loud warning — RLS then does NOT isolate tenants,
+    # so this MUST be set in any shared/production deployment.
+    tenant_database_url: str | None = None
     redis_url: str  # redis://...
 
     jwt_access_secret: str  # >= 32 chars

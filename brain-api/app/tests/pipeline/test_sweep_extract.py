@@ -32,7 +32,7 @@ def _wire(monkeypatch, queued, run_results, *, cfg=None):
         ran.append((event_id, sweep_sourced))
         return run_results.get(event_id, PipelineResult(outcome="review", cost_usd=0.01))
 
-    monkeypatch.setattr(job, "get_session", _fake_session)
+    monkeypatch.setattr(job, "get_tenant_session", _fake_session)
     monkeypatch.setattr(job, "run_in_tenant", lambda *a, **k: _null_ctx())
     default_cfg = cfg or SweepConfig(rate_per_minute=0, semaphore_limit=5)
     monkeypatch.setattr(job, "_repo", repo)

@@ -83,7 +83,7 @@ def _svc(review: dict | None, skill: dict | None = None):
     svc = ReviewsService(repository=repo, skills=skills)
     session = MagicMock(commit=AsyncMock())
     patches = (
-        patch.object(service_module, "get_session", return_value=_AsyncCtx(session)),
+        patch.object(service_module, "get_tenant_session", return_value=_AsyncCtx(session)),
         patch.object(service_module, "run_in_tenant", return_value=_AsyncCtx(None)),
         patch.object(service_module.cache, "invalidate_skills", AsyncMock()),
         patch.object(

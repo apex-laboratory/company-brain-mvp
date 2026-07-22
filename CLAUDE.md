@@ -39,7 +39,7 @@ The review UI and onboarding UI are the frontend repo's job, not ours.
 Every new endpoint or agent-facing tool MUST:
 
 1. **Resolve identity** via `get_auth_context` (`app/shared/middleware/authenticate.py`) — JWT (dashboard) or `X-API-Key` (agents → `viewer` role + scopes).
-2. **Scope every DB access** inside `tenant_session(auth, workspace_id)` / `run_in_tenant` (`app/shared/middleware/with_tenant.py`) so Postgres RLS applies. Guard cross-workspace access with `assert_workspace_member`.
+2. **Scope every DB access** inside `tenant_session(auth, workspace_id)` / `run_in_tenant` (`app/shared/middleware/with_tenant.py`) so Postgres RLS applies. These open on the **restricted `brain_app` pool** (`get_tenant_session`, `TENANT_DATABASE_URL`) which is *subject to* RLS. **Never** run a workspace-scoped query on the privileged `get_session` pool (Supabase `postgres` has `BYPASSRLS`, so RLS is silently skipped and rows leak across tenants). `get_session` is only for pre-tenant/cross-workspace work (auth, `oauth_states`, crons). `run_in_tenant` fail-closes on a privileged-pool session. Guard cross-workspace access with `assert_workspace_member`.
 3. **Authorize** with `require_role` (JWT hierarchy), `require_scope` (API-key scopes), or `require_brain_access(scope)` (agent read surface — fails closed by credential kind).
 4. **Keep SQL parameter-bound** — never string-interpolate. Repositories are stateless, take `session` first, and are the only place SQL lives.
 5. **Return** via the `ok()/created()` envelope (`app/shared/http/respond.py`); raise typed `AppError` subclasses (never bare `HTTPException` for domain errors).

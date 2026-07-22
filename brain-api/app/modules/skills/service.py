@@ -12,7 +12,7 @@ import io
 import re
 import zipfile
 
-from app.config.database import get_session
+from app.config.database import get_tenant_session
 from app.modules.skills.repository import PUBLISHED_STATUSES, SkillsRepository
 from app.modules.skills.schemas import (
     OverrideResult,
@@ -56,7 +56,7 @@ class SkillsService:
         """Semantic search over published skills; logs the interaction."""
         workspace_id, role = _require_workspace(auth)
         embedding, _ = await embedder.embed_text(query)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             hits = await self._pipeline.similar_skills(
@@ -101,7 +101,7 @@ class SkillsService:
             return {**cached, "interaction_id": interaction_id, "cache_hit": True}
 
         embedding, _ = await embedder.embed_text(situation)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             hits = await self._pipeline.similar_skills(
@@ -144,7 +144,7 @@ class SkillsService:
     ) -> str:
         """Log one interaction in its own tenant transaction (cache-hit path)."""
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             interaction_id = await self._repo.insert_interaction(
@@ -158,7 +158,7 @@ class SkillsService:
     async def get(self, auth: AuthContext, skill_id: str) -> SkillOut:
         """Full body of a published skill."""
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             skill = await self._repo.get(session, skill_id, statuses=PUBLISHED_STATUSES)
@@ -169,7 +169,7 @@ class SkillsService:
     async def versions(self, auth: AuthContext, skill_id: str) -> list[SkillVersionOut]:
         """Version history for a published skill."""
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             skill = await self._repo.get(session, skill_id, statuses=PUBLISHED_STATUSES)
@@ -181,7 +181,7 @@ class SkillsService:
     async def export_bundle(self, auth: AuthContext) -> bytes:
         """Zip of one markdown file per published skill (the anti-lock-in export)."""
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             skills = await self._repo.list_published(session)
@@ -202,7 +202,7 @@ class SkillsService:
         Idempotent per interaction — a second override on the same interaction is
         a no-op so a retrying agent can't drive confidence to zero."""
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session, run_in_tenant(
+        async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
             interaction = await self._repo.get_interaction(session, interaction_id)

@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config.database import get_session
+from app.config.database import get_tenant_session
 from app.integrations import get_integration
 from app.jobs.repository import JobsRepository, SyncState
 from app.shared.helpers.crypto import decrypt, encrypt
@@ -80,7 +80,7 @@ async def token_for_provider(
     """Return ``(access_token, external_account_id)`` for a workspace's provider
     connection, refreshing the token if needed. ``None`` if no connection or no
     token is stored (the expander then falls back to raw content)."""
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
         state = await connection_state_by_provider(session, workspace_id, provider)
@@ -98,7 +98,7 @@ async def token_for_connection(
     that produced an event, refreshing the token if needed. ``None`` if the
     connection is gone or tokenless. Preferred over ``token_for_provider`` so a
     second same-provider connection doesn't expand with the wrong token."""
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
         state = await _repo.get_sync_state(session, connection_id)

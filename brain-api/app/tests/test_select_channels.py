@@ -45,7 +45,7 @@ async def _select(req: ChannelSelectRequest) -> MagicMock:
     repo = _repo()
     svc = SourcesService(repository=repo)
     session = MagicMock(commit=AsyncMock())
-    with patch.object(service_module, "get_session", return_value=_AsyncCtx(session)), patch.object(
+    with patch.object(service_module, "get_tenant_session", return_value=_AsyncCtx(session)), patch.object(
         service_module, "run_in_tenant", return_value=_AsyncCtx(None)
     ):
         await svc.select_channels(_auth(), "src_1", req)
@@ -113,7 +113,7 @@ async def test_list_channels_refreshes_expired_token_before_provider_call() -> N
     svc = SourcesService(repository=repo)
     session = MagicMock(commit=AsyncMock())
     with patch.object(
-        service_module, "get_session", return_value=_AsyncCtx(session)
+        service_module, "get_tenant_session", return_value=_AsyncCtx(session)
     ), patch.object(
         service_module, "run_in_tenant", return_value=_AsyncCtx(None)
     ), patch.object(service_module, "get_integration", return_value=integration):

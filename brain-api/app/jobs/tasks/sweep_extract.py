@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.config.database import get_session
+from app.config.database import get_tenant_session
 from app.jobs.queue import enqueue
 from app.jobs.sweep_order import processing_order
 from app.pipeline.authority import sweep_config
@@ -68,7 +68,7 @@ async def _flush(
     workspace_id: str, sweep_id: str, tally: dict, remaining: int, cost: float
 ) -> None:
     progress = {**tally, "queued_remaining": remaining, "cost_usd": round(cost, 6)}
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
         await _repo.write_extraction_progress(session, sweep_id, progress)
@@ -77,7 +77,7 @@ async def _flush(
 
 async def sweep_extract(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
     """ARQ entrypoint. ``ctx`` is the ARQ job context (unused)."""
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
         events = await _repo.list_sweep_queued_events(session, sweep_id, limit=_MAX_PER_RUN)
@@ -122,7 +122,7 @@ async def sweep_extract(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
     # Events beyond this run's cap (or newly ingested by a still-chaining backfill)
     # remain queued; report the true remaining count and chain a continuation so the
     # sweep finishes without any single job exceeding its timeout.
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
         remaining = await _repo.count_sweep_queued_events(session, sweep_id)
