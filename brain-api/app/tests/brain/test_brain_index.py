@@ -61,6 +61,9 @@ def _job_patches(repo, session):
             job_module.embedder, "embed_text",
             AsyncMock(return_value=([0.0] * 1536, StageUsage("e", "m", 1, 0, 0.0))),
         ),
+        # Default: no provider connection → author id kept verbatim (no network).
+        patch.object(job_module, "token_for_provider", AsyncMock(return_value=None)),
+        patch.object(job_module, "resolve_users", AsyncMock(return_value={})),
     )
 
 
@@ -156,9 +159,29 @@ async def test_backfill_captures_evidence_with_attribution() -> None:
     assert kw["skill_id"] == "skl_1"
     assert kw["source_ref"] == {
         "provider": "slack", "sourceItemId": "rev_1", "url": None,
-        "label": "#cs-escalations", "author": "U07A3B12",  # raw id kept (decision F)
+        "label": "#cs-escalations",
+        "author": "U07A3B12",  # no connection to resolve against → raw id kept
     }
     assert kw["chunk_key"] == chunk_key("evidence", "skl_1", "rev_1", 0)
+
+
+async def test_backfill_resolves_evidence_author_name() -> None:
+    repo = _repo_mock(version_rows=[], evidence_rows=_evidence_rows())
+    session = MagicMock(commit=AsyncMock())
+    with patch.object(job_module, "_repo", repo), \
+         patch.object(job_module, "get_tenant_session", return_value=_AsyncCtx(session)), \
+         patch.object(job_module, "run_in_tenant", return_value=_AsyncCtx(None)), \
+         patch.object(job_module.embedder, "embed_text",
+                      AsyncMock(return_value=([0.0] * 1536, StageUsage("e", "m", 1, 0, 0.0)))), \
+         patch.object(job_module, "token_for_provider",
+                      AsyncMock(return_value=("slack-token", None))) as tok, \
+         patch.object(job_module, "resolve_users",
+                      AsyncMock(return_value={"U07A3B12": "Jane Doe"})) as resolve:
+        await job_module.brain_index_backfill({}, "wrk_1")
+    # the Slack id was resolved to a name and stored on the evidence citation
+    assert repo.upsert_evidence_chunk.await_args.kwargs["source_ref"]["author"] == "Jane Doe"
+    tok.assert_awaited_once_with("wrk_1", "slack")
+    assert resolve.await_args.args[0] == "slack" and "U07A3B12" in resolve.await_args.args[2]
 
 
 async def test_backfill_evidence_is_idempotent() -> None:
@@ -169,18 +192,65 @@ async def test_backfill_evidence_is_idempotent() -> None:
     with patch.object(job_module, "_repo", repo), \
          patch.object(job_module, "get_tenant_session", return_value=_AsyncCtx(session)), \
          patch.object(job_module, "run_in_tenant", return_value=_AsyncCtx(None)), \
-         patch.object(job_module.embedder, "embed_text", embed):
+         patch.object(job_module.embedder, "embed_text", embed), \
+         patch.object(job_module, "token_for_provider", AsyncMock(return_value=None)), \
+         patch.object(job_module, "resolve_users", AsyncMock(return_value={})):
         result = await job_module.brain_index_backfill({}, "wrk_1")
     assert result["evidenceChunks"] == 0
     repo.upsert_evidence_chunk.assert_not_awaited()
     embed.assert_not_awaited()
 
 
-def test_resolve_author_passes_through() -> None:
-    from app.modules.brain.authors import resolve_author
-    assert resolve_author("github", "janedoe") == "janedoe"
-    assert resolve_author("slack", "U07A3B12") == "U07A3B12"  # id kept, never invented
-    assert resolve_author("notion", None) is None
+# ── author resolution (decision F) ───────────────────────────────────────────
+
+async def test_resolve_users_slack_maps_id_to_name() -> None:
+    from app.pipeline.expanders import user_directory as ud
+
+    class _Resp:
+        def raise_for_status(self): ...
+        def json(self):
+            return {"ok": True, "user": {"real_name": "Jane Doe", "name": "jane"}}
+
+    class _Client:
+        async def get(self, url, **kw): return _Resp()
+
+    with patch.object(ud, "http_client", lambda: _Client()):
+        out = await ud.resolve_users("slack", "tok", ["U07A3B12", "U07A3B12"])
+    assert out == {"U07A3B12": "Jane Doe"}  # deduped, resolved
+
+
+async def test_resolve_users_zendesk_bulk() -> None:
+    from app.pipeline.expanders import user_directory as ud
+
+    class _Resp:
+        def raise_for_status(self): ...
+        def json(self):
+            return {"users": [{"id": 380288, "name": "Bob R."}]}
+
+    class _Client:
+        async def get(self, url, **kw): return _Resp()
+
+    with patch.object(ud, "http_client", lambda: _Client()):
+        out = await ud.resolve_users("zendesk", "tok", ["380288"], subdomain="acme")
+    assert out == {"380288": "Bob R."}
+
+
+async def test_resolve_users_best_effort_never_raises() -> None:
+    from app.pipeline.expanders import user_directory as ud
+
+    class _Client:
+        async def get(self, url, **kw): raise RuntimeError("boom")
+
+    with patch.object(ud, "http_client", lambda: _Client()):
+        # a lookup outage returns {} rather than propagating — the id is kept upstream
+        assert await ud.resolve_users("zendesk", "tok", ["1"], subdomain="acme") == {}
+
+
+async def test_resolve_users_unknown_provider_and_empty() -> None:
+    from app.pipeline.expanders import user_directory as ud
+    assert await ud.resolve_users("github", "tok", ["janedoe"]) == {}  # no lookup needed
+    assert await ud.resolve_users("slack", "", ["U1"]) == {}           # no token
+    assert await ud.resolve_users("slack", "tok", []) == {}            # no ids
 
 
 # ── keep-fresh hook ──────────────────────────────────────────────────────────

@@ -22,12 +22,14 @@ Properties:
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 
 from app.config.database import get_tenant_session
-from app.modules.brain.authors import resolve_author
+from app.jobs.token_helper import token_for_provider
 from app.modules.brain.chunking import chunk_text
 from app.modules.brain.repository import BrainRepository, chunk_key
 from app.pipeline import embedder
+from app.pipeline.expanders.user_directory import resolve_users
 from app.shared.middleware.with_tenant import run_in_tenant
 
 log = logging.getLogger(__name__)
@@ -45,7 +47,10 @@ async def brain_index_backfill(ctx: dict, workspace_id: str) -> dict:
             existing = await _repo.list_chunk_keys(session)  # all kinds
 
     version_plan = _plan_version_chunks(version_rows, existing)
-    evidence_plan = _plan_evidence_chunks(evidence_rows, existing)
+    # Resolve evidence author ids → names (Slack/Zendesk) before capture — network
+    # I/O, so outside any transaction (decision F). Best-effort: unresolved ids stay.
+    author_map = await _resolve_evidence_authors(workspace_id, evidence_rows)
+    evidence_plan = _plan_evidence_chunks(evidence_rows, existing, author_map)
 
     # Phase 2: embed the new chunks OUTSIDE any transaction (network I/O).
     for item in (*version_plan, *evidence_plan):
@@ -100,10 +105,41 @@ def _plan_version_chunks(rows: list[dict], existing: set[str]) -> list[dict]:
     return plan
 
 
-def _plan_evidence_chunks(rows: list[dict], existing: set[str]) -> list[dict]:
+async def _resolve_evidence_authors(
+    workspace_id: str, rows: list[dict]
+) -> dict[tuple[str, str], str]:
+    """``{(provider, raw_author_id): name}`` for the evidence authors we can resolve.
+
+    Batches unique ids per provider, fetches that provider's connection token, and
+    calls its users API. Best-effort: a provider with no connection/scope is skipped
+    (its authors keep their raw id). GitHub/Drive/Gmail/Jira already record names, so
+    only Slack/Zendesk are resolved here; Notion records no message author.
+    """
+    ids_by_provider: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        if row["author"] and row["provider"] in ("slack", "zendesk"):
+            ids_by_provider[row["provider"]].add(str(row["author"]))
+
+    resolved: dict[tuple[str, str], str] = {}
+    for provider, ids in ids_by_provider.items():
+        creds = await token_for_provider(workspace_id, provider)
+        if creds is None:
+            continue
+        token, account_id = creds  # account_id is the subdomain for Zendesk
+        names = await resolve_users(provider, token, list(ids), subdomain=account_id)
+        for uid, name in names.items():
+            resolved[(provider, uid)] = name
+    return resolved
+
+
+def _plan_evidence_chunks(
+    rows: list[dict], existing: set[str], author_map: dict[tuple[str, str], str]
+) -> list[dict]:
     plan: list[dict] = []
     for row in rows:
-        author = resolve_author(row["provider"], row["author"])  # decision-F seam
+        raw = row["author"]
+        # Resolved name when available, else the raw value verbatim (never invented).
+        author = author_map.get((row["provider"], str(raw)), raw) if raw else None
         for idx, content in enumerate(chunk_text(row["content"])):
             key = chunk_key("evidence", row["skill_id"], row["review_id"], idx)
             if key in existing:

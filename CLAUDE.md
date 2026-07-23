@@ -23,7 +23,7 @@ is isolated by Postgres Row-Level Security. Full product spec: `docs/PRD.md`.
 | 5 Delivery | `query_brain` MCP tool, `/skills/*`, `/interactions/override`, read-cache | 🔵 in PR (same branch) |
 | — Brain chat (BACKEND_ASKS §7) | JWT `POST /brain/query` + `GET /brain/status`, grounded synthesis, provenance dossier, `brain_chunks` evidence graph | 🔵 in PR (branch `feat/brain-chat`, `app/modules/brain/`) — see `docs/BRAIN_CHAT_RAG_PLAN.md` |
 | — Query-driven live search (Feature 16) | per-source `search()` behind the seam in `app/pipeline/query_extraction.py` | ⏳ **remaining** — see PRD §16 Phase 5 note |
-| — Author id→name resolution (BRAIN_CHAT_RAG_PLAN decision F) | Slack/Zendesk/Notion evidence authors via each connector's Users API (seam: `app/modules/brain/authors.py`) | ⏳ **remaining** — connector-side |
+| — Author id→name resolution (BRAIN_CHAT_RAG_PLAN decision F) | Slack/Zendesk evidence authors resolved to names at capture (`app/pipeline/expanders/user_directory.py`, in `brain_index_backfill`); Notion has no message author | ✅ evidence surface (the provenance-dossier `originatedBy` still shows the raw id — a secondary surface) |
 | 6 Agent demo | `agent-demo/demo.py` | ⏳ placeholder |
 
 The review UI and onboarding UI are the frontend repo's job, not ours.
