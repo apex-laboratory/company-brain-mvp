@@ -1998,6 +1998,31 @@
         }
       }
     },
+    "/api/v1/brain/status": {
+      "get": {
+        "tags": [
+          "brain"
+        ],
+        "summary": "Brain Status",
+        "description": "Whether the brain is ready to answer for this workspace (FE gate).",
+        "operationId": "brain_status_api_v1_brain_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/health": {
       "get": {
         "summary": "Health",
