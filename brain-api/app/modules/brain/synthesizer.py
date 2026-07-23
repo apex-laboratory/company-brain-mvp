@@ -97,17 +97,21 @@ def _render_history(history: list[dict[str, Any]] | None) -> str:
 
 
 def _render_evidence(evidence: list[dict[str, Any]] | None) -> str:
-    """Original source material with attribution — the basis for 'who said' answers."""
+    """Original source material with attribution — the basis for 'who said / which
+    document' answers. Names the author when known (a message) and always names the
+    source document (e.g. the Notion page) so the model can point at it."""
     if not evidence:
         return "(none)"
     lines = []
     for e in evidence:
-        author = e.get("author") or "unknown author"
-        location = e.get("location") or "unknown location"
         provider = e.get("provider") or "source"
+        doc = e.get("location")
+        author = e.get("author")
+        doc_part = f" the {provider} document \"{doc}\"" if doc else f" a {provider} source"
+        who = f"{author} in" if author else "from"
         lines.append(
-            f"- from {author} via {provider} in {location} "
-            f"(skill {e.get('skill_id')}): {(e.get('content') or '').strip()}"
+            f"- {who}{doc_part} (skill {e.get('skill_id')}): "
+            f"{(e.get('content') or '').strip()}"
         )
     return "\n".join(lines)
 

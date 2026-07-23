@@ -301,12 +301,14 @@ def _no_match_core(top_similarity: float | None) -> dict:
 
 
 def _build_sources(used_ids: list[str], citations: dict[str, dict]) -> list[dict]:
+    """Skill-facet citations: the source document each cited skill drew on
+    (``location`` = its name, ``url`` = the clickable link — e.g. the Notion page)."""
     return [
         {
             "provider": citations.get(i, {}).get("provider"),
-            "location": citations.get(i, {}).get("location"),
+            "location": citations.get(i, {}).get("label"),
             "skill_id": i,
-            "url": None,
+            "url": citations.get(i, {}).get("url"),
             "excerpt": None,
         }
         for i in used_ids
@@ -314,7 +316,7 @@ def _build_sources(used_ids: list[str], citations: dict[str, dict]) -> list[dict
 
 
 def _evidence_ctx(hit: dict) -> dict:
-    """Shape an evidence chunk for the synthesizer (content + attribution)."""
+    """Shape an evidence chunk for the synthesizer (content + attribution + doc)."""
     ref = hit.get("source_ref") or {}
     return {
         "content": hit.get("content"),
@@ -326,7 +328,8 @@ def _evidence_ctx(hit: dict) -> dict:
 
 
 def _evidence_sources(evidence: list[dict]) -> list[dict]:
-    """Citations for matched evidence chunks (provider + channel/doc + a quote)."""
+    """Evidence-facet citations: the source document (provider + name + link) plus a
+    quote from it — so the answer can point at the exact Notion page / Slack message."""
     sources = []
     for hit in evidence:
         ref = hit.get("source_ref") or {}

@@ -153,11 +153,14 @@ class BrainRepository:
     async def skill_citations(
         self, session: AsyncSession, skill_ids: list[str]
     ) -> dict[str, dict]:
-        """``{skill_id: {provider, location}}`` for the cited skills.
+        """``{skill_id: {provider, url, label}}`` for the cited skills — the source
+        document each drew on.
 
-        ``provider`` is the skill's first source provider; ``location`` is a
-        best-effort channel/doc name from its most recent review evidence (``None``
-        if none recorded). One round-trip for all cited skills.
+        ``provider`` is the skill's first source provider; ``url`` is the source
+        document link (``reviews.source_location`` holds the item URL — for Notion
+        the page link) and ``label`` its human name (the policy/decision title), both
+        from the skill's most recent review (``None`` if none recorded). One
+        round-trip for all cited skills.
         """
         if not skill_ids:
             return {}
@@ -165,11 +168,14 @@ class BrainRepository:
             await session.execute(
                 text(
                     """
-                    SELECT s.id AS skill_id, s.source_providers,
-                           (SELECT r.source_location FROM reviews r
-                             WHERE r.skill_id = s.id AND r.source_location IS NOT NULL
-                             ORDER BY r.created_at DESC LIMIT 1) AS location
+                    SELECT s.id AS skill_id, s.source_providers, r.url, r.label
                       FROM skills s
+                      LEFT JOIN LATERAL (
+                        SELECT source_location AS url, title AS label
+                          FROM reviews rv
+                         WHERE rv.skill_id = s.id
+                         ORDER BY rv.created_at DESC LIMIT 1
+                      ) r ON TRUE
                      WHERE s.id = ANY(:ids) AND s.deleted_at IS NULL
                     """
                 ).bindparams(ids=skill_ids)
@@ -180,7 +186,8 @@ class BrainRepository:
             providers = r["source_providers"] or []
             out[r["skill_id"]] = {
                 "provider": providers[0] if providers else None,
-                "location": r["location"],
+                "url": r["url"],
+                "label": r["label"],
             }
         return out
 
@@ -411,7 +418,8 @@ class BrainRepository:
                 text(
                     """
                     SELECT r.skill_id, r.id AS review_id,
-                           r.source_provider AS provider, r.source_location AS location,
+                           r.source_provider AS provider,
+                           r.source_location AS url, r.title AS label,
                            r.evidence_author AS author, r.evidence_quote AS content
                       FROM reviews r
                       JOIN skills s ON s.id = r.skill_id

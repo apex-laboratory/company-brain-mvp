@@ -36,7 +36,8 @@ def _rows() -> list[dict]:
 def _evidence_rows() -> list[dict]:
     return [
         {"skill_id": "skl_1", "review_id": "rev_1", "provider": "slack",
-         "location": "#cs-escalations", "author": "U07A3B12",
+         "url": "https://acme.slack.com/archives/C1/p123", "label": "Refund policy escalation",
+         "author": "U07A3B12",
          "content": "we need a 45-day refund window for premium customers"},
     ]
 
@@ -158,11 +159,36 @@ async def test_backfill_captures_evidence_with_attribution() -> None:
     kw = repo.upsert_evidence_chunk.await_args.kwargs
     assert kw["skill_id"] == "skl_1"
     assert kw["source_ref"] == {
-        "provider": "slack", "sourceItemId": "rev_1", "url": None,
-        "label": "#cs-escalations",
+        "provider": "slack", "sourceItemId": "rev_1",
+        "url": "https://acme.slack.com/archives/C1/p123",  # the source document link
+        "label": "Refund policy escalation",
         "author": "U07A3B12",  # no connection to resolve against → raw id kept
     }
     assert kw["chunk_key"] == chunk_key("evidence", "skl_1", "rev_1", 0)
+
+
+async def test_backfill_captures_notion_document_link() -> None:
+    # A Notion-sourced policy: no message author, but the page link + name are kept
+    # so "which document made the policy update" is answerable (the user's ask).
+    rows = [{
+        "skill_id": "skl_1", "review_id": "rev_9", "provider": "notion",
+        "url": "https://www.notion.so/Refund-Policy-abc123", "label": "Refund Policy",
+        "author": None, "content": "premium customers get a 45-day refund window",
+    }]
+    repo = _repo_mock(version_rows=[], evidence_rows=rows)
+    session = MagicMock(commit=AsyncMock())
+    patches = _job_patches(repo, session)
+    for p in patches:
+        p.start()
+    try:
+        await job_module.brain_index_backfill({}, "wrk_1")
+    finally:
+        for p in patches:
+            p.stop()
+    ref = repo.upsert_evidence_chunk.await_args.kwargs["source_ref"]
+    assert ref["provider"] == "notion"
+    assert ref["url"] == "https://www.notion.so/Refund-Policy-abc123"  # clickable page
+    assert ref["label"] == "Refund Policy" and ref["author"] is None
 
 
 async def test_backfill_resolves_evidence_author_name() -> None:

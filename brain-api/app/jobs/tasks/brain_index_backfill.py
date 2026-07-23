@@ -150,8 +150,8 @@ def _plan_evidence_chunks(
                 "source_ref": {
                     "provider": row["provider"],
                     "sourceItemId": row["review_id"],
-                    "url": None,
-                    "label": row["location"],
+                    "url": row["url"],       # the source document link (Notion page, etc.)
+                    "label": row["label"],   # its human name (the policy/decision title)
                     "author": author,
                 },
             })

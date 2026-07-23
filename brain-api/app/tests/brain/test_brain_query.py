@@ -82,8 +82,9 @@ def _empty_prov() -> dict:
 def _ev_hit(similarity: float, sid: str = "skl_1") -> dict:
     return {
         "skill_id": sid, "kind": "evidence", "version": None,
-        "source_ref": {"provider": "slack", "sourceItemId": "rev_1", "url": None,
-                       "label": "#cs-escalations", "author": "Jane D."},
+        "source_ref": {"provider": "slack", "sourceItemId": "rev_1",
+                       "url": "https://acme.slack.com/archives/C1/p123",
+                       "label": "Refund escalation", "author": "Jane D."},
         "content": "we need a 45-day refund window for premium customers",
         "similarity": similarity,
     }
@@ -141,7 +142,8 @@ def _exit(patches):
 async def test_query_semantic_synthesizes_caches_and_persists() -> None:
     svc, brain_repo, skills_repo, _pipe, patches = _svc(
         hits=[_hit(0.88)], full=_full(),
-        citations={"skl_1": {"provider": "notion", "location": "Policy Library"}},
+        citations={"skl_1": {"provider": "notion", "url": "https://notion.so/Refund-Policy-abc",
+                             "label": "Refund Policy"}},
     )
     _enter(patches)
     try:
@@ -152,7 +154,9 @@ async def test_query_semantic_synthesizes_caches_and_persists() -> None:
     assert isinstance(out, BrainQueryResponse)
     assert out.trust == "skill" and out.match_type == "semantic" and out.confidence == 82
     assert out.skill_ids == ["skl_1"]
-    assert out.sources[0].provider == "notion" and out.sources[0].location == "Policy Library"
+    # the cited skill points at its source document — name + clickable link
+    assert out.sources[0].provider == "notion" and out.sources[0].location == "Refund Policy"
+    assert out.sources[0].url == "https://notion.so/Refund-Policy-abc"
     set_cache.assert_awaited_once()  # grounded answers are cached
     # interaction logged with the matched skill
     log = skills_repo.insert_interaction.await_args.kwargs
@@ -324,7 +328,8 @@ async def test_query_passes_superseded_history_to_synthesizer() -> None:
 async def test_query_evidence_supports_skill_answer() -> None:
     svc, _brain, _skills, _pipe, patches = _svc(
         hits=[_hit(0.88)], full=_full(),
-        citations={"skl_1": {"provider": "notion", "location": "Policy Library"}},
+        citations={"skl_1": {"provider": "notion", "url": "https://notion.so/x",
+                             "label": "Refund Policy"}},
         evidence_hits=[_ev_hit(0.9)],
     )
     _enter(patches)
@@ -355,7 +360,10 @@ async def test_query_evidence_only_when_no_skill_matches() -> None:
         _exit(patches)
     assert out.trust == "evidence" and out.match_type == "evidence"
     assert out.confidence > 0 and out.skill_ids == ["skl_1"]
-    assert out.sources and out.sources[0].provider == "slack"
+    # the cited source document — clickable link + name — so you can see it
+    assert out.sources[0].provider == "slack"
+    assert out.sources[0].url == "https://acme.slack.com/archives/C1/p123"
+    assert out.sources[0].location == "Refund escalation"
     # the interaction log records the evidence facet + its skill
     log = skills_repo.insert_interaction.await_args.kwargs
     assert log["match_type"] == "evidence" and log["skill_id"] == "skl_1"
