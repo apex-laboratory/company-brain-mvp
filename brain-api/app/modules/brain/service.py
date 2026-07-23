@@ -37,6 +37,10 @@ from app.shared.middleware.with_tenant import run_in_tenant
 _MATCH_THRESHOLD = 0.70  # below this a query is a "no_match" (mirrors SkillsService)
 _RETRIEVAL_LIMIT = 5
 _EVIDENCE_LIMIT = 3
+# Read-cache facet: brain-chat caches a different contract than SkillsService.query()
+# under the same (workspace, question) — a distinct kind keeps them from colliding
+# (both stay under skills:{ws}:* so publish-time invalidation clears both).
+_CACHE_KIND = "brain"
 _NO_MATCH_ANSWER = (
     "I don't have a reviewed skill that covers that yet, so I can't give you a "
     "confident answer. Once a related decision has been captured and approved, "
@@ -121,7 +125,7 @@ class BrainService:
         await self._ensure_ready(auth)
         workspace_id, role = _require_workspace(auth)
 
-        cached = await cache.get_cached_search(workspace_id, question)
+        cached = await cache.get_cached_search(workspace_id, question, kind=_CACHE_KIND)
         if cached is not None:
             return await self._finalize(auth, question, cached, conversation_id)
 
@@ -173,7 +177,7 @@ class BrainService:
             core = _no_match_core(top.similarity if top else None)
 
         if core["trust"] != "none":  # cache grounded answers only
-            await cache.set_cached_search(workspace_id, question, core)
+            await cache.set_cached_search(workspace_id, question, core, kind=_CACHE_KIND)
         return await self._finalize(auth, question, core, conversation_id)
 
     async def _answer_from_skills(
