@@ -58,19 +58,27 @@ def _skill(**over) -> dict:
     return {**base, **over}
 
 
-def _hit(similarity: float) -> SimilarSkill:
+def _hit(similarity: float, status: str = "active") -> SimilarSkill:
     return SimilarSkill(
         id="skl_1", name="Refund Handling", version="v3",
         base_logic="refund within 30 days", exceptions_block=[],
-        source_authority="high", similarity=similarity,
+        source_authority="high", similarity=similarity, status=status,
     )
 
 
-def _svc(*, skill=None, hits=None, interaction=None, new_confidence=None):
+def _svc(*, skill=None, hits=None, interaction=None, new_confidence=None,
+         list_rows=None, stats=None):
     repo = MagicMock(
         get=AsyncMock(return_value=skill),
         list_versions=AsyncMock(return_value=[]),
         list_published=AsyncMock(return_value=[]),
+        list_skills=AsyncMock(return_value=list_rows or []),
+        usage_by_ids=AsyncMock(return_value={}),
+        call_series=AsyncMock(return_value={}),
+        stats=AsyncMock(return_value=stats or {
+            "stable": 0, "active": 0, "review": 0, "draft": 0, "total": 0, "calls30d": 0,
+        }),
+        insert_draft=AsyncMock(return_value="skl_new"),
         decrement_confidence=AsyncMock(return_value=new_confidence),
         insert_interaction=AsyncMock(return_value="int_1"),
         get_interaction=AsyncMock(return_value=interaction),
@@ -303,6 +311,18 @@ class _StubService:
         return [SkillSearchResult(id="skl_1", name="Refund", version="v1",
                                   base_logic="x", similarity=0.9)]
 
+    async def list(self, auth, *, status, source, limit, cursor):
+        from app.modules.skills.schemas import SkillListItem
+        return [SkillListItem(id="skl_1", name="Refund", version="v1",
+                              status="active", calls30d=42, call_series=[0] * 7)], "cur_2"
+
+    async def stats(self, auth):
+        from app.modules.skills.schemas import SkillStats
+        return SkillStats(total=5, stable=3, in_review=1, draft=1, calls30d=99)
+
+    async def create(self, auth, req):
+        return SkillOut(id="skl_new", name=req.name, version="v1", status="draft")
+
     async def get(self, auth, skill_id):
         return SkillOut(id=skill_id, name="Refund", version="v1", status="active")
 
@@ -396,3 +416,130 @@ async def test_search_api_key_with_scope_ok(client: AsyncClient) -> None:
     _set_auth(role="viewer", kind="api_key", scopes=["brain:query"])
     resp = await client.get("/api/v1/skills/search?q=refund")
     assert resp.status_code == 200
+
+
+async def test_list_route_envelope_and_cursor(client: AsyncClient) -> None:
+    resp = await client.get("/api/v1/skills?limit=10")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data"][0]["calls30d"] == 42
+    assert len(body["data"][0]["callSeries"]) == 7
+    assert body["meta"]["nextCursor"] == "cur_2"
+
+
+async def test_list_route_rejects_bad_status(client: AsyncClient) -> None:
+    resp = await client.get("/api/v1/skills?status=bogus")
+    assert resp.status_code == 422
+
+
+async def test_stats_route(client: AsyncClient) -> None:
+    resp = await client.get("/api/v1/skills/stats")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["total"] == 5 and data["inReview"] == 1 and data["calls30d"] == 99
+
+
+async def test_create_route_requires_admin(client: AsyncClient) -> None:
+    _set_auth(role="editor")  # admin required
+    resp = await client.post("/api/v1/skills", json={"name": "X", "baseLogic": "do X"})
+    assert resp.status_code == 403
+
+
+async def test_create_route_admin_ok(client: AsyncClient) -> None:
+    _set_auth(role="admin")
+    resp = await client.post("/api/v1/skills", json={"name": "X", "baseLogic": "do X"})
+    assert resp.status_code == 201
+    assert resp.json()["data"]["status"] == "draft"
+
+
+async def test_create_route_rejects_unknown_key(client: AsyncClient) -> None:
+    _set_auth(role="admin")
+    resp = await client.post(
+        "/api/v1/skills", json={"name": "X", "baseLogic": "y", "bogus": 1}
+    )
+    assert resp.status_code == 422
+
+
+# ── list / stats / create (service) ──────────────────────────────────────────
+
+async def test_list_densifies_series_and_returns_cursor() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    today = datetime.now(UTC).date()
+    row = {
+        "id": "skl_1", "name": "Refund", "version": "v1", "status": "active",
+        "base_logic": "x", "exceptions_block": [], "source_authority": "high",
+        "source_providers": ["notion"], "description": None, "calls_30d": 7,
+        "updated_at": _NOW,
+    }
+    svc, repo, _pipe, patches = _svc(list_rows=[row, row])  # limit+1 → has_more
+    repo.call_series = AsyncMock(
+        return_value={"skl_1": {today.isoformat(): 3, (today - timedelta(days=6)).isoformat(): 1}}
+    )
+    _enter(patches)
+    try:
+        items, cursor = await svc.list(_auth(), status=None, source=None, limit=1, cursor=None)
+    finally:
+        _exit(patches)
+    assert len(items) == 1
+    assert items[0].call_series == [1, 0, 0, 0, 0, 0, 3]  # oldest→newest, zero-filled
+    assert cursor is not None  # a further page exists
+
+
+async def test_stats_maps_buckets() -> None:
+    svc, _repo, _pipe, patches = _svc(stats={
+        "stable": 3, "active": 2, "review": 4, "draft": 1, "total": 10, "calls30d": 500,
+    })
+    _enter(patches)
+    try:
+        stats = await svc.stats(_auth())
+    finally:
+        _exit(patches)
+    assert stats.stable == 5 and stats.in_review == 4 and stats.total == 10
+
+
+async def test_create_embeds_then_inserts_draft_and_opens_review() -> None:
+    from app.modules.skills.schemas import CreateSkillRequest
+
+    svc, repo, pipe, patches = _svc(skill=_skill(status="draft"))
+    _enter(patches)
+    try:
+        out = await svc.create(
+            _auth(role="admin"),
+            CreateSkillRequest(name="New Skill", base_logic="always X"),
+        )
+    finally:
+        _exit(patches)
+    assert out.status == "draft"
+    repo.insert_draft.assert_awaited_once()
+    review = pipe.insert_review.await_args.kwargs
+    assert review["skill_id"] == "skl_new" and review["kind"] == "new_decision"
+
+
+async def test_create_conflict_on_duplicate_name() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from app.modules.skills.schemas import CreateSkillRequest
+    from app.shared.errors.app_error import ConflictError
+
+    svc, repo, _pipe, patches = _svc()
+    repo.insert_draft = AsyncMock(side_effect=IntegrityError("dup", {}, Exception()))
+    _enter(patches)
+    try:
+        with pytest.raises(ConflictError):
+            await svc.create(
+                _auth(role="admin"),
+                CreateSkillRequest(name="Dup", base_logic="x"),
+            )
+    finally:
+        _exit(patches)
+
+
+async def test_search_result_carries_status() -> None:
+    svc, _repo, _pipe, patches = _svc(hits=[_hit(0.91, status="stable")])
+    _enter(patches)
+    try:
+        results = await svc.search(_auth(), "refund", 5)
+    finally:
+        _exit(patches)
+    assert results[0].status == "stable"

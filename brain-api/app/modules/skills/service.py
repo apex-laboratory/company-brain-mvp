@@ -8,21 +8,29 @@ connection — the orchestrator/reviews rule). Every read runs RLS-scoped.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import re
 import zipfile
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy.exc import IntegrityError
 
 from app.config.database import get_tenant_session
 from app.modules.skills.repository import PUBLISHED_STATUSES, SkillsRepository
 from app.modules.skills.schemas import (
+    CreateSkillRequest,
     OverrideResult,
+    SkillListItem,
     SkillOut,
     SkillSearchResult,
+    SkillStats,
     SkillVersionOut,
 )
 from app.pipeline import cache, embedder
 from app.pipeline.repository import PipelineRepository
-from app.shared.errors.app_error import NotFoundError
+from app.shared.errors.app_error import ConflictError, NotFoundError
 from app.shared.middleware.authenticate import AuthContext
 from app.shared.middleware.with_tenant import run_in_tenant
 
@@ -70,15 +78,111 @@ class SkillsService:
                 matched_confidence=top.similarity if top else None,
                 match_type="semantic" if matched else "no_match",
             )
+            hit_ids = [h.id for h in hits]
+            usage = await self._repo.usage_by_ids(session, hit_ids)
+            series = await self._repo.call_series(session, hit_ids)
             await session.commit()
         return [
             SkillSearchResult(
-                id=h.id, name=h.name, version=h.version, base_logic=h.base_logic,
-                exceptions_block=h.exceptions_block, source_authority=h.source_authority,
-                similarity=round(h.similarity, 4),
+                id=h.id, name=h.name, version=h.version, status=h.status,
+                base_logic=h.base_logic, exceptions_block=h.exceptions_block,
+                source_authority=h.source_authority, similarity=round(h.similarity, 4),
+                calls30d=usage.get(h.id, {}).get("calls_30d", 0),
+                call_series=_densify_series(series.get(h.id, {})),
+                updated_at=usage.get(h.id, {}).get("updated_at"),
             )
             for h in hits
         ]
+
+    async def list(
+        self,
+        auth: AuthContext,
+        *,
+        status: str | None,
+        source: str | None,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[SkillListItem], str | None]:
+        """Browse the registry without a query (``GET /skills``).
+
+        Returns a page plus the next cursor (``None`` when exhausted). A 7-point
+        daily ``callSeries`` is attached per row from one batched interactions query."""
+        workspace_id, role = _require_workspace(auth)
+        statuses = (status,) if status is not None else None
+        decoded = _decode_cursor(cursor)
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            rows = await self._repo.list_skills(
+                session, statuses=statuses, source=source, limit=limit + 1, cursor=decoded
+            )
+            has_more = len(rows) > limit
+            page = rows[:limit]
+            series = await self._repo.call_series(session, [r["id"] for r in page])
+        items = [
+            SkillListItem(
+                id=r["id"], name=r["name"], version=r["version"], status=r["status"],
+                base_logic=r["base_logic"], exceptions_block=r["exceptions_block"] or [],
+                source_authority=r["source_authority"],
+                source_providers=r["source_providers"] or [],
+                description=r["description"], calls30d=int(r["calls_30d"]),
+                call_series=_densify_series(series.get(r["id"], {})),
+                updated_at=r["updated_at"],
+            )
+            for r in page
+        ]
+        next_cursor = (
+            _encode_cursor(page[-1]["updated_at"], page[-1]["id"])
+            if has_more and page
+            else None
+        )
+        return items, next_cursor
+
+    async def stats(self, auth: AuthContext) -> SkillStats:
+        """Registry summary strip (mirrors ``ReviewsService.stats``)."""
+        workspace_id, role = _require_workspace(auth)
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            counts = await self._repo.stats(session)
+        return SkillStats(
+            total=counts["total"],
+            stable=counts["stable"] + counts["active"],  # both are agent-queryable
+            in_review=counts["review"],
+            draft=counts["draft"],
+            calls30d=counts["calls30d"],
+        )
+
+    async def create(self, auth: AuthContext, req: CreateSkillRequest) -> SkillOut:
+        """Manually author a skill (admin-only): insert a draft and open a review.
+
+        The embedding is computed **before** the transaction (network I/O must never
+        pin a pooled connection). The draft is not agent-queryable until a human
+        approves the review it opens."""
+        workspace_id, role = _require_workspace(auth)
+        embed_text = "\n".join(t for t in (req.name, req.trigger, req.base_logic) if t)
+        embedding, _ = await embedder.embed_text(embed_text)
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            try:
+                skill_id = await self._repo.insert_draft(
+                    session, workspace_id=workspace_id, name=req.name,
+                    trigger=req.trigger, base_logic=req.base_logic,
+                    description=req.description, embedding=embedding,
+                )
+            except IntegrityError as exc:
+                raise ConflictError("A skill with this name already exists.") from exc
+            await self._pipeline.insert_review(
+                session, workspace_id=workspace_id, title=req.name,
+                kind="new_decision", provider=None, source_location=None,
+                before_text=None, after_text=req.base_logic,
+                evidence_quote=None, evidence_author=None, confidence=100,
+                skill_id=skill_id, payload={"authoredBy": auth.user_id},
+            )
+            skill = await self._repo.get(session, skill_id)
+            await session.commit()
+        return SkillOut(**skill)
 
     async def query(self, auth: AuthContext, situation: str) -> dict:
         """The ``query_brain`` core (PRD Feature 15 / Process 3).
@@ -244,6 +348,36 @@ class SkillsService:
             interaction_id=interaction_id, skill_id=skill_id,
             new_confidence=new_confidence, review_created=review_created,
         )
+
+
+def _densify_series(counts: dict[str, int], days: int = 7) -> list[int]:
+    """Turn ``{iso_date: count}`` into a fixed ``days``-length sparkline.
+
+    Oldest first, ending today (UTC); missing days are zero-filled so every row
+    returns exactly ``days`` points."""
+    today = datetime.now(UTC).date()
+    return [
+        counts.get((today - timedelta(days=days - 1 - i)).isoformat(), 0)
+        for i in range(days)
+    ]
+
+
+def _encode_cursor(updated_at: datetime, skill_id: str) -> str:
+    """Opaque keyset cursor for ``(updated_at, id)`` pagination."""
+    raw = f"{updated_at.isoformat()}|{skill_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode()
+
+
+def _decode_cursor(cursor: str | None) -> tuple[str, str] | None:
+    """Decode a cursor to ``(updated_at_iso, id)``; ``None`` for an absent/invalid one."""
+    if not cursor:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        ts, skill_id = raw.split("|", 1)
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    return ts, skill_id
 
 
 def _semantic_response(skill: dict, similarity: float) -> dict:

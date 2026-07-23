@@ -14,6 +14,8 @@ import json
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.shared.helpers.ids import generate_id
+
 # "Published" for delivery = agent-queryable states.
 PUBLISHED_STATUSES: tuple[str, ...] = ("active", "stable")
 
@@ -21,6 +23,17 @@ _SKILL_COLUMNS = (
     "id, name, version, status, trigger, base_logic, exceptions_block, actions, "
     "source_authority, confidence, created_at, updated_at"
 )
+
+# Columns for the browse-the-registry list (no embedding, no full actions body).
+_LIST_COLUMNS = (
+    "id, name, version, status, base_logic, exceptions_block, source_authority, "
+    "source_providers, description, calls_30d, updated_at"
+)
+
+
+def _vector_literal(embedding: list[float]) -> str:
+    """pgvector input literal: '[0.1,0.2,...]' (mirrors the pipeline repo helper)."""
+    return "[" + ",".join(repr(float(v)) for v in embedding) + "]"
 
 
 class SkillsRepository:
@@ -74,6 +87,166 @@ class SkillsRepository:
             )
         ).mappings().all()
         return [dict(r) for r in rows]
+
+    async def list_skills(
+        self,
+        session: AsyncSession,
+        *,
+        statuses: tuple[str, ...] | None,
+        source: str | None,
+        limit: int,
+        cursor: tuple[str, str] | None,
+    ) -> list[dict]:
+        """One page of the registry, newest-updated first.
+
+        Keyset pagination on ``(updated_at, id)`` — the ``cursor`` is the last row
+        of the previous page as ``(updated_at_iso, id)``. Fetches ``limit`` rows;
+        the service asks for ``limit + 1`` to detect a further page. ``source``
+        matches against the ``source_providers`` array."""
+        clauses = ["deleted_at IS NULL"]
+        params: dict = {"limit": limit}
+        if statuses is not None:
+            clauses.append("status = ANY(:statuses)")
+            params["statuses"] = list(statuses)
+        if source is not None:
+            clauses.append(":source = ANY(source_providers)")
+            params["source"] = source
+        if cursor is not None:
+            # Rows strictly after the cursor in (updated_at DESC, id DESC) order.
+            clauses.append(
+                "(updated_at, id) < (CAST(:cursor_ts AS timestamptz), :cursor_id)"
+            )
+            params["cursor_ts"], params["cursor_id"] = cursor
+        where = " AND ".join(clauses)
+        rows = (
+            await session.execute(
+                text(
+                    f"SELECT {_LIST_COLUMNS} FROM skills "
+                    f"WHERE {where} "
+                    f"ORDER BY updated_at DESC, id DESC "
+                    f"LIMIT :limit"
+                ).bindparams(**params)
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def call_series(
+        self, session: AsyncSession, skill_ids: list[str], *, days: int = 7
+    ) -> dict[str, dict[str, int]]:
+        """Daily interaction counts per skill for the last ``days`` days.
+
+        Returns ``{skill_id: {iso_date: count}}``; the service densifies each into a
+        fixed-length zero-filled sparkline. One batched query for the whole page."""
+        if not skill_ids:
+            return {}
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT skill_id,
+                           (date_trunc('day', created_at))::date AS day,
+                           COUNT(*) AS n
+                      FROM agent_interactions
+                     WHERE skill_id = ANY(:ids)
+                       AND created_at >= (now() - make_interval(days => :days))
+                     GROUP BY skill_id, day
+                    """
+                ).bindparams(ids=skill_ids, days=days)
+            )
+        ).mappings().all()
+        out: dict[str, dict[str, int]] = {}
+        for r in rows:
+            out.setdefault(str(r["skill_id"]), {})[r["day"].isoformat()] = int(r["n"])
+        return out
+
+    async def usage_by_ids(
+        self, session: AsyncSession, skill_ids: list[str]
+    ) -> dict[str, dict]:
+        """``{skill_id: {calls_30d, updated_at}}`` for enriching search hits."""
+        if not skill_ids:
+            return {}
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT id, calls_30d, updated_at FROM skills "
+                    "WHERE id = ANY(:ids)"
+                ).bindparams(ids=skill_ids)
+            )
+        ).mappings().all()
+        return {
+            str(r["id"]): {"calls_30d": int(r["calls_30d"]), "updated_at": r["updated_at"]}
+            for r in rows
+        }
+
+    async def stats(self, session: AsyncSession) -> dict[str, int]:
+        """Counts by status + total 30-day calls, for the registry stat strip."""
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT status, COUNT(*) AS n FROM skills "
+                    "WHERE deleted_at IS NULL GROUP BY status"
+                )
+            )
+        ).mappings().all()
+        by_status = {r["status"]: int(r["n"]) for r in rows}
+        calls = (
+            await session.execute(
+                text(
+                    "SELECT COALESCE(SUM(calls_30d), 0) AS n FROM skills "
+                    "WHERE deleted_at IS NULL"
+                )
+            )
+        ).scalar_one()
+        return {
+            "stable": by_status.get("stable", 0),
+            "active": by_status.get("active", 0),
+            "review": by_status.get("review", 0),
+            "draft": by_status.get("draft", 0),
+            "total": sum(by_status.values()),
+            "calls30d": int(calls),
+        }
+
+    async def insert_draft(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        name: str,
+        trigger: str | None,
+        base_logic: str,
+        description: str | None,
+        embedding: list[float],
+    ) -> str:
+        """Insert a hand-authored skill at status ``draft`` (no source event).
+
+        Human-authored, so ``source_authority='high'`` and ``confidence=1.0``;
+        ``source_providers``/``source_ids`` stay empty. Returns the new skill id.
+        Raises on the ``(workspace_id, name)`` unique constraint — the service maps
+        that to a ``ConflictError``."""
+        skill_id = generate_id("skill")
+        await session.execute(
+            text(
+                """
+                INSERT INTO skills
+                    (id, workspace_id, name, status, source_providers, description,
+                     trigger, base_logic, source_ids, source_authority, confidence,
+                     embedding)
+                VALUES
+                    (:id, :ws, :name, CAST('draft' AS skill_status), '{}', :description,
+                     :trigger, :base_logic, '[]'::jsonb, 'high', 1.0,
+                     CAST(:embedding AS vector))
+                """
+            ).bindparams(
+                id=skill_id,
+                ws=workspace_id,
+                name=name,
+                description=description,
+                trigger=trigger,
+                base_logic=base_logic,
+                embedding=_vector_literal(embedding),
+            )
+        )
+        return skill_id
 
     async def decrement_confidence(
         self, session: AsyncSession, skill_id: str, *, amount: float, floor: float = 0.0

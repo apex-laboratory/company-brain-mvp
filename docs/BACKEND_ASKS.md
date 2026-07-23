@@ -219,3 +219,33 @@ the last fully-simulated screen in the dashboard.
 **Whole features blocked:** §7 (brain-chat) and §8 (decisions) are entire
 dashboard screens with no backend — the highest-leverage asks. §1–6 are polish on
 the already-wired Skills feature.
+
+---
+
+# Resolution — delivered
+
+All asks are addressed. Contract details below; regenerate the client against
+`docs/openapi.json`. Note **§7 (brain chat) was intentionally not built** — see the
+table.
+
+| # | Endpoint(s) shipped | Notes |
+|---|--------------------|-------|
+| 1 | `GET /api/v1/skills?status=&source=&limit=&cursor=` | Paginated browse. Item shape = `SkillSearchResult` minus `similarity`, plus `status`, `calls30d`, `callSeries`, `updatedAt`. `meta.nextCursor` drives the next page (opaque; pass back verbatim). |
+| 2 | (on list + search items) | `calls30d` (int) and `updatedAt` (ISO) come from the skill row; `callSeries` is a 7-point **daily** sparkline (oldest→newest, zero-filled) from `agent_interactions`. |
+| 3 | `GET /api/v1/skills/stats` | `{ total, stable, inReview, draft, calls30d }`. `stable` = published (`stable`+`active`); `inReview` = `review`. |
+| 4 | `status` on `SkillSearchResult` | Now returned; search only yields published skills, so it's always `active`/`stable`. |
+| 5 | `POST /api/v1/skills` | **Admin-only.** `{ name, trigger?, baseLogic, description? }` → `SkillOut` at status `draft`, and opens a review (`kind:"new_decision"`) so it lands in the review queue. Duplicate name → `409`. Keep the "New skill" button. |
+| 6 | *(no change — see below)* | Override stays **agent-only**. |
+| 7 | *(not delivered)* | Brain-chat REST surface intentionally **not built** — agents use the `query_brain` MCP tool; no dashboard `POST /brain/query` wrapper. |
+| 8 | `GET /api/v1/decisions?status=&category=&source=&limit=&cursor=`, `GET /api/v1/decisions/{id}` | New read-only module over the existing `decisions` table (option **b** — decisions are a distinct domain object). Returns `{ id, title, provider, location, status, confidence, category, owner:{name,avatarColor}, uses, updatedAt, body, rule }`. |
+
+**#6 confirmation (as requested in writing):** `POST /interactions/{id}/override`
+**remains gated on the `skills:invoke` API-key scope** and is **agent-only** — the
+dashboard will not wire it. A plain dashboard JWT is rejected (`403`); there is no
+admin-JWT path. Leave the FE API-layer binding unused (or remove it); do **not**
+build a dashboard UI entry point for override.
+
+**Auth per new route:** `GET /skills*` uses `require_brain_access("brain:query")`
+(dashboard JWT ≥ viewer passes; an API key must hold `brain:query`). `POST /skills`
+is `require_role("admin")`. `GET /decisions*` is `require_role("viewer")`. All are
+RLS-scoped and rate-limited.
