@@ -29,6 +29,7 @@ from app.jobs.token_helper import token_for_provider
 from app.modules.brain.chunking import chunk_text
 from app.modules.brain.repository import BrainRepository, chunk_key
 from app.pipeline import embedder
+from app.pipeline.expanders.source_document import document_title
 from app.pipeline.expanders.user_directory import resolve_users
 from app.shared.middleware.with_tenant import run_in_tenant
 
@@ -140,6 +141,9 @@ def _plan_evidence_chunks(
         raw = row["author"]
         # Resolved name when available, else the raw value verbatim (never invented).
         author = author_map.get((row["provider"], str(raw)), raw) if raw else None
+        # The item's own title (Jira summary, GitHub/Drive/Gmail/Notion…), falling
+        # back to the policy title when the source has none (e.g. a Slack message).
+        label = document_title(row["provider"], row.get("payload")) or row["policy_title"]
         for idx, content in enumerate(chunk_text(row["content"])):
             key = chunk_key("evidence", row["skill_id"], row["review_id"], idx)
             if key in existing:
@@ -150,8 +154,8 @@ def _plan_evidence_chunks(
                 "source_ref": {
                     "provider": row["provider"],
                     "sourceItemId": row["review_id"],
-                    "url": row["url"],       # the source document link (Notion page, etc.)
-                    "label": row["label"],   # its human name (the policy/decision title)
+                    "url": row["url"],     # the source document link (Notion page, etc.)
+                    "label": label,        # the source item's own title
                     "author": author,
                 },
             })

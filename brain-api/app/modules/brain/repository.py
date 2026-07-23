@@ -419,10 +419,16 @@ class BrainRepository:
                     """
                     SELECT r.skill_id, r.id AS review_id,
                            r.source_provider AS provider,
-                           r.source_location AS url, r.title AS label,
-                           r.evidence_author AS author, r.evidence_quote AS content
+                           r.source_location AS url, r.title AS policy_title,
+                           r.evidence_author AS author, r.evidence_quote AS content,
+                           ev.payload AS payload
                       FROM reviews r
                       JOIN skills s ON s.id = r.skill_id
+                      LEFT JOIN LATERAL (
+                        SELECT payload FROM source_events e
+                         WHERE e.skill_id = r.skill_id
+                         ORDER BY e.created_at DESC LIMIT 1
+                      ) ev ON TRUE
                      WHERE s.deleted_at IS NULL AND s.status = ANY(:statuses)
                        AND r.evidence_quote IS NOT NULL AND r.skill_id IS NOT NULL
                     """

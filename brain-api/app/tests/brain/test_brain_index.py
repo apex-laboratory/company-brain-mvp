@@ -36,7 +36,8 @@ def _rows() -> list[dict]:
 def _evidence_rows() -> list[dict]:
     return [
         {"skill_id": "skl_1", "review_id": "rev_1", "provider": "slack",
-         "url": "https://acme.slack.com/archives/C1/p123", "label": "Refund policy escalation",
+         "url": "https://acme.slack.com/archives/C1/p123",
+         "policy_title": "Refund policy escalation", "payload": None,  # slack: no native title
          "author": "U07A3B12",
          "content": "we need a 45-day refund window for premium customers"},
     ]
@@ -161,18 +162,20 @@ async def test_backfill_captures_evidence_with_attribution() -> None:
     assert kw["source_ref"] == {
         "provider": "slack", "sourceItemId": "rev_1",
         "url": "https://acme.slack.com/archives/C1/p123",  # the source document link
-        "label": "Refund policy escalation",
+        "label": "Refund policy escalation",  # slack has no native title → policy title
         "author": "U07A3B12",  # no connection to resolve against → raw id kept
     }
     assert kw["chunk_key"] == chunk_key("evidence", "skl_1", "rev_1", 0)
 
 
-async def test_backfill_captures_notion_document_link() -> None:
-    # A Notion-sourced policy: no message author, but the page link + name are kept
-    # so "which document made the policy update" is answerable (the user's ask).
+async def test_backfill_captures_notion_document_link_and_native_title() -> None:
+    # A Notion-sourced policy: no message author, but the page link + its OWN title
+    # are kept, so "which document made the policy update" is answerable (user ask).
     rows = [{
         "skill_id": "skl_1", "review_id": "rev_9", "provider": "notion",
-        "url": "https://www.notion.so/Refund-Policy-abc123", "label": "Refund Policy",
+        "url": "https://www.notion.so/Refund-Policy-abc123", "policy_title": "Refund rule",
+        "payload": {"properties": {"Name": {"type": "title",
+                                            "title": [{"plain_text": "Refund Policy 2026"}]}}},
         "author": None, "content": "premium customers get a 45-day refund window",
     }]
     repo = _repo_mock(version_rows=[], evidence_rows=rows)
@@ -188,7 +191,8 @@ async def test_backfill_captures_notion_document_link() -> None:
     ref = repo.upsert_evidence_chunk.await_args.kwargs["source_ref"]
     assert ref["provider"] == "notion"
     assert ref["url"] == "https://www.notion.so/Refund-Policy-abc123"  # clickable page
-    assert ref["label"] == "Refund Policy" and ref["author"] is None
+    assert ref["label"] == "Refund Policy 2026"  # the Notion page's own title, not the policy
+    assert ref["author"] is None
 
 
 async def test_backfill_resolves_evidence_author_name() -> None:
@@ -277,6 +281,32 @@ async def test_resolve_users_unknown_provider_and_empty() -> None:
     assert await ud.resolve_users("github", "tok", ["janedoe"]) == {}  # no lookup needed
     assert await ud.resolve_users("slack", "", ["U1"]) == {}           # no token
     assert await ud.resolve_users("slack", "tok", []) == {}            # no ids
+
+
+# ── native document titles (per provider) ────────────────────────────────────
+
+def test_document_title_per_provider() -> None:
+    from app.pipeline.expanders.source_document import document_title
+    assert document_title("jira", {"key": "PROJ-12", "fields": {"summary": "Refund SLA"}}) \
+        == "PROJ-12: Refund SLA"
+    assert document_title("github", {"issue": {"title": "Fix refund window"}}) \
+        == "Fix refund window"
+    assert document_title("github", {"pull_request": {"title": "Refund PR"}}) == "Refund PR"
+    assert document_title("google_drive", {"name": "Refund Policy.gdoc"}) == "Refund Policy.gdoc"
+    assert document_title("zendesk", {"subject": "Refund escalation"}) == "Refund escalation"
+    assert document_title(
+        "gmail", {"payload": {"headers": [{"name": "Subject", "value": "Refund change"}]}}
+    ) == "Refund change"
+    assert document_title(
+        "notion", {"properties": {"P": {"type": "title", "title": [{"plain_text": "Refund"}]}}}
+    ) == "Refund"
+
+
+def test_document_title_none_for_slack_and_missing() -> None:
+    from app.pipeline.expanders.source_document import document_title
+    assert document_title("slack", {"text": "hi"}) is None   # a message has no title
+    assert document_title("jira", None) is None              # nothing captured
+    assert document_title("github", {"action": "opened"}) is None  # no title anywhere
 
 
 # ── keep-fresh hook ──────────────────────────────────────────────────────────
