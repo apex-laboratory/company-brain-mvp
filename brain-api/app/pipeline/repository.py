@@ -64,6 +64,7 @@ class SimilarSkill:
     exceptions_block: list
     source_authority: str | None
     similarity: float
+    status: str | None = None
 
 
 def _vector_literal(embedding: list[float]) -> str:
@@ -156,7 +157,7 @@ class PipelineRepository:
                 text(
                     """
                     SELECT id, name, version, base_logic, exceptions_block,
-                           source_authority,
+                           source_authority, status,
                            1 - (embedding <=> CAST(:vec AS vector)) AS similarity
                       FROM skills
                      WHERE workspace_id = :ws
@@ -183,6 +184,7 @@ class PipelineRepository:
                 exceptions_block=r["exceptions_block"] or [],
                 source_authority=r["source_authority"],
                 similarity=float(r["similarity"]),
+                status=r["status"],
             )
             for r in rows
         ]

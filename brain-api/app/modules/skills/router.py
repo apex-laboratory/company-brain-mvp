@@ -16,15 +16,17 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
-from app.modules.skills.schemas import OverrideRequest
+from app.modules.skills.schemas import CreateSkillRequest, OverrideRequest
 from app.modules.skills.service import SkillsService
-from app.shared.http.respond import ok
+from app.shared.http.respond import created, ok
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
 from app.shared.middleware.authorize import require_brain_access, require_role
 from app.shared.middleware.rate_limit import (
     BRAIN_LIMIT,
+    DASHBOARD_LIMIT,
     EXPORT_LIMIT,
     limiter,
+    user_key,
     workspace_key,
 )
 
@@ -32,6 +34,50 @@ router = APIRouter(prefix="/skills", tags=["skills"])
 interactions_router = APIRouter(prefix="/interactions", tags=["interactions"])
 
 _service = SkillsService()
+
+
+_Status = Annotated[str | None, Query(pattern="^(stable|active|draft|review)$")]
+
+
+@router.get("", dependencies=[Depends(require_brain_access("brain:query"))])
+@limiter.limit(BRAIN_LIMIT, key_func=workspace_key)
+async def list_skills(
+    request: Request,
+    status: _Status = None,
+    source: Annotated[str | None, Query(max_length=40)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Browse the registry without a query — paginated, filterable by status/source."""
+    items, next_cursor = await _service.list(
+        auth, status=status, source=source, limit=limit, cursor=cursor
+    )
+    return ok(
+        request,
+        [i.model_dump(by_alias=True) for i in items],
+        nextCursor=next_cursor,
+    )
+
+
+@router.get("/stats", dependencies=[Depends(require_brain_access("brain:query"))])
+@limiter.limit(BRAIN_LIMIT, key_func=workspace_key)
+async def skill_stats(request: Request, auth: AuthContext = Depends(get_auth_context)):
+    """Registry summary strip: total / stable / in-review / draft / calls·30d."""
+    stats = await _service.stats(auth)
+    return ok(request, stats.model_dump(by_alias=True))
+
+
+@router.post("", dependencies=[Depends(require_role("admin"))])
+@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
+async def create_skill(
+    request: Request,
+    body: CreateSkillRequest,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Manually author a skill (admin): lands a draft in the review queue."""
+    skill = await _service.create(auth, body)
+    return created(request, skill.model_dump(by_alias=True))
 
 
 @router.get("/search", dependencies=[Depends(require_brain_access("brain:query"))])
