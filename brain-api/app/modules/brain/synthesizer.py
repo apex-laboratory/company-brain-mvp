@@ -12,6 +12,9 @@ Anti-hallucination is the whole game here:
 * Governance facts (who approved / who originated / when it changed) are passed as
   an authoritative block the model may **quote but never infer**; an unrecorded
   field stays unrecorded, never back-filled with a plausible name or date.
+* Superseded version history (Phase 2) is passed clearly labeled: usable only for
+  "what changed / what did it used to be" questions, never stated as the current
+  rule.
 * Confidence is capped at the retrieval similarity, so the number can never exceed
   how well the question actually matched a skill.
 """
@@ -39,6 +42,9 @@ Do not guess.
 - For any who/when/where-it-came-from question, use ONLY the PROVENANCE block. If a \
 provenance field is null or absent, say it is not recorded — never fabricate a \
 name, date, or source.
+- PREVIOUS VERSIONS (if present) are SUPERSEDED history. Use them ONLY to answer \
+"what changed / what did it used to be" — never present a previous version as the \
+current rule.
 - Be concise and direct. Prefer the skill's own wording.
 
 Respond with a single JSON object, no prose around it:
@@ -76,6 +82,17 @@ def _render_provenance(dossier: dict[str, Any] | None) -> str:
     return json.dumps(dossier, default=str, indent=2)
 
 
+def _render_history(history: list[dict[str, Any]] | None) -> str:
+    """Superseded version bodies, labeled so they can't be stated as current."""
+    if not history:
+        return "(none)"
+    return "\n".join(
+        f"- skill {h.get('skill_id')} version {h.get('version')} (SUPERSEDED): "
+        f"{(h.get('content') or '').strip()}"
+        for h in history
+    )
+
+
 def _clamp01(value: Any, *, default: float = 0.0) -> float:
     try:
         return max(0.0, min(1.0, float(value)))
@@ -89,18 +106,22 @@ async def answer(
     *,
     top_similarity: float,
     provenance: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Synthesize a grounded answer over ``skills``.
 
     ``top_similarity`` (cosine, 0-1) caps the returned confidence so it can never
-    exceed how well the question matched. Returns
+    exceed how well the question matched. ``history`` carries superseded version
+    bodies for "what changed" questions (labeled, never stated as current). Returns
     ``{answer, grounded, used_skill_ids, confidence}`` where ``confidence`` is an
     int 0-100. Must be called OUTSIDE any open DB transaction (it does network I/O).
     """
     skills_block = "\n".join(_render_skill(s) for s in skills)
     user = (
         f"QUESTION:\n{question}\n\n"
-        f"SKILLS (the only knowledge you may use):\n{skills_block}\n\n"
+        f"SKILLS (the current rules — the only knowledge you may use):\n{skills_block}\n\n"
+        f"PREVIOUS VERSIONS (superseded — only for 'what changed' questions):\n"
+        f"{_render_history(history)}\n\n"
         f"PROVENANCE (authoritative governance facts for the primary skill; "
         f"quote, never infer):\n{_render_provenance(provenance)}"
     )

@@ -138,6 +138,7 @@ class BrainService:
             skills_ctx: list[dict] = []
             provenance: dict | None = None
             citations: dict[str, dict] = {}
+            history: list[dict] = []
             if matched:
                 for h in hits:
                     if h.similarity < _MATCH_THRESHOLD:
@@ -145,10 +146,11 @@ class BrainService:
                     full = await self._skills.get(session, h.id, statuses=PUBLISHED_STATUSES)
                     if full is not None:
                         skills_ctx.append(full)
+                matched_ids = [s["id"] for s in skills_ctx]
                 provenance = jsonable_encoder(await self._repo.provenance(session, top.id))
-                citations = await self._repo.skill_citations(
-                    session, [s["id"] for s in skills_ctx]
-                )
+                citations = await self._repo.skill_citations(session, matched_ids)
+                # Superseded version bodies (Phase 2) for "what changed" questions.
+                history = await self._repo.version_history(session, matched_ids)
             await session.commit()
 
         if not matched or not skills_ctx:
@@ -157,7 +159,8 @@ class BrainService:
 
         # Synthesis — network I/O, so strictly OUTSIDE the transaction above.
         result = await synthesizer.answer(
-            question, skills_ctx, top_similarity=top.similarity, provenance=provenance
+            question, skills_ctx, top_similarity=top.similarity,
+            provenance=provenance, history=history,
         )
         if not result["grounded"]:
             # The retrieved skills didn't actually answer it — honest miss, uncached.

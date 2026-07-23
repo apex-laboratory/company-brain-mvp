@@ -173,6 +173,10 @@ async def _commit(
     # keeps Redis I/O out of the pooled DB connection's transaction.
     if result.outcome == "published":
         await cache.invalidate_skills(event.workspace_id)
+        # Keep the brain chat index fresh: re-embed the new/updated skill version.
+        from app.modules.brain.reindex import schedule_reindex
+
+        await schedule_reindex(event.workspace_id)
     return result
 
 

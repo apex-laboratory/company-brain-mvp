@@ -17,6 +17,21 @@ from app.modules.skills.repository import PUBLISHED_STATUSES
 from app.shared.helpers.ids import generate_id
 
 
+def _vector_literal(embedding: list[float]) -> str:
+    """pgvector input literal: '[0.1,0.2,...]' (mirrors pipeline.repository)."""
+    return "[" + ",".join(repr(float(v)) for v in embedding) + "]"
+
+
+def chunk_key(kind: str, skill_id: str, ref: str, chunk_index: int) -> str:
+    """Deterministic idempotency key for a chunk (unique per workspace).
+
+    ``ref`` is the version (``skill_version`` kind) or the source item id
+    (``evidence`` kind). The backfill upserts on this, so a re-run of the same
+    (skill, version/source, chunk) is a no-op rather than a duplicate row.
+    """
+    return f"{kind}:{skill_id}:{ref}:{chunk_index}"
+
+
 class BrainRepository:
     async def count_indexed_skills(self, session: AsyncSession) -> int:
         """How many published skills carry an embedding (are retrievable).
@@ -245,3 +260,137 @@ class BrainRepository:
             )
         )
         return message_id
+
+    # ── brain_chunks index (Phase 2: skill versions) ────────────────────────────
+
+    async def list_version_index_rows(self, session: AsyncSession) -> list[dict]:
+        """Every (skill, version) body to index: all ``skill_versions`` of published
+        skills, plus any published skill that has no version row yet.
+
+        ``is_current`` = the version equals the skill's live ``version``. RLS scopes
+        both tables to the workspace.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT sv.skill_id, sv.version, sv.base_logic,
+                           (sv.version = s.version) AS is_current
+                      FROM skill_versions sv
+                      JOIN skills s ON s.id = sv.skill_id
+                     WHERE s.deleted_at IS NULL AND s.status = ANY(:statuses)
+                    UNION ALL
+                    SELECT s.id, s.version, s.base_logic, TRUE
+                      FROM skills s
+                     WHERE s.deleted_at IS NULL AND s.status = ANY(:statuses)
+                       AND NOT EXISTS (
+                         SELECT 1 FROM skill_versions sv WHERE sv.skill_id = s.id
+                       )
+                    """
+                ).bindparams(statuses=list(PUBLISHED_STATUSES))
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def list_chunk_keys(self, session: AsyncSession, *, kind: str) -> set[str]:
+        """Already-indexed ``chunk_key``s for a kind — the backfill skips these so a
+        re-run only embeds what's new (idempotency)."""
+        rows = (
+            await session.execute(
+                text("SELECT chunk_key FROM brain_chunks WHERE kind = :kind").bindparams(
+                    kind=kind
+                )
+            )
+        ).scalars()
+        return set(rows)
+
+    async def upsert_skill_version_chunk(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        skill_id: str,
+        version: str,
+        is_current: bool,
+        chunk_index: int,
+        chunk_key: str,
+        content: str,
+        embedding: list[float],
+    ) -> None:
+        """Insert or refresh one ``skill_version`` chunk (idempotent on chunk_key)."""
+        await session.execute(
+            text(
+                """
+                INSERT INTO brain_chunks
+                    (workspace_id, kind, skill_id, version, is_current,
+                     chunk_index, chunk_key, content, embedding)
+                VALUES
+                    (:ws, 'skill_version', :skill_id, :version, :is_current,
+                     :idx, :key, :content, CAST(:embedding AS vector))
+                ON CONFLICT (workspace_id, chunk_key) DO UPDATE
+                   SET content = EXCLUDED.content,
+                       embedding = EXCLUDED.embedding,
+                       is_current = EXCLUDED.is_current,
+                       version = EXCLUDED.version
+                """
+            ).bindparams(
+                ws=workspace_id,
+                skill_id=skill_id,
+                version=version,
+                is_current=is_current,
+                idx=chunk_index,
+                key=chunk_key,
+                content=content,
+                embedding=_vector_literal(embedding),
+            )
+        )
+
+    async def sync_skill_version_current(self, session: AsyncSession) -> None:
+        """Recompute ``is_current`` for every ``skill_version`` chunk from the skill's
+        live version — promotes the new current and demotes the prior one in a single
+        set-based pass (the "demote prior version" mechanism, kept idempotent)."""
+        await session.execute(
+            text(
+                """
+                UPDATE brain_chunks bc
+                   SET is_current = (bc.version = s.version)
+                  FROM skills s
+                 WHERE bc.skill_id = s.id
+                   AND bc.kind = 'skill_version'
+                   AND bc.is_current IS DISTINCT FROM (bc.version = s.version)
+                """
+            )
+        )
+
+    async def version_history(
+        self, session: AsyncSession, skill_ids: list[str]
+    ) -> list[dict]:
+        """Superseded version bodies for the matched skills — the "what did it used
+        to be / when did it change" context, always labeled superseded so the
+        synthesizer never states an old rule as current."""
+        if not skill_ids:
+            return []
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT skill_id, version, content
+                      FROM brain_chunks
+                     WHERE skill_id = ANY(:ids)
+                       AND kind = 'skill_version'
+                       AND is_current = FALSE
+                     ORDER BY skill_id, version
+                    """
+                ).bindparams(ids=skill_ids)
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def count_chunks(self, session: AsyncSession, *, kind: str | None = None) -> int:
+        """How many chunks are indexed (observability / readiness signal)."""
+        clause = " WHERE kind = :kind" if kind is not None else ""
+        stmt = text(f"SELECT COUNT(*) AS n FROM brain_chunks{clause}")
+        if kind is not None:
+            stmt = stmt.bindparams(kind=kind)
+        row = (await session.execute(stmt)).first()
+        return int(row.n) if row else 0

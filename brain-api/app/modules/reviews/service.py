@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from app.config.database import get_tenant_session
+from app.modules.brain.reindex import schedule_reindex
 from app.modules.reviews.repository import ReviewsRepository
 from app.modules.reviews.schemas import (
     BulkApproveItem,
@@ -133,6 +134,7 @@ class ReviewsService:
             await session.commit()
         if skill_id:
             await cache.invalidate_skills(workspace_id)
+            await schedule_reindex(workspace_id)  # re-embed the approved version
         return ResolveResult(id=review_id, status="approved", verdict="approve", skill_id=skill_id)
 
     async def reject(
@@ -294,6 +296,7 @@ class ReviewsService:
                 raise ConflictError("Review already resolved.")
             await session.commit()
         await cache.invalidate_skills(workspace_id)
+        await schedule_reindex(workspace_id)  # re-embed the human-written version
         return ResolveResult(
             id=review_id, status="approved", verdict="approve", skill_id=skill_id
         )

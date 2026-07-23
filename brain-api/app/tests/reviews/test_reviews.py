@@ -86,6 +86,9 @@ def _svc(review: dict | None, skill: dict | None = None):
         patch.object(service_module, "get_tenant_session", return_value=_AsyncCtx(session)),
         patch.object(service_module, "run_in_tenant", return_value=_AsyncCtx(None)),
         patch.object(service_module.cache, "invalidate_skills", AsyncMock()),
+        # Keep-fresh hook enqueues a brain re-index on publish; stub it so the unit
+        # tests don't reach for a real ARQ/Redis pool.
+        patch.object(service_module, "schedule_reindex", AsyncMock()),
         patch.object(
             service_module.embedder, "embed_text",
             AsyncMock(return_value=([0.0] * 1536, StageUsage("e", "m", 1, 0, 0.0))),

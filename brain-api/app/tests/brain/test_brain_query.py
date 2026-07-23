@@ -79,11 +79,13 @@ def _empty_prov() -> dict:
             "created_by": None, "last_edited_by": None}
 
 
-def _svc(*, hits=None, full=None, synth=None, provenance=None, citations=None, cached=None):
+def _svc(*, hits=None, full=None, synth=None, provenance=None, citations=None,
+         cached=None, history=None):
     brain_repo = MagicMock(
         count_indexed_skills=AsyncMock(return_value=5),
         provenance=AsyncMock(return_value=provenance if provenance is not None else _empty_prov()),
         skill_citations=AsyncMock(return_value=citations or {}),
+        version_history=AsyncMock(return_value=history or []),
         conversation_exists=AsyncMock(return_value=True),
         create_conversation=AsyncMock(return_value="cnv_1"),
         insert_message=AsyncMock(return_value="msg_1"),
@@ -287,6 +289,23 @@ async def test_query_conversation_not_owned_is_not_found() -> None:
             await svc.query(_auth(), "refund window", "cnv_someone_else")
     finally:
         _exit(patches)
+
+
+# ── versioned history (Phase 2) ──────────────────────────────────────────────
+
+async def test_query_passes_superseded_history_to_synthesizer() -> None:
+    history = [{"skill_id": "skl_1", "version": "v1", "content": "refund within 30 days"}]
+    svc, _brain, _skills, _pipe, patches = _svc(
+        hits=[_hit(0.9)], full=_full(), history=history,
+    )
+    _enter(patches)
+    try:
+        with patch.object(service_module.synthesizer, "answer",
+                          AsyncMock(return_value=_synth())) as synth:
+            await svc.query(_auth(), "what did our refund policy used to be")
+    finally:
+        _exit(patches)
+    assert synth.await_args.kwargs["history"] == history
 
 
 # ── cross-tenant guard ───────────────────────────────────────────────────────
