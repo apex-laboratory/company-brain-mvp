@@ -292,16 +292,16 @@ class BrainRepository:
         ).mappings().all()
         return [dict(r) for r in rows]
 
-    async def list_chunk_keys(self, session: AsyncSession, *, kind: str) -> set[str]:
-        """Already-indexed ``chunk_key``s for a kind — the backfill skips these so a
-        re-run only embeds what's new (idempotency)."""
-        rows = (
-            await session.execute(
-                text("SELECT chunk_key FROM brain_chunks WHERE kind = :kind").bindparams(
-                    kind=kind
-                )
-            )
-        ).scalars()
+    async def list_chunk_keys(
+        self, session: AsyncSession, *, kind: str | None = None
+    ) -> set[str]:
+        """Already-indexed ``chunk_key``s (of ``kind``, or all kinds when ``None``) —
+        the backfill skips these so a re-run only embeds what's new (idempotency)."""
+        clause = " WHERE kind = :kind" if kind is not None else ""
+        stmt = text(f"SELECT chunk_key FROM brain_chunks{clause}")
+        if kind is not None:
+            stmt = stmt.bindparams(kind=kind)
+        rows = (await session.execute(stmt)).scalars()
         return set(rows)
 
     async def upsert_skill_version_chunk(
@@ -394,3 +394,112 @@ class BrainRepository:
             stmt = stmt.bindparams(kind=kind)
         row = (await session.execute(stmt)).first()
         return int(row.n) if row else 0
+
+    # ── brain_chunks index (Phase 3: skill evidence graph) ──────────────────────
+
+    async def list_evidence_rows(self, session: AsyncSession) -> list[dict]:
+        """Each published skill's durable evidence — the deciding messages that fed
+        it (``reviews.evidence_quote`` + author + provider + channel/doc).
+
+        This is the retrievable "whose message said we need this" node: the review
+        curated it at extraction, so it's the highest-signal source material without
+        re-touching the extraction hot path. (Fuller source spans from
+        ``source_events.payload`` are a later enrichment.)
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT r.skill_id, r.id AS review_id,
+                           r.source_provider AS provider, r.source_location AS location,
+                           r.evidence_author AS author, r.evidence_quote AS content
+                      FROM reviews r
+                      JOIN skills s ON s.id = r.skill_id
+                     WHERE s.deleted_at IS NULL AND s.status = ANY(:statuses)
+                       AND r.evidence_quote IS NOT NULL AND r.skill_id IS NOT NULL
+                    """
+                ).bindparams(statuses=list(PUBLISHED_STATUSES))
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def upsert_evidence_chunk(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        skill_id: str,
+        source_ref: dict,
+        chunk_index: int,
+        chunk_key: str,
+        content: str,
+        embedding: list[float],
+    ) -> None:
+        """Insert or refresh one ``evidence`` chunk (idempotent on chunk_key).
+
+        ``source_ref`` = {provider, sourceItemId, url, label, author} — the citation
+        the FE renders and the synthesizer attributes the quote to.
+        """
+        await session.execute(
+            text(
+                """
+                INSERT INTO brain_chunks
+                    (workspace_id, kind, skill_id, source_ref,
+                     chunk_index, chunk_key, content, embedding)
+                VALUES
+                    (:ws, 'evidence', :skill_id, CAST(:source_ref AS jsonb),
+                     :idx, :key, :content, CAST(:embedding AS vector))
+                ON CONFLICT (workspace_id, chunk_key) DO UPDATE
+                   SET content = EXCLUDED.content,
+                       embedding = EXCLUDED.embedding,
+                       source_ref = EXCLUDED.source_ref
+                """
+            ).bindparams(
+                ws=workspace_id,
+                skill_id=skill_id,
+                source_ref=json.dumps(source_ref),
+                idx=chunk_index,
+                key=chunk_key,
+                content=content,
+                embedding=_vector_literal(embedding),
+            )
+        )
+
+    async def similar_chunks(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        embedding: list[float],
+        *,
+        kind: str,
+        limit: int = 3,
+    ) -> list[dict]:
+        """Top-``limit`` chunks of ``kind`` by cosine similarity (HNSW), restricted
+        to chunks of **non-deleted** skills — so a soft-deleted skill's evidence or
+        history is never served even before the row is hard-deleted. Used for the
+        Phase-3 evidence facet of retrieval.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT bc.skill_id, bc.kind, bc.version, bc.source_ref, bc.content,
+                           1 - (bc.embedding <=> CAST(:vec AS vector)) AS similarity
+                      FROM brain_chunks bc
+                      JOIN skills s ON s.id = bc.skill_id
+                     WHERE bc.workspace_id = :ws
+                       AND bc.kind = :kind
+                       AND bc.embedding IS NOT NULL
+                       AND s.deleted_at IS NULL
+                     ORDER BY bc.embedding <=> CAST(:vec AS vector)
+                     LIMIT :limit
+                    """
+                ).bindparams(
+                    ws=workspace_id,
+                    vec=_vector_literal(embedding),
+                    kind=kind,
+                    limit=limit,
+                )
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]

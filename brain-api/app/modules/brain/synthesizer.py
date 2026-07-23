@@ -29,23 +29,26 @@ _STAGE = "brain_synthesis"
 
 _SYSTEM = """\
 You are the Company Brain: you answer operational questions for staff using ONLY \
-the organization's human-reviewed skills (policies/decisions) and the provenance \
-facts provided below.
+the organization's human-reviewed skills (policies/decisions), their source \
+material (evidence), and the provenance facts provided below.
 
 Hard rules:
-- Answer ONLY from the SKILLS and PROVENANCE given in the user message. Never use \
-outside knowledge or invent policy.
-- If the provided skills do not actually answer the question, set "grounded" to \
+- Answer ONLY from the SKILLS, their SOURCE MATERIAL, PREVIOUS VERSIONS, and \
+PROVENANCE given in the user message. Never use outside knowledge or invent policy.
+- If none of the provided context actually answers the question, set "grounded" to \
 false and give a short answer saying you don't have a reviewed skill covering it. \
 Do not guess.
 - Cite the skill id(s) you actually used in "usedSkillIds".
-- For any who/when/where-it-came-from question, use ONLY the PROVENANCE block. If a \
-provenance field is null or absent, say it is not recorded — never fabricate a \
+- SOURCE MATERIAL is the original message/doc that led to a skill. Use it to answer \
+"who said / where did this come from" questions — attribute quotes to the given \
+author and location, and never fabricate an author or location that isn't provided.
+- For structured who-approved/when-changed facts, use ONLY the PROVENANCE block. If \
+a provenance field is null or absent, say it is not recorded — never fabricate a \
 name, date, or source.
 - PREVIOUS VERSIONS (if present) are SUPERSEDED history. Use them ONLY to answer \
 "what changed / what did it used to be" — never present a previous version as the \
 current rule.
-- Be concise and direct. Prefer the skill's own wording.
+- Be concise and direct. Prefer the source's own wording.
 
 Respond with a single JSON object, no prose around it:
 {
@@ -93,6 +96,22 @@ def _render_history(history: list[dict[str, Any]] | None) -> str:
     )
 
 
+def _render_evidence(evidence: list[dict[str, Any]] | None) -> str:
+    """Original source material with attribution — the basis for 'who said' answers."""
+    if not evidence:
+        return "(none)"
+    lines = []
+    for e in evidence:
+        author = e.get("author") or "unknown author"
+        location = e.get("location") or "unknown location"
+        provider = e.get("provider") or "source"
+        lines.append(
+            f"- from {author} via {provider} in {location} "
+            f"(skill {e.get('skill_id')}): {(e.get('content') or '').strip()}"
+        )
+    return "\n".join(lines)
+
+
 def _clamp01(value: Any, *, default: float = 0.0) -> float:
     try:
         return max(0.0, min(1.0, float(value)))
@@ -107,19 +126,23 @@ async def answer(
     top_similarity: float,
     provenance: dict[str, Any] | None = None,
     history: list[dict[str, Any]] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Synthesize a grounded answer over ``skills``.
+    """Synthesize a grounded answer over ``skills`` and their ``evidence``.
 
     ``top_similarity`` (cosine, 0-1) caps the returned confidence so it can never
     exceed how well the question matched. ``history`` carries superseded version
-    bodies for "what changed" questions (labeled, never stated as current). Returns
+    bodies for "what changed" questions; ``evidence`` carries the original source
+    material (attributed messages/docs) for "who said" questions. Returns
     ``{answer, grounded, used_skill_ids, confidence}`` where ``confidence`` is an
     int 0-100. Must be called OUTSIDE any open DB transaction (it does network I/O).
     """
-    skills_block = "\n".join(_render_skill(s) for s in skills)
+    skills_block = "\n".join(_render_skill(s) for s in skills) or "(none)"
     user = (
         f"QUESTION:\n{question}\n\n"
-        f"SKILLS (the current rules — the only knowledge you may use):\n{skills_block}\n\n"
+        f"SKILLS (the current rules):\n{skills_block}\n\n"
+        f"SOURCE MATERIAL (evidence — attribute quotes to the given author/location):\n"
+        f"{_render_evidence(evidence)}\n\n"
         f"PREVIOUS VERSIONS (superseded — only for 'what changed' questions):\n"
         f"{_render_history(history)}\n\n"
         f"PROVENANCE (authoritative governance facts for the primary skill; "

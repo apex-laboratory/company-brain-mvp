@@ -36,6 +36,7 @@ from app.shared.middleware.with_tenant import run_in_tenant
 
 _MATCH_THRESHOLD = 0.70  # below this a query is a "no_match" (mirrors SkillsService)
 _RETRIEVAL_LIMIT = 5
+_EVIDENCE_LIMIT = 3
 _NO_MATCH_ANSWER = (
     "I don't have a reviewed skill that covers that yet, so I can't give you a "
     "confident answer. Once a related decision has been captured and approved, "
@@ -126,7 +127,9 @@ class BrainService:
 
         embedding, _ = await embedder.embed_text(question)  # network — outside any txn
 
-        # txn A: vector search + full bodies + the governance dossier for the top hit.
+        # txn A: two-facet retrieval — the reviewed skills AND their evidence chunks,
+        # one governed index. Full bodies + governance dossier + version history for
+        # matched skills; evidence chunks for "who said / where from" questions.
         async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
@@ -134,12 +137,12 @@ class BrainService:
                 session, workspace_id, embedding, PUBLISHED_STATUSES, limit=_RETRIEVAL_LIMIT
             )
             top = hits[0] if hits else None
-            matched = top is not None and top.similarity >= _MATCH_THRESHOLD
+            skill_matched = top is not None and top.similarity >= _MATCH_THRESHOLD
             skills_ctx: list[dict] = []
             provenance: dict | None = None
             citations: dict[str, dict] = {}
             history: list[dict] = []
-            if matched:
+            if skill_matched:
                 for h in hits:
                     if h.similarity < _MATCH_THRESHOLD:
                         continue
@@ -149,39 +152,78 @@ class BrainService:
                 matched_ids = [s["id"] for s in skills_ctx]
                 provenance = jsonable_encoder(await self._repo.provenance(session, top.id))
                 citations = await self._repo.skill_citations(session, matched_ids)
-                # Superseded version bodies (Phase 2) for "what changed" questions.
                 history = await self._repo.version_history(session, matched_ids)
+            evidence_hits = await self._repo.similar_chunks(
+                session, workspace_id, embedding, kind="evidence", limit=_EVIDENCE_LIMIT
+            )
             await session.commit()
 
-        if not matched or not skills_ctx:
-            core = _no_match_core(top.similarity if top else None)
-            return await self._finalize(auth, question, core, conversation_id)
+        evidence = [e for e in evidence_hits if e["similarity"] >= _MATCH_THRESHOLD]
 
-        # Synthesis — network I/O, so strictly OUTSIDE the transaction above.
+        # Synthesis — network I/O, strictly OUTSIDE the transaction above.
+        if skill_matched and skills_ctx:
+            core = await self._answer_from_skills(
+                question, skills_ctx, top, provenance, history, evidence, citations
+            )
+        elif evidence:
+            # No reviewed skill matched, but a cited source in a skill's lineage does —
+            # still governed (evidence facet), never an ungoverned guess.
+            core = await self._answer_from_evidence(question, evidence)
+        else:
+            core = _no_match_core(top.similarity if top else None)
+
+        if core["trust"] != "none":  # cache grounded answers only
+            await cache.set_cached_search(workspace_id, question, core)
+        return await self._finalize(auth, question, core, conversation_id)
+
+    async def _answer_from_skills(
+        self, question: str, skills_ctx: list[dict], top, provenance: dict | None,
+        history: list[dict], evidence: list[dict], citations: dict[str, dict],
+    ) -> dict:
+        """Skill facet: the reviewed rule is the answer; evidence supports it."""
         result = await synthesizer.answer(
             question, skills_ctx, top_similarity=top.similarity,
             provenance=provenance, history=history,
+            evidence=[_evidence_ctx(e) for e in evidence],
         )
         if not result["grounded"]:
-            # The retrieved skills didn't actually answer it — honest miss, uncached.
-            core = _no_match_core(top.similarity)
-            return await self._finalize(auth, question, core, conversation_id)
-
+            return _no_match_core(top.similarity)
         valid_ids = {s["id"] for s in skills_ctx}
         used_ids = [i for i in result["used_skill_ids"] if i in valid_ids] or [top.id]
-        core = {
+        return {
             "answer": result["answer"],
             "trust": "skill",
             "confidence": result["confidence"],
             "match_type": "semantic",
-            "sources": _build_sources(used_ids, citations),
+            "sources": _build_sources(used_ids, citations) + _evidence_sources(evidence),
             "skill_ids": used_ids,
             "provenance": provenance,
             "top_skill_id": top.id,
             "top_similarity": round(top.similarity, 4),
         }
-        await cache.set_cached_search(workspace_id, question, core)  # grounded answers only
-        return await self._finalize(auth, question, core, conversation_id)
+
+    async def _answer_from_evidence(self, question: str, evidence: list[dict]) -> dict:
+        """Evidence facet: answer from cited source material within a skill's lineage
+        (governed — every evidence chunk is skill-linked), tagged trust='evidence'."""
+        top_sim = evidence[0]["similarity"]
+        result = await synthesizer.answer(
+            question, [], top_similarity=top_sim,
+            evidence=[_evidence_ctx(e) for e in evidence],
+        )
+        if not result["grounded"]:
+            return _no_match_core(top_sim)
+        skill_ids = list(dict.fromkeys(e["skill_id"] for e in evidence))
+        return {
+            "answer": result["answer"],
+            "trust": "evidence",
+            "confidence": result["confidence"],
+            "match_type": "evidence",
+            "sources": _evidence_sources(evidence),
+            "skill_ids": skill_ids,
+            "provenance": None,
+            "top_skill_id": skill_ids[0] if skill_ids else None,
+            "top_similarity": round(top_sim, 4),
+        }
 
     async def _finalize(
         self, auth: AuthContext, question: str, core: dict, conversation_id: str | None
@@ -269,6 +311,34 @@ def _build_sources(used_ids: list[str], citations: dict[str, dict]) -> list[dict
         }
         for i in used_ids
     ]
+
+
+def _evidence_ctx(hit: dict) -> dict:
+    """Shape an evidence chunk for the synthesizer (content + attribution)."""
+    ref = hit.get("source_ref") or {}
+    return {
+        "content": hit.get("content"),
+        "author": ref.get("author"),
+        "location": ref.get("label"),
+        "provider": ref.get("provider"),
+        "skill_id": hit.get("skill_id"),
+    }
+
+
+def _evidence_sources(evidence: list[dict]) -> list[dict]:
+    """Citations for matched evidence chunks (provider + channel/doc + a quote)."""
+    sources = []
+    for hit in evidence:
+        ref = hit.get("source_ref") or {}
+        content = hit.get("content") or ""
+        sources.append({
+            "provider": ref.get("provider"),
+            "location": ref.get("label"),
+            "skill_id": hit.get("skill_id"),
+            "url": ref.get("url"),
+            "excerpt": content[:200] or None,
+        })
+    return sources
 
 
 def _to_stored_source(source: dict) -> dict:

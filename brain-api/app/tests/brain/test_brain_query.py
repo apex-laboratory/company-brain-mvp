@@ -79,13 +79,24 @@ def _empty_prov() -> dict:
             "created_by": None, "last_edited_by": None}
 
 
+def _ev_hit(similarity: float, sid: str = "skl_1") -> dict:
+    return {
+        "skill_id": sid, "kind": "evidence", "version": None,
+        "source_ref": {"provider": "slack", "sourceItemId": "rev_1", "url": None,
+                       "label": "#cs-escalations", "author": "Jane D."},
+        "content": "we need a 45-day refund window for premium customers",
+        "similarity": similarity,
+    }
+
+
 def _svc(*, hits=None, full=None, synth=None, provenance=None, citations=None,
-         cached=None, history=None):
+         cached=None, history=None, evidence_hits=None):
     brain_repo = MagicMock(
         count_indexed_skills=AsyncMock(return_value=5),
         provenance=AsyncMock(return_value=provenance if provenance is not None else _empty_prov()),
         skill_citations=AsyncMock(return_value=citations or {}),
         version_history=AsyncMock(return_value=history or []),
+        similar_chunks=AsyncMock(return_value=evidence_hits or []),
         conversation_exists=AsyncMock(return_value=True),
         create_conversation=AsyncMock(return_value="cnv_1"),
         insert_message=AsyncMock(return_value="msg_1"),
@@ -306,6 +317,64 @@ async def test_query_passes_superseded_history_to_synthesizer() -> None:
     finally:
         _exit(patches)
     assert synth.await_args.kwargs["history"] == history
+
+
+# ── evidence graph (Phase 3) ─────────────────────────────────────────────────
+
+async def test_query_evidence_supports_skill_answer() -> None:
+    svc, _brain, _skills, _pipe, patches = _svc(
+        hits=[_hit(0.88)], full=_full(),
+        citations={"skl_1": {"provider": "notion", "location": "Policy Library"}},
+        evidence_hits=[_ev_hit(0.9)],
+    )
+    _enter(patches)
+    try:
+        with patch.object(service_module.synthesizer, "answer",
+                          AsyncMock(return_value=_synth())) as synth:
+            out = await svc.query(_auth(), "whose message said we need a refund window")
+    finally:
+        _exit(patches)
+    assert out.trust == "skill"  # reviewed rule is primary; evidence supports
+    # evidence is passed to the synthesizer as attributed source material
+    assert synth.await_args.kwargs["evidence"][0]["author"] == "Jane D."
+    # the cited source material appears in the answer's sources (with a quote)
+    assert any(s.excerpt and "refund window" in s.excerpt for s in out.sources)
+
+
+async def test_query_evidence_only_when_no_skill_matches() -> None:
+    svc, _brain, skills_repo, _pipe, patches = _svc(
+        hits=[_hit(0.5)],  # no skill above threshold
+        evidence_hits=[_ev_hit(0.85)],
+    )
+    _enter(patches)
+    try:
+        with patch.object(service_module.synthesizer, "answer",
+                          AsyncMock(return_value=_synth())):
+            out = await svc.query(_auth(), "who asked for the refund window")
+    finally:
+        _exit(patches)
+    assert out.trust == "evidence" and out.match_type == "evidence"
+    assert out.confidence > 0 and out.skill_ids == ["skl_1"]
+    assert out.sources and out.sources[0].provider == "slack"
+    # the interaction log records the evidence facet + its skill
+    log = skills_repo.insert_interaction.await_args.kwargs
+    assert log["match_type"] == "evidence" and log["skill_id"] == "skl_1"
+
+
+async def test_query_evidence_only_ungrounded_is_no_match() -> None:
+    svc, _brain, _skills, _pipe, patches = _svc(
+        hits=[], evidence_hits=[_ev_hit(0.85)],
+    )
+    _enter(patches)
+    try:
+        with patch.object(service_module.synthesizer, "answer",
+                          AsyncMock(return_value=_synth(grounded=False))), \
+             patch.object(service_module.cache, "set_cached_search", AsyncMock()) as set_cache:
+            out = await svc.query(_auth(), "unrelated question")
+    finally:
+        _exit(patches)
+    assert out.trust == "none" and out.match_type == "no_match"
+    set_cache.assert_not_awaited()
 
 
 # ── cross-tenant guard ───────────────────────────────────────────────────────
