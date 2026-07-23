@@ -2166,6 +2166,76 @@
         }
       }
     },
+    "/api/v1/brain/status": {
+      "get": {
+        "tags": [
+          "brain"
+        ],
+        "summary": "Brain Status",
+        "description": "Whether the brain is ready to answer for this workspace (FE gate).",
+        "operationId": "brain_status_api_v1_brain_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/brain/query": {
+      "post": {
+        "tags": [
+          "brain"
+        ],
+        "summary": "Brain Query",
+        "description": "Answer an operational question with a cited, confidence-scored answer.\n\nOne surface for both the browser dashboard (JWT) and agents (API-key); a\nbelow-threshold question returns an honest no-match, and an unready workspace\na typed 409 (``brain_not_ready``) before any embedding/LLM spend.",
+        "operationId": "brain_query_api_v1_brain_query_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrainQueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/decisions": {
       "get": {
         "tags": [
@@ -2426,6 +2496,34 @@
         "additionalProperties": false,
         "type": "object",
         "title": "AuthorizeStartRequest"
+      },
+      "BrainQueryRequest": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question"
+          },
+          "conversationId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversationid"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "BrainQueryRequest",
+        "description": "A dashboard/agent question. ``conversationId`` continues an existing thread;\nomit it to start a new one (dashboard JWT callers only \u2014 see the service)."
       },
       "BulkApproveRequest": {
         "properties": {

@@ -11,6 +11,7 @@ from arq.worker import func
 
 from app.config.settings import settings
 from app.integrations.base import close_http_client
+from app.jobs.tasks.brain_index_backfill import brain_index_backfill
 from app.jobs.tasks.extract_event import extract_event
 from app.jobs.tasks.google_watch import watch_register, watch_renew
 from app.jobs.tasks.onboarding_sweep import onboarding_sweep
@@ -51,6 +52,9 @@ class WorkerSettings:
         # like the sweep itself. A timeout kill resumes on retry (queued events only).
         func(sweep_extract, timeout=3600),
         query_extract,
+        # Embedding every skill version can take a while on a large workspace; give it
+        # an hour. Idempotent (skips already-indexed chunks), so a retry resumes cheaply.
+        func(brain_index_backfill, timeout=3600),
     ]
     # Daily renewal of Google push channels (Drive/Gmail watch expires <= 7 days);
     # 15-minute polling for providers without push delivery (Notion).

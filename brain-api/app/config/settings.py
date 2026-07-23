@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     llm_max_attempts: int = 3  # per-call attempts inside the pipeline retry wrapper
 
+    # ── brain chat (delivery — BACKEND_ASKS §7) ───────────────────────────────
+    # Global kill-switch for the "Ask the brain" chat surface. Ops can hard-disable
+    # everywhere; per-workspace readiness (skills indexed) is computed on top of it
+    # by the brain readiness gate.
+    brain_chat_enabled: bool = True
+
     # source_authority.yaml (sweep processing order etc.); lives at the repo root
     # in dev. A missing file falls back to the built-in default order.
     source_authority_path: str = "../source_authority.yaml"

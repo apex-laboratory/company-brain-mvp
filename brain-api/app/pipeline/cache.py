@@ -24,29 +24,42 @@ log = logging.getLogger(__name__)
 SEARCH_TTL_SECONDS = 300
 
 
-def search_key(workspace_id: str, query: str) -> str:
-    """Cache key for a query result, on the invalidated ``skills:{ws}:*`` keyspace."""
+def search_key(workspace_id: str, query: str, kind: str = "query") -> str:
+    """Cache key for a query result, on the invalidated ``skills:{ws}:*`` keyspace.
+
+    ``kind`` discriminates callers that cache structurally different payloads under
+    the same ``(workspace_id, query)`` — e.g. the skills surface (``"query"``) and
+    brain-chat (``"brain"``) return incompatible contracts, so they must not share a
+    key. All variants stay under ``skills:{ws}:*`` so ``invalidate_skills`` clears
+    every facet on publish.
+    """
     digest = hashlib.sha256(query.strip().lower().encode()).hexdigest()
-    return f"skills:{workspace_id}:query:{digest}"
+    return f"skills:{workspace_id}:{kind}:{digest}"
 
 
-async def get_cached_search(workspace_id: str, query: str) -> dict | None:
+async def get_cached_search(
+    workspace_id: str, query: str, kind: str = "query"
+) -> dict | None:
     """Return a cached query result, or ``None`` on miss/outage (best-effort)."""
     try:
         redis = await init_redis()
-        raw = await redis.get(search_key(workspace_id, query))
+        raw = await redis.get(search_key(workspace_id, query, kind))
         return json.loads(raw) if raw else None
     except Exception:  # noqa: BLE001 — a cache outage must never fail a query
         log.warning("cache: search read failed for %s", workspace_id, exc_info=True)
         return None
 
 
-async def set_cached_search(workspace_id: str, query: str, value: dict[str, Any]) -> None:
+async def set_cached_search(
+    workspace_id: str, query: str, value: dict[str, Any], kind: str = "query"
+) -> None:
     """Cache a query result for ``SEARCH_TTL_SECONDS`` (best-effort)."""
     try:
         redis = await init_redis()
         await redis.set(
-            search_key(workspace_id, query), json.dumps(value), ex=SEARCH_TTL_SECONDS
+            search_key(workspace_id, query, kind),
+            json.dumps(value),
+            ex=SEARCH_TTL_SECONDS,
         )
     except Exception:  # noqa: BLE001 — best-effort by design
         log.warning("cache: search write failed for %s", workspace_id, exc_info=True)
