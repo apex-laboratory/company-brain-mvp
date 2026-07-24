@@ -22,6 +22,8 @@ is isolated by Postgres Row-Level Security. Full product spec: `docs/PRD.md`.
 | 4 Review system (backend) | list/stats/approve/reject + get-by-id/write/resolve/bulk-approve | 🔵 in PR (branch `feature/phase-4-5-delivery`) |
 | 5 Delivery | `query_brain` MCP tool, `/skills/*`, `/interactions/override`, read-cache | 🔵 in PR (same branch) |
 | — Brain chat (BACKEND_ASKS §7) | JWT `POST /brain/query` + `GET /brain/status`, grounded synthesis, provenance dossier, `brain_chunks` evidence graph | 🔵 in PR (branch `feat/brain-chat`, `app/modules/brain/`) — see `docs/BRAIN_CHAT_RAG_PLAN.md` |
+| — Brain chat streaming | `POST /brain/query/stream` (SSE: `status`→`token`*→`done`). Safe only because the synthesizer's JSON emits `grounded` **before** `answer` — tokens flow only once the verdict is in, so an ungrounded reply streams no text. Don't reorder those keys. | ✅ on `feat/brain-chat` |
+| — Brain chat history | `GET /brain/conversations` + `/{id}/messages` replay a persisted thread on reload. Dashboard (JWT) only — threads are RLS-scoped to `current_user_id()`, so agents get 403. | ✅ on `feat/brain-chat` |
 | — Query-driven live search (Feature 16) | per-source `search()` behind the seam in `app/pipeline/query_extraction.py` | ⏳ **remaining** — see PRD §16 Phase 5 note |
 | — Author id→name resolution (BRAIN_CHAT_RAG_PLAN decision F) | Slack/Zendesk evidence authors resolved to names at capture (`app/pipeline/expanders/user_directory.py`, in `brain_index_backfill`); Notion has no message author | ✅ evidence surface (the provenance-dossier `originatedBy` still shows the raw id — a secondary surface) |
 | 6 Agent demo | `agent-demo/demo.py` | ⏳ placeholder |
