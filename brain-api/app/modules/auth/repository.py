@@ -93,6 +93,24 @@ class AuthRepository:
             return None
         return UserRecord(id=row.id, email=row.email, name=row.name)
 
+    async def find_user_by_id(
+        self,
+        session: AsyncSession,
+        user_id: str,
+    ) -> UserRecord | None:
+        """Return the user matching ``user_id``, or ``None``. Used by GET /auth/me
+        to rehydrate the caller from the access-token ``sub`` claim."""
+        row = (
+            await session.execute(
+                text(
+                    "SELECT id, email, name FROM users WHERE id = :id"
+                ).bindparams(id=user_id),
+            )
+        ).first()
+        if row is None:
+            return None
+        return UserRecord(id=row.id, email=row.email, name=row.name)
+
     async def create_user(
         self,
         session: AsyncSession,

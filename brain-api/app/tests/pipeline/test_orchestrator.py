@@ -56,7 +56,7 @@ def wired(monkeypatch):
         finalize_event=AsyncMock(),
         similar_skills=AsyncMock(return_value=[]),  # default: no neighbours → NEW
     )
-    monkeypatch.setattr(orchestrator, "get_session", _fake_session)
+    monkeypatch.setattr(orchestrator, "get_tenant_session", _fake_session)
     monkeypatch.setattr(orchestrator, "run_in_tenant", lambda *a, **k: _null_ctx())
     monkeypatch.setattr(orchestrator, "_repo", repo)
     monkeypatch.setattr(orchestrator, "_normalize", lambda event: _raw())

@@ -54,7 +54,7 @@ def _service_with(repo: MagicMock) -> tuple[SweepsService, AsyncMock, tuple]:
     enqueue = AsyncMock()
     session = MagicMock(commit=AsyncMock())
     patches = (
-        patch.object(service_module, "get_session", return_value=_AsyncCtx(session)),
+        patch.object(service_module, "get_tenant_session", return_value=_AsyncCtx(session)),
         patch.object(service_module, "run_in_tenant", return_value=_AsyncCtx(None)),
         patch.object(service_module, "enqueue", enqueue),
     )

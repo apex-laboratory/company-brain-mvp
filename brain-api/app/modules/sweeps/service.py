@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from app.config.database import get_session
+from app.config.database import get_tenant_session
 from app.jobs.queue import enqueue
 from app.modules.sweeps.repository import SweepsRepository
 from app.modules.sweeps.schemas import SweepOut
@@ -49,7 +49,7 @@ class SweepsService:
         ``created`` is False when an in-flight sweep was returned instead.
         """
         workspace_id, role = _require_workspace(auth)
-        async with get_session() as session:
+        async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 active = await self._repo.find_active(session)
                 if active is None:
@@ -80,7 +80,7 @@ class SweepsService:
             UUID(sweep_id)
         except ValueError:
             raise NotFoundError("Sweep") from None
-        async with get_session() as session:
+        async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 row = await self._repo.get(session, sweep_id)
         if row is None:

@@ -24,8 +24,15 @@ class Settings(BaseSettings):
 
     environment: Literal["development", "test", "production"] = "development"
     port: int = 4000
+    mcp_port: int = 8001  # FastMCP query_brain server (its own process)
 
-    database_url: str  # postgresql+asyncpg://...
+    database_url: str  # postgresql+asyncpg://... — PRIVILEGED role (may BYPASSRLS)
+    # Restricted, RLS-subject role used for ALL tenant-scoped traffic
+    # (tenant_session / run_in_tenant). Provision it with
+    # scripts/provision_tenant_role.py. When unset the app falls back to
+    # database_url and logs a loud warning — RLS then does NOT isolate tenants,
+    # so this MUST be set in any shared/production deployment.
+    tenant_database_url: str | None = None
     redis_url: str  # redis://...
 
     jwt_access_secret: str  # >= 32 chars
@@ -61,6 +68,12 @@ class Settings(BaseSettings):
     # providers. Must match a redirect registered in each provider's app config.
     oauth_redirect_base_url: str = "http://localhost:4000"
     frontend_url: str = "http://localhost:3000"
+    # Login SSO (Google/GitHub) redirects the browser to this FRONTEND page, which
+    # reads ?code&state and POSTs them to /auth/oauth/{provider}/callback. Must be
+    # registered verbatim as the "Authorized redirect URI" in each provider's
+    # console. Distinct from oauth_redirect_base_url (that's for source-connector
+    # callbacks, which the backend receives directly).
+    frontend_oauth_callback_path: str = "/auth/callback"
     notion_client_id: str = ""
     notion_client_secret: str = ""
     # GitHub App (KAN-7). Auth is App-JWT (RS256) → per-installation tokens, so no
@@ -110,6 +123,12 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-sonnet-5"
     embedding_model: str = "text-embedding-3-small"
     llm_max_attempts: int = 3  # per-call attempts inside the pipeline retry wrapper
+
+    # ── brain chat (delivery — BACKEND_ASKS §7) ───────────────────────────────
+    # Global kill-switch for the "Ask the brain" chat surface. Ops can hard-disable
+    # everywhere; per-workspace readiness (skills indexed) is computed on top of it
+    # by the brain readiness gate.
+    brain_chat_enabled: bool = True
 
     # source_authority.yaml (sweep processing order etc.); lives at the repo root
     # in dev. A missing file falls back to the built-in default order.

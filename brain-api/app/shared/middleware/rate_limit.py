@@ -20,10 +20,19 @@ DASHBOARD_LIMIT = "300/minute"
 # API-key creation is expensive and security-sensitive (each mints a live
 # credential); cap it per admin (API_DOCUMENTATION.md §Rate Limits).
 API_KEY_CREATE_LIMIT = "5/hour"
+# Agent-facing brain surface (search, skill reads, override feedback). Keyed by
+# workspace so one workspace's agents can't exhaust another's budget.
+BRAIN_LIMIT = "120/minute"
+# Full-corpus export is heavy and dumps all organizational knowledge; cap hard.
+EXPORT_LIMIT = "10/hour"
 
-# AUTH_LIMIT expressed as raw numbers for the manual API-key check below.
+# AUTH_LIMIT / BRAIN_LIMIT expressed as raw numbers for the manual checks below
+# (used off the slowapi decorator path: the API-key auth branch and the MCP
+# transport, which has no route to decorate).
 _API_KEY_LIMIT = 10
 _API_KEY_WINDOW_SECONDS = 60
+_BRAIN_LIMIT = 120
+_BRAIN_WINDOW_SECONDS = 60
 
 limiter = Limiter(
     key_func=get_remote_address,
@@ -49,22 +58,51 @@ def workspace_key(request: Request) -> str:
     return get_remote_address(request)
 
 
+async def _enforce_fixed_window(bucket: str, subject: str, limit: int, window: int) -> None:
+    """Increment a Redis fixed-window counter, raising 429 past ``limit``.
+
+    Shared across instances (the counter lives in Redis) and evaluated *before*
+    any DB hit, so an exhausted window costs no query. Used off the slowapi
+    decorator path — see the two callers below.
+    """
+    redis = get_redis()
+    key = f"ratelimit:{bucket}:{subject}"
+    count = await redis.incr(key)
+    if count == 1:
+        await redis.expire(key, window)
+    if count > limit:
+        ttl = await redis.ttl(key)
+        raise RateLimitError(retry_after=ttl if ttl > 0 else window)
+
+
+async def enforce_api_key_probe_limit(ip: str) -> None:
+    """Cap unauthenticated ``X-API-Key`` probes at AUTH_LIMIT (10/minute) per IP.
+
+    Any transport that resolves a raw key outside the slowapi decorator path
+    must call this *before* the credential lookup, or key hashes can be
+    brute-forced. Two callers: the REST auth dependency (via
+    ``enforce_api_key_rate_limit``) and the MCP ``query_brain`` tool, whose SSE
+    process has no route to decorate.
+    """
+    await _enforce_fixed_window("apikey", ip, _API_KEY_LIMIT, _API_KEY_WINDOW_SECONDS)
+
+
+async def enforce_brain_query_limit(workspace_id: str) -> None:
+    """Apply BRAIN_LIMIT (120/minute) per workspace to an authenticated brain read.
+
+    The manual equivalent of ``@limiter.limit(BRAIN_LIMIT, key_func=workspace_key)``
+    on the REST brain routes, for the MCP transport. Keyed by workspace so one
+    workspace's agents can't exhaust another's budget.
+    """
+    await _enforce_fixed_window("brain", workspace_id, _BRAIN_LIMIT, _BRAIN_WINDOW_SECONDS)
+
+
 async def enforce_api_key_rate_limit(request: Request) -> None:
     """Apply AUTH_LIMIT to the per-IP API-key path before the credential lookup.
 
     The slowapi ``@limiter.limit`` decorators are route-scoped, so the API-key
     branch of the auth dependency would otherwise inherit only the 300/minute
-    DASHBOARD_LIMIT — enough to brute-force key hashes. This caps unauthenticated
-    key probes at AUTH_LIMIT (10/minute) per IP using a Redis fixed-window
-    counter shared across instances. Raises ``RateLimitError`` (429) when the
-    window is exhausted, *before* any DB hit.
+    DASHBOARD_LIMIT — enough to brute-force key hashes. Raises
+    ``RateLimitError`` (429) when the window is exhausted, *before* any DB hit.
     """
-    ip = get_remote_address(request)
-    redis = get_redis()
-    key = f"ratelimit:apikey:{ip}"
-    count = await redis.incr(key)
-    if count == 1:
-        await redis.expire(key, _API_KEY_WINDOW_SECONDS)
-    if count > _API_KEY_LIMIT:
-        ttl = await redis.ttl(key)
-        raise RateLimitError(retry_after=ttl if ttl > 0 else _API_KEY_WINDOW_SECONDS)
+    await enforce_api_key_probe_limit(get_remote_address(request))

@@ -71,7 +71,7 @@ def _patch_session(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake_get_session() -> AsyncIterator[_FakeSession]:
         yield _FakeSession()
 
-    monkeypatch.setattr(service_module, "get_session", _fake_get_session)
+    monkeypatch.setattr(service_module, "get_tenant_session", _fake_get_session)
 
 
 # ── service: next-step progression ───────────────────────────────────────────────

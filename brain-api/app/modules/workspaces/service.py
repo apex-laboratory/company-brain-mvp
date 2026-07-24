@@ -13,7 +13,7 @@ import unicodedata
 
 from sqlalchemy.exc import IntegrityError
 
-from app.config.database import get_session
+from app.config.database import get_session, get_tenant_session
 from app.config.settings import settings
 from app.modules.auth.tokens import mint_access_token
 from app.modules.workspaces.repository import WorkspaceRepository
@@ -160,7 +160,7 @@ class WorkspaceService:
         documented contract but persisted by the Source Integrations API, not by
         this endpoint.
         """
-        async with get_session() as session:
+        async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, user_id, role):
                 await self._repository.update_onboarding(
                     session,

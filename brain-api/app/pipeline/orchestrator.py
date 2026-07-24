@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from app.config.database import get_session
+from app.config.database import get_tenant_session
 from app.integrations import get_integration
 from app.integrations.base import RawEvent, RawItem
 from app.jobs.token_helper import token_for_connection, token_for_provider
@@ -118,7 +118,7 @@ async def _existing_source_dict(
         "excerpt": matched.base_logic[:500],
         "authority": matched.source_authority or "low",
     }
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
         prov = await _repo.skill_provenance(session, matched.id)
@@ -141,7 +141,7 @@ async def _finalize(
 ) -> None:
     """Terminal write for non-writer outcomes (discard/duplicate/…)."""
     meta = {"stage": stage, "costs": ledger.as_meta(), **(extra_meta or {})}
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, event.workspace_id, "system", "admin"
     ):
         await _repo.finalize_event(
@@ -155,7 +155,7 @@ async def _commit(
 ) -> PipelineResult:
     """Open the write transaction, run ``make_result(session)``, finalize + commit."""
     meta = {"stage": "skill_writer", "costs": ledger.as_meta(), **(extra_meta or {})}
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, event.workspace_id, "system", "admin"
     ):
         result = await make_result(session)
@@ -173,6 +173,10 @@ async def _commit(
     # keeps Redis I/O out of the pooled DB connection's transaction.
     if result.outcome == "published":
         await cache.invalidate_skills(event.workspace_id)
+        # Keep the brain chat index fresh: re-embed the new/updated skill version.
+        from app.modules.brain.reindex import schedule_reindex
+
+        await schedule_reindex(event.workspace_id)
     return result
 
 
@@ -264,7 +268,7 @@ async def run_pipeline(
     ledger = CostLedger()
 
     # ── read transaction: load the event ────────────────────────────────────
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
         event = await _repo.load_event(session, event_id)
@@ -337,7 +341,7 @@ async def run_pipeline(
 
     # ── boundary classification (pgvector search + optional Groq) ─────────────
     scope = _SWEEP_SCOPE if sweep_sourced else _PUBLISHED_SCOPE
-    async with get_session() as session, run_in_tenant(
+    async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"
     ):
         similar = await _repo.similar_skills(session, workspace_id, embedding, scope)
@@ -376,7 +380,7 @@ async def run_event_safely(
     except Exception as exc:  # noqa: BLE001 — dead-letter by contract, never re-raise
         log.exception("pipeline: event %s failed — dead-lettered", event_id)
         try:
-            async with get_session() as session, run_in_tenant(
+            async with get_tenant_session() as session, run_in_tenant(
                 session, workspace_id, "system", "admin"
             ):
                 await _repo.finalize_event(

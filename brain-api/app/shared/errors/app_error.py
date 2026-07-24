@@ -69,3 +69,25 @@ class RateLimitError(AppError):
             "Too many requests. Try again later.",
             {"retryAfterSeconds": retry_after},
         )
+
+
+class BrainNotReadyError(AppError):
+    """The "Ask the brain" chat surface is not available yet (BRAIN_CHAT_RAG_PLAN §0).
+
+    409 with a machine ``reason`` so the dashboard renders the right disabled state
+    — globally disabled, no skills indexed, or still indexing — instead of a silent
+    failure or a fabricated answer. Raised by the readiness gate *before* any
+    embedding or LLM spend.
+    """
+
+    _REASONS = ("disabled", "no_skills", "indexing")
+
+    def __init__(self, reason: str = "no_skills", message: str | None = None) -> None:
+        if reason not in self._REASONS:
+            raise ValueError(f"unknown brain_not_ready reason: {reason!r}")
+        super().__init__(
+            409,
+            "brain_not_ready",
+            message or "The brain is not ready to answer questions yet.",
+            {"reason": reason},
+        )

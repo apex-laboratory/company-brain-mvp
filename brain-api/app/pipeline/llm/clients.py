@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from app.config.settings import settings
@@ -162,4 +163,34 @@ async def sonnet_json(
         stage=stage,
         model=settings.anthropic_model,
         max_tokens=max_tokens,
+    )
+
+
+async def sonnet_stream(
+    system: str, user: str, *, stage: str, max_tokens: int = 2048
+) -> AsyncIterator[str | StageUsage]:
+    """Stream a Sonnet reply, yielding text deltas then a final :class:`StageUsage`.
+
+    Deliberately **not** retry-wrapped: a retry mid-stream would replay text the
+    caller has already forwarded to the client. A failure here surfaces to the
+    caller, which falls back or reports it on the stream.
+    """
+    client = anthropic_client()
+    async with client.messages.stream(
+        model=settings.anthropic_model,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        temperature=0.0,
+        max_tokens=max_tokens,
+    ) as stream:
+        async for text in stream.text_stream:
+            yield text
+        final = await stream.get_final_message()
+    in_tok, out_tok = final.usage.input_tokens, final.usage.output_tokens
+    yield StageUsage(
+        stage=stage,
+        model=settings.anthropic_model,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        cost_usd=cost_usd(settings.anthropic_model, in_tok, out_tok),
     )

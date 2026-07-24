@@ -108,7 +108,7 @@ def _wire(
     async def _fake_enqueue(function, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         enqueued.append((function, args, kwargs))
 
-    monkeypatch.setattr(job, "get_session", _fake_get_session)
+    monkeypatch.setattr(job, "get_tenant_session", _fake_get_session)
     monkeypatch.setattr(job, "get_integration", lambda provider: integration)
     monkeypatch.setattr(job, "_repo", repo)
     monkeypatch.setattr(job, "enqueue", _fake_enqueue)

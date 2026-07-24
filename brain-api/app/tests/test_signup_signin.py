@@ -25,11 +25,12 @@ from app.modules.auth.repository import AuthRepository, MembershipRecord, UserRe
 from app.modules.auth.schemas import (
     AuthSessionOut,
     EmailSignupRequest,
+    MeOut,
     UserOut,
     WorkspaceOut,
 )
 from app.modules.auth.service import AuthService
-from app.shared.errors.app_error import ConflictError, NotFoundError
+from app.shared.errors.app_error import ConflictError, NotFoundError, UnauthorizedError
 from app.shared.helpers.crypto import sha256_hash
 
 
@@ -64,6 +65,9 @@ class _FakeAuthRepository(AuthRepository):
         self.last_login_user_id: str | None = None
 
     async def find_user_by_email(self, session: Any, email: str) -> UserRecord | None:
+        return self._existing_user
+
+    async def find_user_by_id(self, session: Any, user_id: str) -> UserRecord | None:
         return self._existing_user
 
     async def create_user(self, session: Any, user_id: str, email: str) -> UserRecord:
@@ -240,15 +244,28 @@ async def test_signin_without_workspace_returns_onboarding() -> None:
 
 # ── router: contract ─────────────────────────────────────────────────────────────
 class _StubService:
-    def __init__(self, *, result: AuthSessionOut | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        result: AuthSessionOut | None = None,
+        error: Exception | None = None,
+        me_result: MeOut | None = None,
+    ):
         self._result = result
         self._error = error
+        self._me_result = me_result
 
     async def signup(self, body: Any, *, user_agent: str | None, ip: str | None) -> AuthSessionOut:
         return self._respond()
 
     async def signin(self, body: Any, *, user_agent: str | None, ip: str | None) -> AuthSessionOut:
         return self._respond()
+
+    async def me(self, *, user_id: str) -> MeOut:
+        if self._error is not None:
+            raise self._error
+        assert self._me_result is not None
+        return self._me_result
 
     def _respond(self) -> AuthSessionOut:
         if self._error is not None:
@@ -362,3 +379,96 @@ async def test_signin_unknown_email_maps_to_404(client: AsyncClient) -> None:
 
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "not_found"
+
+
+# ── service: /auth/me ────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_me_returns_dashboard_with_workspace_and_role() -> None:
+    repo = _FakeAuthRepository(
+        existing_user=UserRecord(id="usr_1", email="dana@riverline.io", name="Dana"),
+        membership=MembershipRecord(
+            workspace_id="wrk_1", role="admin",
+            workspace_name="Riverline", workspace_slug="riverline",
+        ),
+    )
+    service = AuthService(repository=repo)
+
+    result = await service.me(user_id="usr_1")
+
+    assert result.next_step == "dashboard"
+    assert result.workspace is not None and result.workspace.slug == "riverline"
+    assert result.role == "admin"
+    assert result.user.email == "dana@riverline.io"
+
+
+@pytest.mark.asyncio
+async def test_me_returns_onboarding_without_membership() -> None:
+    repo = _FakeAuthRepository(
+        existing_user=UserRecord(id="usr_1", email="a@b.io", name=None), membership=None
+    )
+    service = AuthService(repository=repo)
+
+    result = await service.me(user_id="usr_1")
+
+    assert result.next_step == "onboarding"
+    assert result.workspace is None and result.role is None
+
+
+@pytest.mark.asyncio
+async def test_me_unknown_user_is_unauthorized() -> None:
+    service = AuthService(repository=_FakeAuthRepository(existing_user=None))
+
+    with pytest.raises(UnauthorizedError):
+        await service.me(user_id="usr_ghost")
+
+
+# ── router: /auth/me ─────────────────────────────────────────────────────────────
+def _me_out() -> MeOut:
+    return MeOut(
+        user=UserOut(id="usr_1", email="dana@riverline.io", name="Dana Reyes"),
+        workspace=WorkspaceOut(id="wrk_1", name="Riverline", slug="riverline"),
+        role="admin",
+        next_step="dashboard",
+    )
+
+
+def _bearer(role: str | None = "admin", workspace_id: str | None = "wrk_1") -> dict[str, str]:
+    from app.modules.auth.tokens import mint_access_token
+
+    token = mint_access_token(user_id="usr_1", workspace_id=workspace_id, role=role)
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.asyncio
+async def test_me_route_requires_auth(client: AsyncClient) -> None:
+    _override(_StubService(me_result=_me_out()))
+
+    resp = await client.get("/api/v1/auth/me")
+
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "unauthorized"
+
+
+@pytest.mark.asyncio
+async def test_me_route_returns_context(client: AsyncClient) -> None:
+    _override(_StubService(me_result=_me_out()))
+
+    resp = await client.get("/api/v1/auth/me", headers=_bearer())
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["user"]["email"] == "dana@riverline.io"
+    assert data["workspace"]["slug"] == "riverline"
+    assert data["role"] == "admin"
+    assert data["nextStep"] == "dashboard"  # camelCase envelope
+
+
+@pytest.mark.asyncio
+async def test_me_route_rejects_invalid_token(client: AsyncClient) -> None:
+    _override(_StubService(me_result=_me_out()))
+
+    resp = await client.get(
+        "/api/v1/auth/me", headers={"Authorization": "Bearer not.a.valid.jwt"}
+    )
+
+    assert resp.status_code == 401

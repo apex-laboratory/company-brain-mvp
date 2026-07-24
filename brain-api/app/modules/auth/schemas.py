@@ -63,6 +63,19 @@ class TokenPairOut(_Response):
     refresh_token: str
 
 
+class MeOut(_Response):
+    """Current authenticated user + workspace context (GET /auth/me).
+
+    Lets the FE rehydrate session state on reload from the access token instead
+    of trusting a localStorage snapshot. No tokens — the caller already holds a
+    valid access token to reach this route."""
+
+    user: UserOut
+    workspace: WorkspaceOut | None
+    role: str | None
+    next_step: Literal["onboarding", "dashboard"]
+
+
 class OAuthStartOut(_Response):
     authorization_url: str
     state: str

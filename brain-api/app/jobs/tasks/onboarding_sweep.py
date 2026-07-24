@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 
-from app.config.database import get_session
+from app.config.database import get_tenant_session
 from app.jobs.queue import enqueue
 from app.jobs.repository import JobsRepository
 from app.jobs.sweep_order import processing_order
@@ -36,7 +36,7 @@ _repo = JobsRepository()
 async def _write_progress(
     workspace_id: str, sweep_id: str, provider: str, progress: dict
 ) -> None:
-    async with get_session() as session:
+    async with get_tenant_session() as session:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
             await _repo.update_sweep_source_progress(session, sweep_id, provider, progress)
             await session.commit()
@@ -44,7 +44,7 @@ async def _write_progress(
 
 async def onboarding_sweep(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
     """ARQ entrypoint. ``ctx`` is the ARQ job context (unused)."""
-    async with get_session() as session:
+    async with get_tenant_session() as session:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
             sweep = await _repo.get_sweep(session, sweep_id)
             if sweep is None:
@@ -96,7 +96,7 @@ async def onboarding_sweep(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
         await _write_progress(workspace_id, sweep_id, provider, entry)
 
     status = "failed" if attempted and failed == attempted else "completed"
-    async with get_session() as session:
+    async with get_tenant_session() as session:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
             await _repo.set_sweep_status(session, sweep_id, status, completed=True)
             await session.commit()

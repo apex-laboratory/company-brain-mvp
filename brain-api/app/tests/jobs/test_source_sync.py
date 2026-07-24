@@ -49,7 +49,7 @@ async def _run_with_fetch_error(error: Exception) -> tuple[dict, MagicMock]:
         opaque_cursor=False,
         supports_channel_filter=False,
     )
-    with patch.object(ss, "get_session", return_value=_AsyncCtx(session)), patch.object(
+    with patch.object(ss, "get_tenant_session", return_value=_AsyncCtx(session)), patch.object(
         ss, "run_in_tenant", return_value=_AsyncCtx(None)
     ), patch.object(ss, "_repo", repo), patch.object(
         ss, "get_integration", return_value=integration
@@ -101,7 +101,7 @@ async def _run_ok(
         insert_event=AsyncMock(return_value="evt_1"),
         selected_channel_ids=AsyncMock(return_value=selected or []),
     )
-    with patch.object(ss, "get_session", return_value=_AsyncCtx(session)), patch.object(
+    with patch.object(ss, "get_tenant_session", return_value=_AsyncCtx(session)), patch.object(
         ss, "run_in_tenant", return_value=_AsyncCtx(None)
     ), patch.object(ss, "_repo", repo), patch.object(
         ss, "get_integration", return_value=integration

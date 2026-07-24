@@ -89,6 +89,16 @@ async def _from_api_key(raw_key: str) -> AuthContext | None:
     )
 
 
+async def authenticate_api_key(raw_key: str) -> AuthContext | None:
+    """Resolve a raw ``X-API-Key`` into an ``AuthContext`` (or ``None`` if invalid).
+
+    The public entry point for credential resolution outside the HTTP dependency
+    graph — the MCP ``query_brain`` tool uses it to authenticate agents over the
+    SSE transport with the same key hashing and workspace binding as the REST API.
+    """
+    return await _from_api_key(raw_key)
+
+
 async def get_auth_context(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),

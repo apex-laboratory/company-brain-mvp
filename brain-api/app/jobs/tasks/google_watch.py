@@ -16,12 +16,12 @@ import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from app.config.database import get_session
+from app.config.database import get_session, get_tenant_session
 from app.config.settings import settings
 from app.integrations import get_integration
 from app.integrations.google_common import GOOGLE_PUSH_PROVIDERS
 from app.jobs.repository import JobsRepository
-from app.jobs.tasks.source_sync import _resolve_token
+from app.jobs.token_helper import resolve_token
 from app.shared.helpers.crypto import encrypt
 from app.shared.helpers.ids import generate_id
 from app.shared.middleware.with_tenant import run_in_tenant
@@ -46,7 +46,7 @@ async def _open_channel(session, workspace_id: str, source_id: str) -> tuple[str
     if state is None or state.access_token_enc is None:
         raise RuntimeError(f"watch: connection {source_id} missing or tokenless")
     integration = get_integration(state.provider)
-    access_token = await _resolve_token(session, state)
+    access_token = await resolve_token(session, state)
 
     token = secrets.token_urlsafe(32)
     ref, expires_at = await integration.register_watch(
@@ -60,7 +60,7 @@ async def _open_channel(session, workspace_id: str, source_id: str) -> tuple[str
 
 async def watch_register(ctx: dict, workspace_id: str, source_id: str) -> dict:
     """Open a push channel for a freshly connected Google source."""
-    async with get_session() as session:
+    async with get_tenant_session() as session:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
             ref, secret_enc, expires_at = await _open_channel(session, workspace_id, source_id)
             await _repo.insert_subscription(
@@ -89,7 +89,7 @@ async def watch_renew(ctx: dict) -> dict:
         if provider not in GOOGLE_PUSH_PROVIDERS:
             continue
         try:
-            async with get_session() as session:
+            async with get_tenant_session() as session:
                 async with run_in_tenant(session, workspace_id, "system", "admin"):
                     ref, secret_enc, expires_at = await _open_channel(
                         session, workspace_id, source_id

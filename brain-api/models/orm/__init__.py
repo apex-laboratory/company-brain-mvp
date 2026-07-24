@@ -6,7 +6,7 @@ from .skill import Skill, SkillVersion
 from .source import SourceConnection, SourceChannel, WebhookSubscription, SourceEvent
 from .sweep import Sweep
 from .review import Decision, DecisionPin, Review
-from .brain import BrainBuild, BrainConversation, BrainMessage, ActivityEvent
+from .brain import BrainBuild, BrainChunk, BrainConversation, BrainMessage, ActivityEvent
 from .agent import AgentInteraction
 from .audit import AuditLog
 from .billing import ApiKey, UsagePeriod
@@ -27,7 +27,7 @@ __all__ = [
     # AI-internal
     "Sweep", "AgentInteraction",
     # brain
-    "BrainBuild", "BrainConversation", "BrainMessage", "ActivityEvent",
+    "BrainBuild", "BrainChunk", "BrainConversation", "BrainMessage", "ActivityEvent",
     # ops
     "AuditLog", "ApiKey", "UsagePeriod",
     # global

@@ -733,6 +733,8 @@ When `query_brain` finds no match (max similarity < 0.70), instead of returning 
 
 **Latency budget:** query-driven extraction runs a multi-step LLM pipeline inline in an agent call. Hard budget: **15 seconds**. If the pipeline cannot complete within budget, return immediately with `{match_type: "no_match", extraction_queued: true, retry_after_seconds: 60}` and finish the extraction asynchronously — the agent can retry or escalate to a human. Agent integration docs must state this contract explicitly so developers can set their own timeouts sanely.
 
+> **Implementation status (July 2026):** the latency/async-fallback contract, interaction logging, and a provider-search seam (`app/pipeline/query_extraction.py::search_sources`) are implemented and tested. The remaining piece is the per-source live search itself — see the Phase 5 implementation-status note in Section 16 for the design and build order.
+
 **Feature 17 — FastAPI REST API**
 
 See Section 14 for full endpoint reference.
@@ -1434,6 +1436,28 @@ These are product acceptance metrics: phase acceptance criteria below reference 
 - Query with no matching skill triggers query-driven extraction and returns a result flagged `query_driven: true`
 - Query-driven extraction exceeding 15 seconds returns `extraction_queued: true` instead of blocking the agent
 - Reporting an override on a published skill drops its confidence and creates a review item once below 0.90
+
+**Implementation status (July 2026):**
+
+Delivered and tested (all on the multi-tenant `app/` tree, RLS-scoped, `X-API-Key`/JWT auth, per-route rate limits):
+
+- `query_brain` MCP tool (`app/mcp/server.py`) — embed → Redis read-cache → pgvector top-5 → semantic match or query-driven fallback. Agents authenticate with the same `X-API-Key` credential as the REST API, gated by the `brain:query` scope, failing closed.
+- Delivery REST (`app/modules/skills/`): `GET /skills/search`, `GET /skills/{id}`, `GET /skills/{id}/versions`, `GET /skills/export` (admin-only markdown zip), `POST /interactions/{id}/override` (idempotent Feature 15a loop).
+- Read-side cache (`app/pipeline/cache.py::get/set_cached_search`) on the `skills:{workspace_id}:*` keyspace that publish/approve already invalidate.
+- `agent_interactions` logging on every `query_brain` and search call.
+- Query-driven latency contract (`app/pipeline/query_extraction.py`): 15-second inline budget, async ARQ fallback (`query_extract` job), and interaction logging — all implemented and tested.
+
+**Remaining work — query-driven live-source search (Feature 16).** The one deferred piece is the actual per-source search behind `query_extraction.search_sources`, which currently returns `[]` (an honest no-match) rather than fabricating a skill. It was deferred deliberately: no connector implements search yet (`SourceIntegration` exposes `fetch_since`, not `search`), and shipping untested provider-search clients would violate the security bar. Design and build order:
+
+1. **Add `search(access_token, query, limit) -> list[RawItem]` to `SourceIntegration`** (`app/integrations/base.py`) and implement per provider, decrypting the token from `source_connections` (as `fetch_since` does). Search returns *document references* (ids/urls), not full text:
+   - Zendesk — `GET /api/v2/search.json?query=type:ticket <q> status:solved` (build first — the launch wedge)
+   - Notion — `POST /v1/search`; Google Drive — `files.list?q=fullText contains '<q>'`
+   - Slack — `search.messages` (⚠ needs a **user** token, not a bot token — may require an onboarding scope change; do last)
+2. **Fill `search_sources`** to fan out across connected searchable sources concurrently within the 15s budget.
+3. **Bridge to the existing pipeline (no expander changes needed):** map the top reference to a `RawEvent`, `JobsRepository.insert_event(...)`, then `run_pipeline(workspace_id, event_id, sweep_sourced=True)` — the per-source expander fetches full context by id exactly as it does for webhooks, and `sweep_sourced=True` forces review routing (query-driven never auto-publishes). Return the resulting skill as `match_type=query_driven`; enqueue remaining references to the `query_extract` job for async completion.
+4. **Migration:** `ALTER TYPE review_kind ADD VALUE IF NOT EXISTS 'query_driven'` (own migration, non-transactional) so query-driven reviews carry a distinct kind for the Feature 22 card.
+
+Suggested phasing: ship **Zendesk-only** first (one provider, the wedge, real end-to-end value), then Notion/Drive, then Slack once the user-token scope is settled. Each provider is independently shippable behind the same seam.
 
 ---
 
