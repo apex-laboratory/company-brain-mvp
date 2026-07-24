@@ -15,6 +15,8 @@ skill covers that yet", never a fabricated answer.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from fastapi.encoders import jsonable_encoder
 
 from app.config.database import get_tenant_session
@@ -136,10 +138,35 @@ class BrainService:
             return await self._finalize(auth, question, cached, conversation_id)
 
         embedding, _ = await embedder.embed_text(question)  # network — outside any txn
+        ctx = await self._retrieve(auth, workspace_id, role, embedding)
 
-        # txn A: two-facet retrieval — the reviewed skills AND their evidence chunks,
-        # one governed index. Full bodies + governance dossier + version history for
-        # matched skills; evidence chunks for "who said / where from" questions.
+        # Synthesis — network I/O, strictly OUTSIDE the transaction above.
+        if ctx["skill_matched"] and ctx["skills_ctx"]:
+            core = await self._answer_from_skills(
+                question, ctx["skills_ctx"], ctx["top"], ctx["provenance"],
+                ctx["history"], ctx["evidence"], ctx["citations"],
+            )
+        elif ctx["evidence"]:
+            # No reviewed skill matched, but a cited source in a skill's lineage does —
+            # still governed (evidence facet), never an ungoverned guess.
+            core = await self._answer_from_evidence(question, ctx["evidence"])
+        else:
+            core = _no_match_core(ctx["top"].similarity if ctx["top"] else None)
+
+        if core["trust"] != "none":  # cache grounded answers only
+            await cache.set_cached_search(workspace_id, question, core, kind=_CACHE_KIND)
+        return await self._finalize(auth, question, core, conversation_id)
+
+    async def _retrieve(
+        self, auth: AuthContext, workspace_id: str, role: str, embedding: list[float]
+    ) -> dict:
+        """txn A: two-facet retrieval — the reviewed skills AND their evidence chunks,
+        one governed index. Full bodies + governance dossier + version history for
+        matched skills; evidence chunks for "who said / where from" questions.
+
+        Shared by the buffered and streamed query paths; opens and commits one
+        transaction and does no network I/O of its own.
+        """
         async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
@@ -167,24 +194,90 @@ class BrainService:
                 session, workspace_id, embedding, kind="evidence", limit=_EVIDENCE_LIMIT
             )
             await session.commit()
+        return {
+            "top": top,
+            "skill_matched": skill_matched,
+            "skills_ctx": skills_ctx,
+            "provenance": provenance,
+            "citations": citations,
+            "history": history,
+            "evidence": [e for e in evidence_hits if e["similarity"] >= _MATCH_THRESHOLD],
+        }
 
-        evidence = [e for e in evidence_hits if e["similarity"] >= _MATCH_THRESHOLD]
+    # ── streaming query (SSE) ───────────────────────────────────────────────────
 
-        # Synthesis — network I/O, strictly OUTSIDE the transaction above.
-        if skill_matched and skills_ctx:
-            core = await self._answer_from_skills(
-                question, skills_ctx, top, provenance, history, evidence, citations
-            )
-        elif evidence:
-            # No reviewed skill matched, but a cited source in a skill's lineage does —
-            # still governed (evidence facet), never an ungoverned guess.
-            core = await self._answer_from_evidence(question, evidence)
-        else:
+    async def start_stream(
+        self, auth: AuthContext, question: str, conversation_id: str | None = None
+    ) -> AsyncIterator[tuple[str, dict]]:
+        """Gate the request, then return the SSE event generator.
+
+        The readiness check runs **here**, before any streaming begins, so an unready
+        workspace still gets a typed 409 rather than a 200 whose body happens to carry
+        an error event.
+        """
+        await self._ensure_ready(auth)
+        return self._stream_events(auth, question, conversation_id)
+
+    async def _stream_events(
+        self, auth: AuthContext, question: str, conversation_id: str | None
+    ) -> AsyncIterator[tuple[str, dict]]:
+        """Yield ``(event, payload)``: ``status`` → ``token``* → ``done``.
+
+        Tokens are emitted only once the synthesizer's grounding verdict has arrived
+        (the schema orders ``grounded`` before ``answer``), so an ungrounded reply
+        streams no text at all — the client never sees an answer that gets retracted.
+        """
+        workspace_id, role = _require_workspace(auth)
+
+        cached = await cache.get_cached_search(workspace_id, question, kind=_CACHE_KIND)
+        if cached is not None:
+            response = await self._finalize(auth, question, cached, conversation_id)
+            yield "done", response.model_dump(by_alias=True)
+            return
+
+        yield "status", {"stage": "retrieving"}
+        embedding, _ = await embedder.embed_text(question)
+        ctx = await self._retrieve(auth, workspace_id, role, embedding)
+
+        top, evidence = ctx["top"], ctx["evidence"]
+        if not (ctx["skill_matched"] and ctx["skills_ctx"]) and not evidence:
             core = _no_match_core(top.similarity if top else None)
+        else:
+            yield "status", {"stage": "synthesizing"}
+            skill_facet = bool(ctx["skill_matched"] and ctx["skills_ctx"])
+            if skill_facet:
+                stream = synthesizer.answer_stream(
+                    question, ctx["skills_ctx"], top_similarity=top.similarity,
+                    provenance=ctx["provenance"], history=ctx["history"],
+                    evidence=[_evidence_ctx(e) for e in evidence],
+                )
+            else:
+                stream = synthesizer.answer_stream(
+                    question, [], top_similarity=evidence[0]["similarity"],
+                    evidence=[_evidence_ctx(e) for e in evidence],
+                )
 
-        if core["trust"] != "none":  # cache grounded answers only
+            result: dict | None = None
+            async for kind, payload in stream:
+                if kind == "delta":
+                    yield "token", {"text": payload}
+                elif kind == "result":
+                    result = payload
+
+            if result is None:  # stream ended without a parseable result
+                core = _no_match_core(top.similarity if top else None)
+            elif skill_facet:
+                core = _core_from_skills(
+                    result, ctx["skills_ctx"], top, ctx["provenance"],
+                    ctx["citations"], evidence,
+                )
+            else:
+                core = _core_from_evidence(result, evidence)
+
+        if core["trust"] != "none":
             await cache.set_cached_search(workspace_id, question, core, kind=_CACHE_KIND)
-        return await self._finalize(auth, question, core, conversation_id)
+        response = await self._finalize(auth, question, core, conversation_id)
+        yield "done", response.model_dump(by_alias=True)
 
     # ── history read-back (dashboard reload) ────────────────────────────────────
 
@@ -250,44 +343,16 @@ class BrainService:
             provenance=provenance, history=history,
             evidence=[_evidence_ctx(e) for e in evidence],
         )
-        if not result["grounded"]:
-            return _no_match_core(top.similarity)
-        valid_ids = {s["id"] for s in skills_ctx}
-        used_ids = [i for i in result["used_skill_ids"] if i in valid_ids] or [top.id]
-        return {
-            "answer": result["answer"],
-            "trust": "skill",
-            "confidence": result["confidence"],
-            "match_type": "semantic",
-            "sources": _build_sources(used_ids, citations) + _evidence_sources(evidence),
-            "skill_ids": used_ids,
-            "provenance": provenance,
-            "top_skill_id": top.id,
-            "top_similarity": round(top.similarity, 4),
-        }
+        return _core_from_skills(result, skills_ctx, top, provenance, citations, evidence)
 
     async def _answer_from_evidence(self, question: str, evidence: list[dict]) -> dict:
         """Evidence facet: answer from cited source material within a skill's lineage
         (governed — every evidence chunk is skill-linked), tagged trust='evidence'."""
-        top_sim = evidence[0]["similarity"]
         result = await synthesizer.answer(
-            question, [], top_similarity=top_sim,
+            question, [], top_similarity=evidence[0]["similarity"],
             evidence=[_evidence_ctx(e) for e in evidence],
         )
-        if not result["grounded"]:
-            return _no_match_core(top_sim)
-        skill_ids = list(dict.fromkeys(e["skill_id"] for e in evidence))
-        return {
-            "answer": result["answer"],
-            "trust": "evidence",
-            "confidence": result["confidence"],
-            "match_type": "evidence",
-            "sources": _evidence_sources(evidence),
-            "skill_ids": skill_ids,
-            "provenance": None,
-            "top_skill_id": skill_ids[0] if skill_ids else None,
-            "top_similarity": round(top_sim, 4),
-        }
+        return _core_from_evidence(result, evidence)
 
     async def _finalize(
         self, auth: AuthContext, question: str, core: dict, conversation_id: str | None
@@ -361,6 +426,48 @@ def _no_match_core(top_similarity: float | None) -> dict:
         "provenance": None,
         "top_skill_id": None,
         "top_similarity": round(top_similarity, 4) if top_similarity is not None else None,
+    }
+
+
+def _core_from_skills(
+    result: dict, skills_ctx: list[dict], top, provenance: dict | None,
+    citations: dict[str, dict], evidence: list[dict],
+) -> dict:
+    """Skill-facet core from a synthesis result (shared by the buffered + streamed
+    paths). An ungrounded result downgrades to an honest no-match."""
+    if not result["grounded"]:
+        return _no_match_core(top.similarity)
+    valid_ids = {s["id"] for s in skills_ctx}
+    used_ids = [i for i in result["used_skill_ids"] if i in valid_ids] or [top.id]
+    return {
+        "answer": result["answer"],
+        "trust": "skill",
+        "confidence": result["confidence"],
+        "match_type": "semantic",
+        "sources": _build_sources(used_ids, citations) + _evidence_sources(evidence),
+        "skill_ids": used_ids,
+        "provenance": provenance,
+        "top_skill_id": top.id,
+        "top_similarity": round(top.similarity, 4),
+    }
+
+
+def _core_from_evidence(result: dict, evidence: list[dict]) -> dict:
+    """Evidence-facet core from a synthesis result (shared by both paths)."""
+    top_sim = evidence[0]["similarity"]
+    if not result["grounded"]:
+        return _no_match_core(top_sim)
+    skill_ids = list(dict.fromkeys(e["skill_id"] for e in evidence))
+    return {
+        "answer": result["answer"],
+        "trust": "evidence",
+        "confidence": result["confidence"],
+        "match_type": "evidence",
+        "sources": _evidence_sources(evidence),
+        "skill_ids": skill_ids,
+        "provenance": None,
+        "top_skill_id": skill_ids[0] if skill_ids else None,
+        "top_similarity": round(top_sim, 4),
     }
 
 

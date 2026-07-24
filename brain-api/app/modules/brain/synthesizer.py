@@ -21,9 +21,12 @@ Anti-hallucination is the whole game here:
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
-from app.pipeline.llm.clients import sonnet_json
+from app.modules.brain.stream_parser import GroundedAnswerParser
+from app.pipeline.llm.clients import sonnet_json, sonnet_stream
+from app.pipeline.types import StageUsage
 
 _STAGE = "brain_synthesis"
 
@@ -50,12 +53,13 @@ name, date, or source.
 current rule.
 - Be concise and direct. Prefer the source's own wording.
 
-Respond with a single JSON object, no prose around it:
+Respond with a single JSON object, no prose around it. Emit the keys in EXACTLY \
+this order — "answer" MUST come last:
 {
-  "answer": "<the answer, or an honest 'I don't have a reviewed skill for that'>",
   "grounded": <true|false>,
+  "confidence": <number 0.0-1.0: how well the skills answer the question>,
   "usedSkillIds": ["skl_..."],
-  "confidence": <number 0.0-1.0: how well the skills answer the question>
+  "answer": "<the answer, or an honest 'I don't have a reviewed skill for that'>"
 }
 """
 
@@ -123,6 +127,42 @@ def _clamp01(value: Any, *, default: float = 0.0) -> float:
         return default
 
 
+def _build_user(
+    question: str,
+    skills: list[dict[str, Any]],
+    provenance: dict[str, Any] | None,
+    history: list[dict[str, Any]] | None,
+    evidence: list[dict[str, Any]] | None,
+) -> str:
+    """The user message — identical for the buffered and streamed paths."""
+    skills_block = "\n".join(_render_skill(s) for s in skills) or "(none)"
+    return (
+        f"QUESTION:\n{question}\n\n"
+        f"SKILLS (the current rules):\n{skills_block}\n\n"
+        f"SOURCE MATERIAL (evidence — attribute quotes to the given author/location):\n"
+        f"{_render_evidence(evidence)}\n\n"
+        f"PREVIOUS VERSIONS (superseded — only for 'what changed' questions):\n"
+        f"{_render_history(history)}\n\n"
+        f"PROVENANCE (authoritative governance facts for the primary skill; "
+        f"quote, never infer):\n{_render_provenance(provenance)}"
+    )
+
+
+def _score(head: dict[str, Any], top_similarity: float) -> tuple[bool, int, list[str]]:
+    """Grounding verdict + honest confidence + cited ids, from the pre-answer keys.
+
+    Confidence blends retrieval with the model's self-check and is capped at the
+    retrieval similarity, so it can never exceed how well the question matched. An
+    ungrounded answer scores 0.
+    """
+    grounded = bool(head.get("grounded", False))
+    model_conf = _clamp01(head.get("confidence"), default=top_similarity)
+    confidence = int(round(min(top_similarity, model_conf) * 100)) if grounded else 0
+    used = head.get("usedSkillIds") or []
+    used_ids = [str(s) for s in used if isinstance(s, (str, int))]
+    return grounded, confidence, used_ids
+
+
 async def answer(
     question: str,
     skills: list[dict[str, Any]],
@@ -141,31 +181,59 @@ async def answer(
     ``{answer, grounded, used_skill_ids, confidence}`` where ``confidence`` is an
     int 0-100. Must be called OUTSIDE any open DB transaction (it does network I/O).
     """
-    skills_block = "\n".join(_render_skill(s) for s in skills) or "(none)"
-    user = (
-        f"QUESTION:\n{question}\n\n"
-        f"SKILLS (the current rules):\n{skills_block}\n\n"
-        f"SOURCE MATERIAL (evidence — attribute quotes to the given author/location):\n"
-        f"{_render_evidence(evidence)}\n\n"
-        f"PREVIOUS VERSIONS (superseded — only for 'what changed' questions):\n"
-        f"{_render_history(history)}\n\n"
-        f"PROVENANCE (authoritative governance facts for the primary skill; "
-        f"quote, never infer):\n{_render_provenance(provenance)}"
-    )
-
+    user = _build_user(question, skills, provenance, history, evidence)
     parsed, _usage = await sonnet_json(_SYSTEM, user, stage=_STAGE)
-
-    grounded = bool(parsed.get("grounded", False))
-    model_conf = _clamp01(parsed.get("confidence"), default=top_similarity)
-    # Confidence blends retrieval + the model's self-check and is capped at the
-    # retrieval similarity, so it stays honest. An ungrounded answer scores 0.
-    confidence = int(round(min(top_similarity, model_conf) * 100)) if grounded else 0
-
-    used = parsed.get("usedSkillIds") or []
-    used_ids = [str(s) for s in used if isinstance(s, (str, int))]
-
+    grounded, confidence, used_ids = _score(parsed, top_similarity)
     return {
         "answer": str(parsed.get("answer") or "").strip(),
+        "grounded": grounded,
+        "used_skill_ids": used_ids,
+        "confidence": confidence,
+    }
+
+
+async def answer_stream(
+    question: str,
+    skills: list[dict[str, Any]],
+    *,
+    top_similarity: float,
+    provenance: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
+) -> AsyncIterator[tuple[str, Any]]:
+    """Streaming twin of :func:`answer`, yielding ``(kind, payload)`` events.
+
+    * ``("head", {grounded, confidence, used_skill_ids})`` — the verdict, emitted as
+      soon as the pre-answer keys arrive and always *before* any text.
+    * ``("delta", str)`` — a piece of the answer. Emitted **only** when grounded, so
+      an ungrounded reply never shows text the caller would have to retract.
+    * ``("result", {...})`` — the same dict :func:`answer` returns.
+
+    Network I/O: call OUTSIDE any open DB transaction.
+    """
+    user = _build_user(question, skills, provenance, history, evidence)
+    parser = GroundedAnswerParser()
+    grounded = False
+    head_seen = False
+
+    async for piece in sonnet_stream(_SYSTEM, user, stage=_STAGE):
+        if isinstance(piece, StageUsage):
+            continue
+        delta = parser.feed(piece)
+        if not head_seen and parser.head is not None:
+            head_seen = True
+            grounded, confidence, used_ids = _score(parser.head, top_similarity)
+            yield "head", {
+                "grounded": grounded,
+                "confidence": confidence,
+                "used_skill_ids": used_ids,
+            }
+        if delta and grounded:
+            yield "delta", delta
+
+    grounded, confidence, used_ids = _score(parser.head or {}, top_similarity)
+    yield "result", {
+        "answer": parser.answer.strip(),
         "grounded": grounded,
         "used_skill_ids": used_ids,
         "confidence": confidence,

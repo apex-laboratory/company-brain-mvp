@@ -2236,6 +2236,51 @@
         ]
       }
     },
+    "/api/v1/brain/query/stream": {
+      "post": {
+        "tags": [
+          "brain"
+        ],
+        "summary": "Brain Query Stream",
+        "description": "Server-sent-events twin of ``POST /brain/query`` \u2014 same answer, incremental.\n\nEvent sequence: ``status`` (``retrieving`` \u2192 ``synthesizing``) \u2192 ``token``* \u2192\n``done`` (the full ``BrainQueryResponse``, identical to the non-streaming route).\n``token`` events appear only once the answer is known to be grounded, so a\nno-match streams no text \u2014 just ``done`` with the honest miss. Readiness is\nchecked before the stream opens, so an unready workspace still 409s.",
+        "operationId": "brain_query_stream_api_v1_brain_query_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrainQueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/brain/conversations": {
       "get": {
         "tags": [
