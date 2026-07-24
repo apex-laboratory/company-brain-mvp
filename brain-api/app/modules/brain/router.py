@@ -7,7 +7,9 @@ in the service; these gates are defense in depth.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, Request
 
 from app.modules.brain.schemas import BrainQueryRequest
 from app.modules.brain.service import BrainService
@@ -47,3 +49,36 @@ async def brain_query(
     """
     answer = await _service.query(auth, body.question, body.conversation_id)
     return ok(request, answer.model_dump(by_alias=True))
+
+
+@router.get(
+    "/conversations", dependencies=[Depends(require_brain_access("brain:query"))]
+)
+@limiter.limit(BRAIN_LIMIT, key_func=workspace_key)
+async def list_conversations(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """The signed-in user's chat threads, newest-active first (history sidebar).
+
+    Dashboard (JWT) only — agents have no persisted conversations (403)."""
+    conversations = await _service.list_conversations(auth, limit=limit)
+    return ok(request, [c.model_dump(by_alias=True) for c in conversations])
+
+
+@router.get(
+    "/conversations/{conversation_id}/messages",
+    dependencies=[Depends(require_brain_access("brain:query"))],
+)
+@limiter.limit(BRAIN_LIMIT, key_func=workspace_key)
+async def list_conversation_messages(
+    request: Request,
+    conversation_id: str,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Replay one thread's turns (oldest first) so the FE can restore it on reload.
+
+    404s an unknown/unowned conversation; dashboard (JWT) only."""
+    messages = await _service.list_messages(auth, conversation_id)
+    return ok(request, [m.model_dump(by_alias=True) for m in messages])

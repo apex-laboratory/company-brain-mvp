@@ -22,15 +22,21 @@ from app.config.settings import settings
 from app.modules.brain import synthesizer
 from app.modules.brain.repository import BrainRepository
 from app.modules.brain.schemas import (
+    BrainMessage,
     BrainProvenance,
     BrainQueryResponse,
     BrainStatusResponse,
+    ConversationSummary,
     SourceCitation,
 )
 from app.modules.skills.repository import PUBLISHED_STATUSES, SkillsRepository
 from app.pipeline import cache, embedder
 from app.pipeline.repository import PipelineRepository
-from app.shared.errors.app_error import BrainNotReadyError, NotFoundError
+from app.shared.errors.app_error import (
+    BrainNotReadyError,
+    ForbiddenError,
+    NotFoundError,
+)
 from app.shared.middleware.authenticate import AuthContext
 from app.shared.middleware.with_tenant import run_in_tenant
 
@@ -179,6 +185,60 @@ class BrainService:
         if core["trust"] != "none":  # cache grounded answers only
             await cache.set_cached_search(workspace_id, question, core, kind=_CACHE_KIND)
         return await self._finalize(auth, question, core, conversation_id)
+
+    # ── history read-back (dashboard reload) ────────────────────────────────────
+
+    async def list_conversations(
+        self, auth: AuthContext, *, limit: int
+    ) -> list[ConversationSummary]:
+        """The signed-in user's threads, newest-active first (FE history sidebar).
+
+        Dashboard-only: persisted conversations belong to a JWT user (RLS scopes them
+        to ``current_user_id()``); an agent (API-key) never has any, so it's a 403
+        rather than a misleading empty list.
+        """
+        workspace_id, role = self._require_dashboard(auth)
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            rows = await self._repo.list_conversations(session, limit=limit)
+        return [
+            ConversationSummary(
+                id=r["id"], title=r["title"],
+                created_at=r["created_at"], updated_at=r["updated_at"],
+            )
+            for r in rows
+        ]
+
+    async def list_messages(
+        self, auth: AuthContext, conversation_id: str
+    ) -> list[BrainMessage]:
+        """Replay one thread's turns, oldest first — seeds the chat on reload.
+
+        404s an unknown/unowned id (RLS makes another user's conversation invisible,
+        which ``conversation_exists`` reports as absent)."""
+        workspace_id, role = self._require_dashboard(auth)
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            if not await self._repo.conversation_exists(session, conversation_id):
+                raise NotFoundError("Conversation")
+            rows = await self._repo.list_messages(session, conversation_id=conversation_id)
+        return [
+            BrainMessage(
+                id=r["id"], role=r["role"], content=r["content"],
+                confidence=r["confidence"],
+                sources=[_from_stored_source(s) for s in (r["sources"] or [])],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    def _require_dashboard(self, auth: AuthContext) -> tuple[str, str]:
+        """Gate a dashboard-only surface: JWT callers only (RLS-owned threads)."""
+        if auth.kind != "jwt":
+            raise ForbiddenError("Conversation history is available to dashboard users only.")
+        return _require_workspace(auth)
 
     async def _answer_from_skills(
         self, question: str, skills_ctx: list[dict], top, provenance: dict | None,
@@ -357,6 +417,18 @@ def _to_stored_source(source: dict) -> dict:
         "url": source.get("url"),
         "excerpt": source.get("excerpt"),
     }
+
+
+def _from_stored_source(stored: dict) -> SourceCitation:
+    """Inverse of ``_to_stored_source``: a persisted source → the live API citation
+    shape, so a replayed answer's citations render identically to a fresh one."""
+    return SourceCitation(
+        provider=stored.get("provider"),
+        location=stored.get("label"),
+        skill_id=stored.get("sourceItemId"),
+        url=stored.get("url"),
+        excerpt=stored.get("excerpt"),
+    )
 
 
 def _build_response(

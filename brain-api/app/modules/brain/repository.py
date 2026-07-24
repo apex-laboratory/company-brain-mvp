@@ -230,6 +230,51 @@ class BrainRepository:
             ).bindparams(id=conversation_id)
         )
 
+    async def list_conversations(
+        self, session: AsyncSession, *, limit: int
+    ) -> list[dict]:
+        """The caller's own conversations, most-recently-active first.
+
+        RLS restricts ``brain_conversations`` to ``current_user_id()``, so this only
+        ever returns the signed-in dashboard user's threads.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, title, created_at, updated_at
+                      FROM brain_conversations
+                     ORDER BY updated_at DESC
+                     LIMIT :limit
+                    """
+                ).bindparams(limit=limit)
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def list_messages(
+        self, session: AsyncSession, *, conversation_id: str
+    ) -> list[dict]:
+        """Every turn in ``conversation_id``, oldest first (chat order).
+
+        RLS on ``brain_messages`` scopes to the caller's own conversations, so an
+        unowned/absent id yields an empty list — the router pre-checks existence to
+        distinguish "not yours / gone" (404) from "yours but empty".
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, role, content, confidence, sources, created_at
+                      FROM brain_messages
+                     WHERE conversation_id = :cid
+                     ORDER BY created_at ASC
+                    """
+                ).bindparams(cid=conversation_id)
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
     async def insert_message(
         self,
         session: AsyncSession,

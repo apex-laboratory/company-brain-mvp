@@ -2236,6 +2236,101 @@
         ]
       }
     },
+    "/api/v1/brain/conversations": {
+      "get": {
+        "tags": [
+          "brain"
+        ],
+        "summary": "List Conversations",
+        "description": "The signed-in user's chat threads, newest-active first (history sidebar).\n\nDashboard (JWT) only \u2014 agents have no persisted conversations (403).",
+        "operationId": "list_conversations_api_v1_brain_conversations_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/brain/conversations/{conversation_id}/messages": {
+      "get": {
+        "tags": [
+          "brain"
+        ],
+        "summary": "List Conversation Messages",
+        "description": "Replay one thread's turns (oldest first) so the FE can restore it on reload.\n\n404s an unknown/unowned conversation; dashboard (JWT) only.",
+        "operationId": "list_conversation_messages_api_v1_brain_conversations__conversation_id__messages_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/decisions": {
       "get": {
         "tags": [

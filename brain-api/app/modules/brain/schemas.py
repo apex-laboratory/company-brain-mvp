@@ -66,6 +66,29 @@ class BrainProvenance(CamelModel):
     last_edited_by: ProvenancePerson | None = None
 
 
+class ConversationSummary(CamelModel):
+    """One of the caller's threads, for the dashboard history sidebar. Ordered by
+    ``updatedAt`` (most recently active first) by the list endpoint."""
+
+    id: str
+    title: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BrainMessage(CamelModel):
+    """A persisted turn, replayed on reload. ``sources``/``confidence`` are populated
+    on assistant turns only; ``sources`` mirrors the ``SourceCitation`` shape the live
+    query returns, so the FE renders a replayed answer identically to a fresh one."""
+
+    id: str
+    role: str  # user | assistant
+    content: str
+    confidence: int | None = None
+    sources: list[SourceCitation] = Field(default_factory=list)
+    created_at: datetime
+
+
 class BrainQueryResponse(CamelModel):
     """The answer envelope (BACKEND_ASKS §7, enriched with trust + provenance).
 
