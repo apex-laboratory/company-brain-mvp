@@ -11,9 +11,14 @@ The "ingest all versioned skills + their evidence" backfill. In one pass it inde
 
 Properties:
 
-* **Idempotent** — upserts on ``(workspace_id, chunk_key)`` and skips already-indexed
-  chunks, so a re-run only embeds what's new. Safe to fire on every publish (the
-  keep-fresh hook) and to re-run at will.
+* **Idempotent** — upserts on ``(workspace_id, chunk_key)`` and skips chunks already
+  embedded **by the configured model**, so a re-run only embeds what's new or stale.
+  Safe to fire on every publish (the keep-fresh hook) and to re-run at will.
+* **Self-healing across a model change** — a chunk whose ``embedding_model`` differs
+  from ``settings.embedding_model`` is re-planned and its vector refreshed in place,
+  so rotating the embedding model is this job re-run, not a manual truncate. Pass
+  ``force=True`` to re-embed every chunk regardless of provenance (for a change to
+  the chunking or the embedded text itself, which provenance can't detect).
 * **Two-phase** — reads what needs indexing in one short transaction, embeds
   connectionless (network I/O never pins a pooled connection), writes in a second.
 * **Tenant-scoped** — runs as ``system``/``admin`` inside ``run_in_tenant`` on the
@@ -38,14 +43,25 @@ log = logging.getLogger(__name__)
 _repo = BrainRepository()
 
 
-async def brain_index_backfill(ctx: dict, workspace_id: str) -> dict:
-    """ARQ entrypoint. ``ctx`` is the ARQ job context (unused)."""
-    # Phase 1: read what to index (skill versions + evidence) + what's already indexed.
+async def brain_index_backfill(
+    ctx: dict, workspace_id: str, *, force: bool = False
+) -> dict:
+    """ARQ entrypoint. ``ctx`` is the ARQ job context (unused).
+
+    ``force`` re-embeds every chunk instead of only the new/stale ones.
+    """
+    model = embedder.current_model()
+    # Phase 1: read what to index (skill versions + evidence) + what's already fresh.
     async with get_tenant_session() as session:
         async with run_in_tenant(session, workspace_id, "system", "admin"):
             version_rows = await _repo.list_version_index_rows(session)
             evidence_rows = await _repo.list_evidence_rows(session)
-            existing = await _repo.list_chunk_keys(session)  # all kinds
+            # force → treat nothing as fresh, so every chunk is re-planned.
+            existing: set[str] = (
+                set()
+                if force
+                else await _repo.list_fresh_chunk_keys(session, embedding_model=model)
+            )
 
     version_plan = _plan_version_chunks(version_rows, existing)
     # Resolve evidence author ids → names (Slack/Zendesk) before capture — network
@@ -53,10 +69,11 @@ async def brain_index_backfill(ctx: dict, workspace_id: str) -> dict:
     author_map = await _resolve_evidence_authors(workspace_id, evidence_rows)
     evidence_plan = _plan_evidence_chunks(evidence_rows, existing, author_map)
 
-    # Phase 2: embed the new chunks OUTSIDE any transaction (network I/O).
+    # Phase 2: embed the planned chunks OUTSIDE any transaction (network I/O).
     for item in (*version_plan, *evidence_plan):
-        vector, _ = await embedder.embed_text(item["content"])
+        vector, usage = await embedder.embed_text(item["content"])
         item["embedding"] = vector
+        item["embedding_model"] = usage.model
 
     # Phase 3: upsert new chunks + re-sync is_current (promote live, demote prior).
     async with get_tenant_session() as session:
@@ -67,7 +84,7 @@ async def brain_index_backfill(ctx: dict, workspace_id: str) -> dict:
                     skill_id=item["skill_id"], version=item["version"],
                     is_current=item["is_current"], chunk_index=item["chunk_index"],
                     chunk_key=item["chunk_key"], content=item["content"],
-                    embedding=item["embedding"],
+                    embedding=item["embedding"], embedding_model=item["embedding_model"],
                 )
             for item in evidence_plan:
                 await _repo.upsert_evidence_chunk(
@@ -75,19 +92,22 @@ async def brain_index_backfill(ctx: dict, workspace_id: str) -> dict:
                     skill_id=item["skill_id"], source_ref=item["source_ref"],
                     chunk_index=item["chunk_index"], chunk_key=item["chunk_key"],
                     content=item["content"], embedding=item["embedding"],
+                    embedding_model=item["embedding_model"],
                 )
             await _repo.sync_skill_version_current(session)
             await session.commit()
 
     indexed = len(version_plan) + len(evidence_plan)
     log.info(
-        "brain_index_backfill: %s indexed %d new chunks (%d version, %d evidence)",
-        workspace_id, indexed, len(version_plan), len(evidence_plan),
+        "brain_index_backfill: %s indexed %d chunks with %s (%d version, %d evidence, force=%s)",
+        workspace_id, indexed, model, len(version_plan), len(evidence_plan), force,
     )
     return {
         "indexed": indexed,
         "versionChunks": len(version_plan),
         "evidenceChunks": len(evidence_plan),
+        "embeddingModel": model,
+        "forced": force,
     }
 
 

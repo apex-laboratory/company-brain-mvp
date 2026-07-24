@@ -216,6 +216,7 @@ class SkillsRepository:
         base_logic: str,
         description: str | None,
         embedding: list[float],
+        embedding_model: str,
     ) -> str:
         """Insert a hand-authored skill at status ``draft`` (no source event).
 
@@ -230,11 +231,11 @@ class SkillsRepository:
                 INSERT INTO skills
                     (id, workspace_id, name, status, source_providers, description,
                      trigger, base_logic, source_ids, source_authority, confidence,
-                     embedding)
+                     embedding, embedding_model)
                 VALUES
                     (:id, :ws, :name, CAST('draft' AS skill_status), '{}', :description,
                      :trigger, :base_logic, '[]'::jsonb, 'high', 1.0,
-                     CAST(:embedding AS vector))
+                     CAST(:embedding AS vector), :embedding_model)
                 """
             ).bindparams(
                 id=skill_id,
@@ -244,9 +245,74 @@ class SkillsRepository:
                 trigger=trigger,
                 base_logic=base_logic,
                 embedding=_vector_literal(embedding),
+                embedding_model=embedding_model,
             )
         )
         return skill_id
+
+    # ── embedding maintenance (re-embed job) ───────────────────────────────────
+
+    async def list_stale_embeddings(
+        self, session: AsyncSession, *, embedding_model: str, force: bool = False
+    ) -> list[dict]:
+        """Skills whose vector was not produced by ``embedding_model``.
+
+        Stale = no vector yet, or one from a different model (``IS DISTINCT FROM``
+        so a NULL provenance — a row written before migration 0018 stamped it —
+        counts as stale rather than silently matching). ``force`` widens this to
+        every non-deleted skill, for re-embedding after a change to the embedded
+        text itself rather than to the model.
+
+        Soft-deleted skills are excluded: their vectors are never searched
+        (``similar_skills`` filters ``deleted_at IS NULL``), so re-embedding them
+        would spend tokens on rows nothing can retrieve.
+        """
+        clause = (
+            ""
+            if force
+            else " AND (embedding IS NULL OR embedding_model IS DISTINCT FROM :model)"
+        )
+        stmt = text(
+            f"""
+            SELECT id, trigger, base_logic
+              FROM skills
+             WHERE deleted_at IS NULL{clause}
+             ORDER BY id
+            """  # clause is a fixed literal; the model is bound
+        )
+        if not force:
+            stmt = stmt.bindparams(model=embedding_model)
+        rows = (await session.execute(stmt)).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def set_embedding(
+        self,
+        session: AsyncSession,
+        skill_id: str,
+        *,
+        embedding: list[float],
+        embedding_model: str,
+    ) -> None:
+        """Replace a skill's vector and stamp which model produced it.
+
+        Deliberately does **not** touch ``updated_at``: re-embedding is a storage
+        migration, not an edit to the rule, and bumping the timestamp would make
+        every skill look freshly changed in the dashboard and review surfaces.
+        """
+        await session.execute(
+            text(
+                """
+                UPDATE skills
+                   SET embedding = CAST(:embedding AS vector),
+                       embedding_model = :model
+                 WHERE id = :skill_id
+                """
+            ).bindparams(
+                skill_id=skill_id,
+                embedding=_vector_literal(embedding),
+                model=embedding_model,
+            )
+        )
 
     async def decrement_confidence(
         self, session: AsyncSession, skill_id: str, *, amount: float, floor: float = 0.0

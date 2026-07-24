@@ -86,7 +86,7 @@ async def test_published_path_writes_version() -> None:
         MagicMock(), repo,
         workspace_id="wrk_1", event_id="evt_1", sweep_id=None,
         provider="notion", source_url="http://x", draft=_draft(),
-        embedding=[0.0] * 1536, confidence=0.95, authority="high",
+        embedding=[0.0] * 1536, embedding_model="m", confidence=0.95, authority="high",
         sweep_sourced=False, routing=_ROUTING, evidence=None,
     )
     assert result.outcome == "published"
@@ -104,7 +104,7 @@ async def test_review_path_writes_review_row_and_bumps_sweep() -> None:
         MagicMock(), repo,
         workspace_id="wrk_1", event_id="evt_1", sweep_id="swp_1",
         provider="slack", source_url="http://x", draft=_draft(),
-        embedding=[0.0] * 1536, confidence=0.80, authority="medium",
+        embedding=[0.0] * 1536, embedding_model="m", confidence=0.80, authority="medium",
         sweep_sourced=True, routing=_ROUTING, evidence=evidence,
     )
     assert result.outcome == "review"
@@ -125,7 +125,7 @@ async def test_draft_path_writes_only_skill() -> None:
         MagicMock(), repo,
         workspace_id="wrk_1", event_id="evt_1", sweep_id=None,
         provider="slack", source_url="", draft=_draft(),
-        embedding=[0.0] * 1536, confidence=0.5, authority="low",
+        embedding=[0.0] * 1536, embedding_model="m", confidence=0.5, authority="low",
         sweep_sourced=False, routing=_ROUTING, evidence=None,
     )
     assert result.outcome == "draft"
@@ -160,7 +160,7 @@ async def test_update_published_mutates_skill_and_versions() -> None:
     result = await write_update(
         MagicMock(), repo,
         workspace_id="wrk_1", provider="notion", source_url="http://x",
-        matched=_match("v1"), draft=_draft(), embedding=[0.0] * 1536,
+        matched=_match("v1"), draft=_draft(), embedding=[0.0] * 1536, embedding_model="m",
         confidence=0.95, authority="high", sweep_sourced=False, sweep_id=None,
         routing=_ROUTING, evidence=None,
     )
@@ -178,7 +178,7 @@ async def test_update_review_branch_does_not_mutate_skill() -> None:
     result = await write_update(
         MagicMock(), repo,
         workspace_id="wrk_1", provider="slack", source_url="http://x",
-        matched=_match(), draft=_draft(), embedding=[0.0] * 1536,
+        matched=_match(), draft=_draft(), embedding=[0.0] * 1536, embedding_model="m",
         confidence=0.80, authority="medium", sweep_sourced=True, sweep_id="swp_1",
         routing=_ROUTING, evidence=None,
     )

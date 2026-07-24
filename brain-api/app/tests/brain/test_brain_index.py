@@ -12,7 +12,10 @@ from app.jobs.tasks import brain_index_backfill as job_module
 from app.modules.brain import reindex
 from app.modules.brain.chunking import chunk_text
 from app.modules.brain.repository import chunk_key
+from app.pipeline import embedder
 from app.pipeline.types import StageUsage
+
+_MODEL = embedder.current_model()  # stamped on every chunk the backfill writes
 
 
 class _AsyncCtx:
@@ -47,7 +50,7 @@ def _repo_mock(*, version_rows=None, evidence_rows=None, existing=None) -> Magic
     return MagicMock(
         list_version_index_rows=AsyncMock(return_value=version_rows if version_rows is not None else _rows()),
         list_evidence_rows=AsyncMock(return_value=evidence_rows if evidence_rows is not None else []),
-        list_chunk_keys=AsyncMock(return_value=existing if existing is not None else set()),
+        list_fresh_chunk_keys=AsyncMock(return_value=existing if existing is not None else set()),
         upsert_skill_version_chunk=AsyncMock(),
         upsert_evidence_chunk=AsyncMock(),
         sync_skill_version_current=AsyncMock(),
@@ -100,7 +103,8 @@ async def test_backfill_indexes_current_and_historical_with_flags() -> None:
     finally:
         for p in patches:
             p.stop()
-    assert result == {"indexed": 2, "versionChunks": 2, "evidenceChunks": 0}
+    assert result == {"indexed": 2, "versionChunks": 2, "evidenceChunks": 0,
+                      "embeddingModel": _MODEL, "forced": False}
     assert repo.upsert_skill_version_chunk.await_count == 2
     repo.sync_skill_version_current.assert_awaited_once()  # promote live / demote prior
     by_version = {
@@ -121,10 +125,73 @@ async def test_backfill_is_idempotent_skips_indexed_but_resyncs() -> None:
          patch.object(job_module, "run_in_tenant", return_value=_AsyncCtx(None)), \
          patch.object(job_module.embedder, "embed_text", embed):
         result = await job_module.brain_index_backfill({}, "wrk_1")
-    assert result == {"indexed": 0, "versionChunks": 0, "evidenceChunks": 0}
+    assert result == {"indexed": 0, "versionChunks": 0, "evidenceChunks": 0,
+                      "embeddingModel": _MODEL, "forced": False}
     repo.upsert_skill_version_chunk.assert_not_awaited()  # nothing new to write
     embed.assert_not_awaited()                            # no embedding spend on re-run
     repo.sync_skill_version_current.assert_awaited_once()  # is_current still reconciled
+
+
+async def test_backfill_skips_only_chunks_fresh_for_the_current_model() -> None:
+    """Freshness is asked for by model, not "does a row exist".
+
+    That predicate is the whole migration story: a chunk embedded by a *different*
+    model isn't returned as fresh, so it gets re-planned and its vector refreshed
+    in place — a model rotation is this job re-run, not a manual truncate.
+    """
+    repo = _repo_mock()
+    session = MagicMock(commit=AsyncMock())
+    patches = _job_patches(repo, session)
+    for p in patches:
+        p.start()
+    try:
+        await job_module.brain_index_backfill({}, "wrk_1")
+    finally:
+        for p in patches:
+            p.stop()
+    repo.list_fresh_chunk_keys.assert_awaited_once()
+    assert repo.list_fresh_chunk_keys.await_args.kwargs["embedding_model"] == _MODEL
+
+
+async def test_backfill_force_reembeds_already_indexed_chunks() -> None:
+    """``force`` re-embeds regardless of provenance — for a change to the chunking
+    or embedded text, which the ``embedding_model`` stamp alone can't detect."""
+    existing = {chunk_key("skill_version", "skl_1", "v2", 0),
+                chunk_key("skill_version", "skl_1", "v1", 0)}
+    repo = _repo_mock(existing=existing)
+    session = MagicMock(commit=AsyncMock())
+    embed = AsyncMock(return_value=([0.0] * 1536, StageUsage("e", _MODEL, 1, 0, 0.0)))
+    with patch.object(job_module, "_repo", repo), \
+         patch.object(job_module, "get_tenant_session", return_value=_AsyncCtx(session)), \
+         patch.object(job_module, "run_in_tenant", return_value=_AsyncCtx(None)), \
+         patch.object(job_module.embedder, "embed_text", embed):
+        result = await job_module.brain_index_backfill({}, "wrk_1", force=True)
+
+    assert result["indexed"] == 2 and result["forced"] is True
+    # Not even consulted — force means "nothing counts as fresh".
+    repo.list_fresh_chunk_keys.assert_not_awaited()
+    assert embed.await_count == 2
+    assert repo.upsert_skill_version_chunk.await_count == 2
+
+
+async def test_backfill_stamps_the_model_on_every_chunk() -> None:
+    repo = _repo_mock(evidence_rows=_evidence_rows())
+    session = MagicMock(commit=AsyncMock())
+    patches = _job_patches(repo, session)
+    for p in patches:
+        p.start()
+    try:
+        await job_module.brain_index_backfill({}, "wrk_1")
+    finally:
+        for p in patches:
+            p.stop()
+    written = (
+        repo.upsert_skill_version_chunk.await_args_list
+        + repo.upsert_evidence_chunk.await_args_list
+    )
+    assert written  # guard: the assertion below is vacuous on an empty plan
+    for call in written:
+        assert call.kwargs["embedding_model"] == "m"  # the stub usage's model
 
 
 async def test_backfill_scoped_to_caller_workspace() -> None:
@@ -155,7 +222,8 @@ async def test_backfill_captures_evidence_with_attribution() -> None:
     finally:
         for p in patches:
             p.stop()
-    assert result == {"indexed": 1, "versionChunks": 0, "evidenceChunks": 1}
+    assert result == {"indexed": 1, "versionChunks": 0, "evidenceChunks": 1,
+                      "embeddingModel": _MODEL, "forced": False}
     repo.upsert_evidence_chunk.assert_awaited_once()
     kw = repo.upsert_evidence_chunk.await_args.kwargs
     assert kw["skill_id"] == "skl_1"

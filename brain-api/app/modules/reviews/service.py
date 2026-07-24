@@ -113,9 +113,13 @@ class ReviewsService:
             skill = await self._skills.get_skill(session, skill_id) if skill_id else None
 
         embedding: list[float] | None = None
+        embedding_model: str | None = None
         if skill is not None and review["kind"] in ("policy_change", "contradiction"):
             new_logic = review["after_text"] or skill["base_logic"]
-            embedding, _ = await embedder.embed_text(f"{skill['trigger']}\n{new_logic}")
+            embedding, usage = await embedder.embed_text(
+                embedder.skill_embedding_text(skill["trigger"], new_logic)
+            )
+            embedding_model = usage.model
 
         # Phase 2 (write): lock the review row so a concurrent approve/reject
         # serializes behind us and then sees the resolved status (no double-apply).
@@ -124,7 +128,9 @@ class ReviewsService:
         ):
             review = await self._load_pending(session, review_id, for_update=True)
             if skill_id:
-                await self._apply_approval(session, review, embedding=embedding)
+                await self._apply_approval(
+                    session, review, embedding=embedding, embedding_model=embedding_model
+                )
             resolved = await self._repo.resolve(
                 session, review_id, status="approved", verdict="approve",
                 comment=comment, resolved_by=auth.user_id, resolved_at=datetime.now(UTC),
@@ -264,7 +270,9 @@ class ReviewsService:
             skill = await self._skills.get_skill(session, skill_id)
             if skill is None:
                 raise NotFoundError("Skill")
-        embedding, _ = await embedder.embed_text(f"{skill['trigger']}\n{base_logic}")
+        embedding, usage = await embedder.embed_text(
+            embedder.skill_embedding_text(skill["trigger"], base_logic)
+        )
 
         # Phase 2: lock the review, apply the human version, resolve.
         async with get_tenant_session() as session, run_in_tenant(
@@ -286,7 +294,7 @@ class ReviewsService:
             await self._skills.update_skill_logic(
                 session, skill_id, base_logic=base_logic, exceptions_block=new_exceptions,
                 version=new_version, confidence=_HUMAN_CONFIDENCE, embedding=embedding,
-                status="active",
+                embedding_model=usage.model, status="active",
             )
             resolved = await self._repo.resolve(
                 session, review_id, status="approved", verdict="approve",
@@ -312,12 +320,18 @@ class ReviewsService:
         return review
 
     async def _apply_approval(
-        self, session, review: dict, *, embedding: list[float] | None
+        self,
+        session,
+        review: dict,
+        *,
+        embedding: list[float] | None,
+        embedding_model: str | None,
     ) -> None:
         """Mutate the skill per review kind (skill_id known to be set).
 
-        ``embedding`` is precomputed by the caller for the policy_change/
-        contradiction kinds (network I/O must stay out of this transaction)."""
+        ``embedding`` (and the model that produced it) is precomputed by the caller
+        for the policy_change/contradiction kinds — network I/O must stay out of
+        this transaction."""
         kind = review["kind"]
         skill_id = review["skill_id"]
         skill = await self._skills.get_skill(session, skill_id)
@@ -349,7 +363,8 @@ class ReviewsService:
             await self._skills.update_skill_logic(
                 session, skill_id, base_logic=new_logic,
                 exceptions_block=skill["exceptions_block"] or [], version=new_version,
-                confidence=_HUMAN_CONFIDENCE, embedding=embedding, status="active",
+                confidence=_HUMAN_CONFIDENCE, embedding=embedding,
+                embedding_model=embedding_model, status="active",
             )
 
         elif kind == "exception":

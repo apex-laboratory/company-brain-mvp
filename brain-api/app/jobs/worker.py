@@ -18,6 +18,7 @@ from app.jobs.tasks.onboarding_sweep import onboarding_sweep
 from app.jobs.tasks.poll_sync import poll_pull_sources
 from app.jobs.tasks.query_extract import query_extract
 from app.jobs.tasks.reconcile_events import reenqueue_stale_events
+from app.jobs.tasks.reembed_skills import reembed_skills
 from app.jobs.tasks.source_sync import source_sync
 from app.jobs.tasks.sweep_extract import sweep_extract
 from app.jobs.tasks.webhook_ingest import webhook_ingest
@@ -55,6 +56,10 @@ class WorkerSettings:
         # Embedding every skill version can take a while on a large workspace; give it
         # an hour. Idempotent (skips already-indexed chunks), so a retry resumes cheaply.
         func(brain_index_backfill, timeout=3600),
+        # Re-embedding the skills table after a model change is the same shape of
+        # work as the brain backfill: hour-long budget, resumable (it re-selects only
+        # rows still on the old model), so a timeout kill costs nothing already spent.
+        func(reembed_skills, timeout=3600),
     ]
     # Daily renewal of Google push channels (Drive/Gmail watch expires <= 7 days);
     # 15-minute polling for providers without push delivery (Notion).

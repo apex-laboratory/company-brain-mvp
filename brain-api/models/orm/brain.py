@@ -142,6 +142,7 @@ class BrainChunk(Base):
     chunk_key: Mapped[str] = mapped_column(Text, nullable=False)          # idempotency natural key
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[list | None] = mapped_column(Vector(1536))
+    embedding_model: Mapped[str | None] = mapped_column(Text)  # provenance; see migration 0018
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

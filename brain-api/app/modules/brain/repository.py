@@ -344,13 +344,26 @@ class BrainRepository:
         ).mappings().all()
         return [dict(r) for r in rows]
 
-    async def list_chunk_keys(
-        self, session: AsyncSession, *, kind: str | None = None
+    async def list_fresh_chunk_keys(
+        self, session: AsyncSession, *, embedding_model: str, kind: str | None = None
     ) -> set[str]:
-        """Already-indexed ``chunk_key``s (of ``kind``, or all kinds when ``None``) —
-        the backfill skips these so a re-run only embeds what's new (idempotency)."""
-        clause = " WHERE kind = :kind" if kind is not None else ""
-        stmt = text(f"SELECT chunk_key FROM brain_chunks{clause}")
+        """``chunk_key``s already embedded **by ``embedding_model``** — the backfill
+        skips these, so a re-run only embeds what's new or stale (idempotency).
+
+        A chunk with no vector, or one from a different model (``IS DISTINCT FROM``,
+        so a NULL provenance counts as stale), is deliberately *not* returned: the
+        backfill re-plans it and the upsert refreshes its embedding in place. That
+        is what makes a model change a resumable job rather than a manual truncate.
+        """
+        clause = " AND kind = :kind" if kind is not None else ""
+        stmt = text(
+            f"""
+            SELECT chunk_key
+              FROM brain_chunks
+             WHERE embedding IS NOT NULL
+               AND embedding_model IS NOT DISTINCT FROM :model{clause}
+            """  # clause is a fixed literal; values are bound
+        ).bindparams(model=embedding_model)
         if kind is not None:
             stmt = stmt.bindparams(kind=kind)
         rows = (await session.execute(stmt)).scalars()
@@ -368,6 +381,7 @@ class BrainRepository:
         chunk_key: str,
         content: str,
         embedding: list[float],
+        embedding_model: str,
     ) -> None:
         """Insert or refresh one ``skill_version`` chunk (idempotent on chunk_key)."""
         await session.execute(
@@ -375,13 +389,14 @@ class BrainRepository:
                 """
                 INSERT INTO brain_chunks
                     (workspace_id, kind, skill_id, version, is_current,
-                     chunk_index, chunk_key, content, embedding)
+                     chunk_index, chunk_key, content, embedding, embedding_model)
                 VALUES
                     (:ws, 'skill_version', :skill_id, :version, :is_current,
-                     :idx, :key, :content, CAST(:embedding AS vector))
+                     :idx, :key, :content, CAST(:embedding AS vector), :embedding_model)
                 ON CONFLICT (workspace_id, chunk_key) DO UPDATE
                    SET content = EXCLUDED.content,
                        embedding = EXCLUDED.embedding,
+                       embedding_model = EXCLUDED.embedding_model,
                        is_current = EXCLUDED.is_current,
                        version = EXCLUDED.version
                 """
@@ -394,6 +409,7 @@ class BrainRepository:
                 key=chunk_key,
                 content=content,
                 embedding=_vector_literal(embedding),
+                embedding_model=embedding_model,
             )
         )
 
@@ -493,6 +509,7 @@ class BrainRepository:
         chunk_key: str,
         content: str,
         embedding: list[float],
+        embedding_model: str,
     ) -> None:
         """Insert or refresh one ``evidence`` chunk (idempotent on chunk_key).
 
@@ -504,13 +521,14 @@ class BrainRepository:
                 """
                 INSERT INTO brain_chunks
                     (workspace_id, kind, skill_id, source_ref,
-                     chunk_index, chunk_key, content, embedding)
+                     chunk_index, chunk_key, content, embedding, embedding_model)
                 VALUES
                     (:ws, 'evidence', :skill_id, CAST(:source_ref AS jsonb),
-                     :idx, :key, :content, CAST(:embedding AS vector))
+                     :idx, :key, :content, CAST(:embedding AS vector), :embedding_model)
                 ON CONFLICT (workspace_id, chunk_key) DO UPDATE
                    SET content = EXCLUDED.content,
                        embedding = EXCLUDED.embedding,
+                       embedding_model = EXCLUDED.embedding_model,
                        source_ref = EXCLUDED.source_ref
                 """
             ).bindparams(
@@ -521,6 +539,7 @@ class BrainRepository:
                 key=chunk_key,
                 content=content,
                 embedding=_vector_literal(embedding),
+                embedding_model=embedding_model,
             )
         )
 

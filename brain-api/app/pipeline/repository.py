@@ -214,6 +214,7 @@ class PipelineRepository:
         version: str,
         confidence: float,
         embedding: list[float],
+        embedding_model: str,
         status: str = "active",
     ) -> None:
         """Apply an UPDATE/EXCEPTION to a published skill (auto-publish branch)."""
@@ -226,6 +227,7 @@ class PipelineRepository:
                        version = :version,
                        confidence = :confidence,
                        embedding = CAST(:embedding AS vector),
+                       embedding_model = :embedding_model,
                        status = CAST(:status AS skill_status),
                        updated_at = now()
                  WHERE id = :skill_id
@@ -237,6 +239,7 @@ class PipelineRepository:
                 version=version,
                 confidence=confidence,
                 embedding=_vector_literal(embedding),
+                embedding_model=embedding_model,
                 status=status,
             )
         )
@@ -356,6 +359,7 @@ class PipelineRepository:
         source_authority: str,
         confidence: float,
         embedding: list[float],
+        embedding_model: str,
     ) -> str:
         skill_id = generate_id("skill")
         await session.execute(
@@ -364,13 +368,14 @@ class PipelineRepository:
                 INSERT INTO skills
                     (id, workspace_id, name, status, source_providers, description,
                      trigger, base_logic, exceptions_block, actions, source_ids,
-                     source_authority, confidence, embedding)
+                     source_authority, confidence, embedding, embedding_model)
                 VALUES
                     (:id, :ws, :name, CAST(:status AS skill_status),
                      ARRAY[CAST(:provider AS text)], :description,
                      :trigger, :base_logic, CAST(:exceptions AS jsonb),
                      CAST(:actions AS jsonb), CAST(:source_ids AS jsonb),
-                     :authority, :confidence, CAST(:embedding AS vector))
+                     :authority, :confidence, CAST(:embedding AS vector),
+                     :embedding_model)
                 """
             ).bindparams(
                 id=skill_id,
@@ -387,6 +392,7 @@ class PipelineRepository:
                 authority=source_authority,
                 confidence=confidence,
                 embedding=_vector_literal(embedding),
+                embedding_model=embedding_model,
             )
         )
         return skill_id

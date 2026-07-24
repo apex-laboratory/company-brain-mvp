@@ -185,6 +185,7 @@ async def _route(
     raw: RawEvent,
     draft: SkillDraft,
     embedding: list[float],
+    embedding_model: str,
     annotation,
     routing,
     ledger: CostLedger,
@@ -241,7 +242,8 @@ async def _route(
             event, ledger,
             lambda s: skill_writer.write_update(
                 s, _repo, workspace_id=ws, provider=event.provider, source_url=raw.url,
-                matched=matched, draft=draft, embedding=embedding, confidence=confidence,
+                matched=matched, draft=draft, embedding=embedding,
+                embedding_model=embedding_model, confidence=confidence,
                 authority=annotation.tier, sweep_sourced=sweep_sourced, sweep_id=event.sweep_id,
                 routing=routing, evidence=evidence,
             ),
@@ -254,6 +256,7 @@ async def _route(
         lambda s: skill_writer.write_new_skill(
             s, _repo, workspace_id=ws, event_id=event.id, sweep_id=event.sweep_id,
             provider=event.provider, source_url=raw.url, draft=draft, embedding=embedding,
+            embedding_model=embedding_model,
             confidence=confidence, authority=annotation.tier, sweep_sourced=sweep_sourced,
             routing=routing, evidence=evidence,
         ),
@@ -333,7 +336,10 @@ async def run_pipeline(
         return PipelineResult(outcome="discarded", cost_usd=ledger.total_usd)
     ledger.add(usage)
 
-    embedding, usage = await embedder.embed_text(f"{draft.trigger}\n{draft.base_logic}")
+    embedding, usage = await embedder.embed_text(
+        embedder.skill_embedding_text(draft.trigger, draft.base_logic)
+    )
+    embedding_model = usage.model  # stamped alongside the vector (migration 0018)
     ledger.add(usage)
 
     routing = authority_mod.routing_config()
@@ -351,7 +357,7 @@ async def run_pipeline(
 
     matched = similar[0] if (boundary.matched_skill_id and similar) else None
     result = await _route(
-        event, raw, draft, embedding, annotation, routing, ledger,
+        event, raw, draft, embedding, embedding_model, annotation, routing, ledger,
         boundary=boundary, matched=matched, sweep_sourced=sweep_sourced, evidence=evidence,
         extra_meta=expander_meta,
     )

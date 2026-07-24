@@ -64,6 +64,7 @@ async def write_new_skill(
     source_url: str,
     draft: SkillDraft,
     embedding: list[float],
+    embedding_model: str,
     confidence: float,
     authority: str,
     sweep_sourced: bool,
@@ -91,6 +92,7 @@ async def write_new_skill(
         source_authority=authority,
         confidence=confidence,
         embedding=embedding,
+        embedding_model=embedding_model,
     )
 
     review_id: str | None = None
@@ -208,6 +210,7 @@ async def write_update(
     matched: SimilarSkill,
     draft: SkillDraft,
     embedding: list[float],
+    embedding_model: str,
     confidence: float,
     authority: str,
     sweep_sourced: bool,
@@ -243,6 +246,7 @@ async def write_update(
             version=new_version,
             confidence=confidence,
             embedding=embedding,
+            embedding_model=embedding_model,
         )
         return PipelineResult(outcome="published", skill_id=matched.id)
 

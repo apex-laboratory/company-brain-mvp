@@ -160,8 +160,9 @@ class SkillsService:
         pin a pooled connection). The draft is not agent-queryable until a human
         approves the review it opens."""
         workspace_id, role = _require_workspace(auth)
-        embed_text = "\n".join(t for t in (req.name, req.trigger, req.base_logic) if t)
-        embedding, _ = await embedder.embed_text(embed_text)
+        embedding, usage = await embedder.embed_text(
+            embedder.skill_embedding_text(req.trigger, req.base_logic)
+        )
         async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
@@ -170,6 +171,7 @@ class SkillsService:
                     session, workspace_id=workspace_id, name=req.name,
                     trigger=req.trigger, base_logic=req.base_logic,
                     description=req.description, embedding=embedding,
+                    embedding_model=usage.model,
                 )
             except IntegrityError as exc:
                 raise ConflictError("A skill with this name already exists.") from exc

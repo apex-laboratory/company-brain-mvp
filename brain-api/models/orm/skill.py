@@ -51,6 +51,9 @@ class Skill(Base):
     conflict_flags: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'"))
     confidence: Mapped[float | None] = mapped_column(Float)
     embedding: Mapped[list | None] = mapped_column(Vector(1536))
+    # Which model produced ``embedding`` — a vector is only comparable to others
+    # from the same model, so this is what the re-embed job selects staleness on.
+    embedding_model: Mapped[str | None] = mapped_column(Text)
 
     # ── Shared ─────────────────────────────────────────────────────────────────
     changed_by: Mapped[str | None] = mapped_column(Text, ForeignKey("users.id"))
