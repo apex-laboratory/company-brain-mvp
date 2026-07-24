@@ -1690,6 +1690,11 @@ Recommended defaults:
 | OAuth callbacks  | 20 requests / minute / user       |
 | API key creation | 5 requests / hour / admin         |
 
+The MCP `query_brain` surface (port 8001) enforces the same two limits as the REST
+path — the per-IP auth limit on `X-API-Key` resolution and the per-workspace brain
+limit on the query itself — even though it has no HTTP route to decorate. A
+throttled MCP call returns a `ToolError` whose message carries the retry hint.
+
 Rate limit response:
 
 ```json
