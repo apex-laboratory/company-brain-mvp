@@ -1,7 +1,7 @@
 """Add return_to to oauth_states for caller-chosen post-OAuth landing pages
 
-Revision ID: 0018
-Revises: 0017
+Revision ID: 0019
+Revises: 0018
 Create Date: 2026-07-29
 
 The frontend starts a source connect from more than one surface (onboarding wizard,
@@ -16,24 +16,24 @@ callback uses the default path. ``oauth_states`` has RLS enabled with no policie
 (0008) and is reached only via the service-role connection, so no policy change is
 needed for the new column.
 
-(Authored as 0018 off main's 0017 head; the in-flight feature/phase-4-5-delivery
-line carries its own 0018 — whichever merges second renumbers, per the 0012
-precedent. The DDL is IF (NOT) EXISTS so environments that received the column
-under either numbering apply the renumbered revision cleanly.)
+(Renumbered from 0018 to 0019 — 0018 was claimed by both this branch and
+``feat(embeddings): record vector provenance...``, which landed on main first;
+same renumbering-on-merge-order the 0012 docstring describes.)
 """
 from typing import Sequence, Union
 
+import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0018"
-down_revision: Union[str, None] = "0017"
+revision: str = "0019"
+down_revision: Union[str, None] = "0018"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS return_to TEXT")
+    op.add_column("oauth_states", sa.Column("return_to", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE oauth_states DROP COLUMN IF EXISTS return_to")
+    op.drop_column("oauth_states", "return_to")
