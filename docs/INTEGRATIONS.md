@@ -130,14 +130,24 @@ Authorization: Bearer <accessToken>
 Content-Type: application/json
 ```
 
-Request body — optional; only needed for **subdomain-scoped providers**
-(currently Zendesk), omitted otherwise:
+Request body — optional. `subdomain` is only needed for **subdomain-scoped
+providers** (currently Zendesk); `returnTo` picks the frontend path the OAuth
+callback redirects back to:
 
 ```json
-{ "subdomain": "acme" }
+{ "subdomain": "acme", "returnTo": "/onboarding" }
 ```
 
-For Notion / GitHub / Slack / Google / Jira, send **no body** (or `{}`).
+For Notion / GitHub / Slack / Google / Jira with a default landing, send
+**no body** (or `{}`).
+
+`returnTo` (camelCase; `return_to` also accepted) is checked against a
+server-side allowlist — currently `/onboarding` and `/dashboard/sources`. It is
+bound to the single-use OAuth `state` server-side (never appended to the
+provider `redirect_uri`). Omitted or non-allowlisted values silently fall back
+to the default `/settings/sources`, so a stale client degrades to today's
+behaviour instead of failing the connect; no external host is ever reachable
+through it.
 
 Response `202`:
 
@@ -165,19 +175,30 @@ GET /api/v1/sources/{provider}/callback?state=…&code=…
 
 The provider redirects the user's browser here after consent. The server
 verifies `state`, exchanges the `code` for tokens, stores the connection, and
-responds `302` back to the dashboard:
+responds `302` back to the frontend — at the `returnTo` path bound to the
+state at authorize time, or `/settings/sources` when none was given:
 
 ```txt
-Location: {FRONTEND_URL}/settings/sources?connected={provider}
+Location: {FRONTEND_URL}{returnTo|/settings/sources}?connected={provider}
 ```
+
+A declined/failed consent redirects to the same destination with the existing
+error param:
+
+```txt
+Location: {FRONTEND_URL}{returnTo|/settings/sources}?error={provider}
+```
+
+(The single-use `state` is left unconsumed on a decline, so a browser retry
+doesn't hit a spurious "state already used".)
 
 Query params: `state` (required), `code` (optional — a GitHub App install
 redirects with `installation_id` and no `code`), `installation_id` (optional,
 GitHub), `error` (optional — set when the user declines the consent screen, e.g.
-`error=access_denied`; the server redirects back to the dashboard cleanly
-instead of attempting a token exchange). The frontend does not call this; it
-only needs to render the `?connected={provider}` landing on `/settings/sources`
-and refetch the source list. Rate limited to `20/minute`.
+`error=access_denied`; the server redirects back cleanly instead of attempting
+a token exchange). The frontend does not call this; it only needs to render the
+`?connected={provider}` / `?error={provider}` landing on whichever path it sent
+as `returnTo` and refetch the source list. Rate limited to `20/minute`.
 
 Errors surfaced during the redirect: `401` if the `state` is invalid, expired,
 or already used.
@@ -363,8 +384,8 @@ Errors: `404` if `sweep_id` is unknown in this workspace. Note: a non-UUID
 | UI step                     | Call(s)                                                              |
 | --------------------------- | ------------------------------------------------------------------- |
 | Sources list / health       | `GET /sources`                                                      |
-| Connect a provider          | `POST /sources/{provider}/authorize` → redirect to `authorizeUrl`   |
-| Return from provider        | browser lands on `/settings/sources?connected={provider}` → refetch `GET /sources` |
+| Connect a provider          | `POST /sources/{provider}/authorize` (body may carry `returnTo`) → redirect to `authorizeUrl` |
+| Return from provider        | browser lands on `{returnTo|/settings/sources}?connected={provider}` (or `?error={provider}`) → refetch `GET /sources` |
 | Channel picker              | `GET /sources/{sourceId}/channels`                                  |
 | Save channel + lookback     | `PATCH /sources/{sourceId}/channels`                                |
 | Remove a provider           | `POST /sources/{sourceId}/disconnect`                               |

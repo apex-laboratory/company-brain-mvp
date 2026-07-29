@@ -52,6 +52,19 @@ _SUBDOMAIN_PROVIDERS = frozenset({"zendesk"})
 _SUBDOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$")
 
 
+# Where the callback lands the browser. ``returnTo`` ends up in a Location header,
+# so free-form validation is not enough — only exact allowlist matches are stored
+# (which trivially rules out schemes, hosts, '//' and backslashes). Non-allowlisted
+# values degrade to the default rather than 422 so a stale frontend build still
+# completes the connect.
+_RETURN_TO_ALLOWLIST = frozenset({"/onboarding", "/dashboard/sources"})
+_DEFAULT_RETURN_TO = "/settings/sources"
+
+
+def _resolve_return_to(return_to: str | None) -> str | None:
+    return return_to if return_to in _RETURN_TO_ALLOWLIST else None
+
+
 def _validate_subdomain(provider: str, subdomain: str | None) -> str | None:
     """Validate + normalize the subdomain for subdomain-scoped providers.
 
@@ -127,7 +140,11 @@ class SourcesService:
 
     # ── OAuth start ──────────────────────────────────────────────────────────────
     async def start_authorization(
-        self, auth: AuthContext, provider: str, subdomain: str | None = None
+        self,
+        auth: AuthContext,
+        provider: str,
+        subdomain: str | None = None,
+        return_to: str | None = None,
     ) -> AuthorizeStartOut:
         workspace_id, _ = _require_workspace(auth)
         self._require_known(provider)
@@ -138,6 +155,10 @@ class SourcesService:
         # it is the URL host of the consent page and is stored for the callback.
         subdomain = _validate_subdomain(provider, subdomain)
         config = {"subdomain": subdomain} if subdomain else None
+
+        # Bound to the state row (never the provider redirect_uri, which must stay
+        # byte-identical to what's registered with each provider).
+        return_to = _resolve_return_to(return_to)
 
         nonce = secrets.token_urlsafe(32)
         state = f"{nonce}.{hmac_sign(nonce, settings.jwt_access_secret)}"
@@ -154,6 +175,7 @@ class SourcesService:
                 workspace_id=workspace_id,
                 expires_at=expires_at,
                 subdomain=subdomain,
+                return_to=return_to,
             )
 
         return AuthorizeStartOut(
@@ -180,11 +202,23 @@ class SourcesService:
         self._require_known(provider)
 
         # 0. The user declined the consent screen (or the provider errored). There is no
-        # code to exchange — redirect back to the sources page with the error and leave
-        # the single-use state untouched (unconsumed) so no spurious "state already used"
-        # appears if the browser retries. Do this before any DB work.
+        # code to exchange — redirect back with the error and leave the single-use state
+        # untouched (unconsumed) so no spurious "state already used" appears if the
+        # browser retries. The stored return_to is still honored (a decline mid-onboarding
+        # must land back on onboarding), via a read-only peek gated on the stateless
+        # signature check: a forged state gets the default without touching the DB.
         if error:
-            return f"{settings.frontend_url}/settings/sources?error={provider}"
+            return_to = None
+            nonce, _, signature = state.partition(".")
+            if signature and hmac_verify(nonce, signature, settings.jwt_access_secret):
+                async with get_session() as session:
+                    return_to = await self._repo.peek_oauth_state(
+                        session,
+                        state_hash=sha256_hash(state),
+                        provider=provider,
+                        now=datetime.now(UTC),
+                    )
+            return f"{settings.frontend_url}{return_to or _DEFAULT_RETURN_TO}?error={provider}"
 
         # 1. Stateless signature check before any DB work.
         nonce, _, signature = state.partition(".")
@@ -245,7 +279,10 @@ class SourcesService:
         if provider in GOOGLE_PUSH_PROVIDERS:
             await enqueue("watch_register", resolved.workspace_id, connection_id)
 
-        return f"{settings.frontend_url}/settings/sources?connected={provider}"
+        return (
+            f"{settings.frontend_url}{resolved.return_to or _DEFAULT_RETURN_TO}"
+            f"?connected={provider}"
+        )
 
     # ── connections ──────────────────────────────────────────────────────────────
     async def list_connections(self, auth: AuthContext) -> list[SourceConnectionOut]:

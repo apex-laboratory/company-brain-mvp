@@ -117,11 +117,65 @@ async def test_callback_stored_subdomain_wins_over_query_installation_id() -> No
     assert fake.exchange_code.await_args.kwargs["installation_id"] == "acme"
 
 
+class _ReturnToRepo:
+    """Repo whose consumed state carries a stored (allowlisted) return_to."""
+
+    def __init__(self, return_to: str | None) -> None:
+        self._return_to = return_to
+
+    async def consume_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return ResolvedState(
+            id="os_1",
+            user_id="usr_1",
+            workspace_id="wrk_1",
+            redirect_uri="https://cb/callback",
+            return_to=self._return_to,
+        )
+
+    async def upsert_connection(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return "src_1"
+
+
+async def _run_success_callback(return_to: str | None) -> str:
+    service = SourcesService(repository=_ReturnToRepo(return_to))  # type: ignore[arg-type]
+    fake = MagicMock()
+    fake.exchange_code = AsyncMock(
+        return_value=OAuthTokens(access_token="tok", external_account_id="ws_1")
+    )
+    session = MagicMock(commit=AsyncMock())
+    with patch.object(svc, "get_integration", return_value=fake), patch.object(
+        svc, "get_session", return_value=_AsyncCtx(session)
+    ), patch.object(
+        svc, "get_tenant_session", return_value=_AsyncCtx(session)
+    ), patch.object(svc, "run_in_tenant", return_value=_AsyncCtx(None)), patch.object(
+        svc, "enqueue", AsyncMock()
+    ):
+        return await service.handle_callback("notion", state=_valid_state(), code="c")
+
+
+async def test_callback_success_redirects_to_stored_return_to() -> None:
+    """The state-bound return_to picks the landing page (onboarding connect step)."""
+    redirect = await _run_success_callback("/onboarding")
+    assert redirect == f"{settings.frontend_url}/onboarding?connected=notion"
+
+
+async def test_callback_success_without_return_to_keeps_default() -> None:
+    """Omitted return_to preserves today's redirect exactly (backward compatible)."""
+    redirect = await _run_success_callback(None)
+    assert redirect == f"{settings.frontend_url}/settings/sources?connected=notion"
+
+
 class _NeverConsumeRepo:
     """Repo that fails the test if the callback tries to consume the state."""
 
+    def __init__(self, return_to: str | None = None) -> None:
+        self._return_to = return_to
+
     async def consume_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
         raise AssertionError("state must not be consumed on a consent-cancel callback")
+
+    async def peek_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return self._return_to
 
 
 async def test_callback_consent_cancel_redirects_without_burning_state() -> None:
@@ -129,8 +183,44 @@ async def test_callback_consent_cancel_redirects_without_burning_state() -> None
     clean redirect back to the sources page — not a 500 — and the single-use state must
     stay unconsumed so nothing else breaks if the browser replays the URL."""
     service = SourcesService(repository=_NeverConsumeRepo())  # type: ignore[arg-type]
+    session = MagicMock(commit=AsyncMock())
+    with patch.object(svc, "get_session", return_value=_AsyncCtx(session)):
+        redirect = await service.handle_callback(
+            "notion", state=_valid_state(), code=None, error="access_denied"
+        )
+    assert redirect == f"{settings.frontend_url}/settings/sources?error=notion"
+
+
+async def test_callback_consent_cancel_honors_stored_return_to() -> None:
+    """A decline mid-onboarding must land back on onboarding: the stored return_to is
+    read without consuming the state (peek, not consume)."""
+    service = SourcesService(  # type: ignore[arg-type]
+        repository=_NeverConsumeRepo(return_to="/onboarding")
+    )
+    session = MagicMock(commit=AsyncMock())
+    with patch.object(svc, "get_session", return_value=_AsyncCtx(session)):
+        redirect = await service.handle_callback(
+            "notion", state=_valid_state(), code=None, error="access_denied"
+        )
+    assert redirect == f"{settings.frontend_url}/onboarding?error=notion"
+
+
+class _NoDbRepo:
+    """Repo that fails the test if the callback touches the DB at all."""
+
+    async def consume_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("forged state must not reach the DB")
+
+    async def peek_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("forged state must not reach the DB")
+
+
+async def test_callback_consent_cancel_with_forged_state_uses_default() -> None:
+    """On the decline leg a forged/unsigned state gets the default destination without
+    any DB lookup — the peek is gated on the stateless signature check."""
+    service = SourcesService(repository=_NoDbRepo())  # type: ignore[arg-type]
     redirect = await service.handle_callback(
-        "notion", state=_valid_state(), code=None, error="access_denied"
+        "notion", state="garbage-no-signature", code=None, error="access_denied"
     )
     assert redirect == f"{settings.frontend_url}/settings/sources?error=notion"
 
@@ -149,6 +239,71 @@ async def test_start_authorization_rejects_unconfigured_provider(monkeypatch) ->
     auth = AuthContext(user_id="usr_1", workspace_id="wrk_1", role="admin")
     with pytest.raises(ConfigurationError):
         await SourcesService().start_authorization(auth, "slack")
+
+
+class _CaptureStateRepo:
+    """Repo that records the kwargs of the oauth_states INSERT."""
+
+    def __init__(self) -> None:
+        self.created: dict | None = None
+
+    async def create_oauth_state(self, session, **kwargs):  # noqa: ANN001, ANN003
+        self.created = kwargs
+
+
+async def _run_start_authorization(monkeypatch, return_to: str | None) -> dict:
+    """Drive start_authorization's happy path with a stub settings + fake repo."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        svc,
+        "settings",
+        SimpleNamespace(
+            notion_client_id="cid",
+            notion_client_secret="sec",
+            jwt_access_secret=settings.jwt_access_secret,
+            oauth_redirect_base_url="https://api.example.com",
+            oauth_state_ttl_seconds=600,
+        ),
+    )
+    repo = _CaptureStateRepo()
+    service = SourcesService(repository=repo)  # type: ignore[arg-type]
+    fake = MagicMock()
+    fake.authorize_url = MagicMock(return_value="https://provider/consent")
+    auth = AuthContext(user_id="usr_1", workspace_id="wrk_1", role="admin")
+    session = MagicMock(commit=AsyncMock())
+    with patch.object(svc, "get_integration", return_value=fake), patch.object(
+        svc, "get_session", return_value=_AsyncCtx(session)
+    ):
+        await service.start_authorization(auth, "notion", return_to=return_to)
+    assert repo.created is not None
+    return repo.created
+
+
+async def test_start_authorization_persists_allowlisted_return_to(monkeypatch) -> None:
+    created = await _run_start_authorization(monkeypatch, "/onboarding")
+    assert created["return_to"] == "/onboarding"
+
+
+@pytest.mark.parametrize(
+    "evil",
+    [
+        "https://evil.com/onboarding",
+        "//evil.com",
+        "/onboarding/../admin",
+        "/other",
+        "javascript:alert(1)",
+        "\\evil.com",
+        "",
+    ],
+)
+async def test_start_authorization_drops_non_allowlisted_return_to(
+    monkeypatch, evil: str
+) -> None:
+    """Open-redirect guard: anything off the exact allowlist is stored as NULL, so the
+    callback falls back to the default — never an external or unexpected destination."""
+    created = await _run_start_authorization(monkeypatch, evil)
+    assert created["return_to"] is None
 
 
 def test_every_integration_accepts_the_config_kwarg() -> None:
