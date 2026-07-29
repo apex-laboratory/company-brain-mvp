@@ -52,6 +52,9 @@ class AuthorizeStartRequest(_Request):
     # Required for subdomain-scoped providers (e.g. Zendesk: 'acme' -> acme.zendesk.com);
     # omitted for global-endpoint providers (Notion, GitHub).
     subdomain: str | None = None
+    # Frontend path the callback should redirect to (e.g. '/onboarding'). Checked
+    # against a server-side allowlist; non-allowlisted values fall back to the default.
+    return_to: str | None = None
 
 
 class ChannelSelection(_Request):

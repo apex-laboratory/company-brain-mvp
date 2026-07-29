@@ -344,7 +344,7 @@
           "sources"
         ],
         "summary": "Authorize",
-        "description": "Begin the OAuth flow: return the provider consent URL to redirect the user to.\n\nSubdomain-scoped providers (Zendesk) pass ``{\"subdomain\": \"acme\"}`` in the body.",
+        "description": "Begin the OAuth flow: return the provider consent URL to redirect the user to.\n\nSubdomain-scoped providers (Zendesk) pass ``{\"subdomain\": \"acme\"}`` in the body.\n``returnTo`` (optional, allowlisted) picks the frontend path the callback redirects\nto \u2014 e.g. ``/onboarding`` \u2014 instead of the default sources page.",
         "operationId": "authorize_api_v1_sources__provider__authorize_post",
         "security": [
           {
@@ -2631,6 +2631,17 @@
               }
             ],
             "title": "Subdomain"
+          },
+          "returnTo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Returnto"
           }
         },
         "additionalProperties": false,

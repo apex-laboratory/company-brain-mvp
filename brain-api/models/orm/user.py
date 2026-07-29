@@ -78,6 +78,8 @@ class OAuthState(Base):
     redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
     # subdomain-scoped providers only (zendesk -> {subdomain}.zendesk.com); NULL otherwise
     subdomain: Mapped[str | None] = mapped_column(Text)
+    # allowlisted frontend path the callback redirects to; NULL -> the default path
+    return_to: Mapped[str | None] = mapped_column(Text)
     state_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

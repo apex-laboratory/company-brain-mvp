@@ -42,9 +42,14 @@ async def authorize(
     """Begin the OAuth flow: return the provider consent URL to redirect the user to.
 
     Subdomain-scoped providers (Zendesk) pass ``{"subdomain": "acme"}`` in the body.
+    ``returnTo`` (optional, allowlisted) picks the frontend path the callback redirects
+    to — e.g. ``/onboarding`` — instead of the default sources page.
     """
     result = await _service.start_authorization(
-        auth, provider, subdomain=body.subdomain if body else None
+        auth,
+        provider,
+        subdomain=body.subdomain if body else None,
+        return_to=body.return_to if body else None,
     )
     return accepted(request, result.model_dump(by_alias=True))
 
