@@ -28,6 +28,7 @@ is isolated by Postgres Row-Level Security. Full product spec: `docs/PRD.md`.
 | — Query-driven live search (Feature 16) | per-source `search()` behind the seam in `app/pipeline/query_extraction.py` | ⏳ **remaining** — see PRD §16 Phase 5 note |
 | — Author id→name resolution (BRAIN_CHAT_RAG_PLAN decision F) | Slack/Zendesk evidence authors resolved to names at capture (`app/pipeline/expanders/user_directory.py`, in `brain_index_backfill`); Notion has no message author | ✅ evidence surface (the provenance-dossier `originatedBy` still shows the raw id — a secondary surface) |
 | 6 Agent demo | `agent-demo/demo.py` | ⏳ placeholder |
+| 7 Agent-run ingestion (self-improving loop) | Successful agent runs as an extraction source: `POST /runs` + `report_run` → success gate → task clustering → trajectory compression → procedure skill → **always** review. Plus run-history backfill (LangSmith/Langfuse/Claude Code) for cold start. | ⏳ **spec only** — PRD v1.4 §Features 29–34, Process 8, Phase 7. Nothing built. |
 
 The review UI and onboarding UI are the frontend repo's job, not ours.
 

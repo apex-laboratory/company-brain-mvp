@@ -1,8 +1,14 @@
 # Company Brain — Product Specification
 
-**Version:** 1.3  
+**Version:** 1.4  
 **Status:** Active  
-**Last updated:** July 2026
+**Last updated:** August 2026
+
+> **What's new in 1.4:** successful **agent runs** become an extraction source. A clean
+> trace (tool calls, file exploration, scripts, outcome) is distilled through the existing
+> pipeline into a reviewed, versioned **procedure skill** — closing a self-improving loop
+> (more agent usage → cheaper, more accurate agents). See Section 3 (Moat #4), Section 6
+> (Self-Improving Loop), Features 29–34, Process 8, and Phase 7.
 
 ---
 
@@ -76,7 +82,7 @@ This product is a direct answer to Y Combinator's official Request for Startups.
 | **Hyper** (YC P26) | Knowledge graph of timestamped subject-predicate-object facts with provenance and "supersedes" relations. | Closest in ambition, but auto-extracts facts with no human gate. Public criticism centers on fact hallucination, silent staleness, and no auditability — exactly what our review queue and contradiction detection solve. |
 | **Cerenovus** (YC W26) | Aggregates company files into a markdown knowledge graph; infers operational inefficiencies for executives. | Different buyer (executives, not agent engineers) and different output (analysis, not executable skills). |
 | **GBrain** (open source) | Typed knowledge graph, zero LLM calls per write, large OSS adoption. | Free floor for small tech-forward teams. We do not compete for that segment. |
-| **Mem0 / Zep / Letta** (Mem0: $24M Series A) | Agent memory infrastructure: vectors, temporal graphs, memory-OS runtimes. | They store what *an agent* experienced. We encode how *the company* decides. Complementary — an agent can use both. |
+| **Mem0 / Zep / Letta** (Mem0: $24M Series A) | Agent memory infrastructure: vectors, temporal graphs, memory-OS runtimes. | They store what *an agent* experienced — raw episodic recall, an increasingly commodity layer. We ingest the same raw material (agent run traces) but **distil it into human-reviewed, versioned procedures** the whole company's agents inherit. Storing episodes is not a moat; a reviewed procedure corpus is. Complementary — an agent can use both. |
 | **Glean / Dust / Onyx** | Enterprise search and chat-over-documents. | Solved problem, different product. We return executable skills, not search results (see Section 4). |
 
 ### Differentiation thesis
@@ -88,6 +94,7 @@ Every funded entrant in this category is retrieval-first: they make company data
 1. **The reviewed skill corpus compounds.** Every human approval makes the brain more trustworthy and harder to replicate. Retrieval indexes can be rebuilt overnight; a corpus of human-verified operational logic cannot.
 2. **Portability as a wedge against lock-in fear.** Skills are plain versioned markdown, exportable at any time via `GET /skills/export`. The loudest criticism of competitors is vendor lock-in on accumulated organizational intelligence. "Your brain is yours — export it anytime" is a differentiator we get for free and must never break.
 3. **The review workflow is the trust layer.** Regulated and risk-sensitive operations (the acknowledged gap in every competitor) require exactly the determinism and traceability our pipeline produces by construction.
+4. **Usage compounds into the corpus (the self-improving loop).** Every *successful* agent run is itself an extraction source: its trace is distilled into a reviewed procedure skill, so the next agent that hits the same task gets the shortest known path instead of re-deriving it. More agent usage → more reviewed procedures → cheaper and more accurate agents → more usage. This is the flywheel a retrieval index cannot bootstrap, because the raw material (traces of *this company's* agents succeeding at *this company's* tasks) only exists where the delivery layer already sits. Critically, what compounds is **reviewed procedures**, not raw agent memory — episodic memory stores are becoming a commodity (Mem0, Zep, Letta); a human-approved procedure corpus with version history and provenance is not.
 
 ### Launch wedge
 
@@ -109,6 +116,7 @@ These decisions reflect deliberate choices to keep the MVP shippable and the pro
 | Multi-tenant PII redaction                  | Required before external enterprise customers. Not for internal prototype.                                                                                      |
 | Fine-tuned content classifier               | The Groq fast classifier (`llama-3.3-70b-versatile`) via prompt handles classification at MVP scale.                                                            |
 | Salesforce, HubSpot, Gong connectors        | Post-MVP. Six sources are sufficient to prove the extraction pipeline.                                                                                         |
+| Raw agent memory / episodic recall store    | We ingest agent run traces (Features 29–34) but never serve them back verbatim. Storing "what the agent did last Tuesday" is the commodity memory-layer game (Mem0, Zep, Letta). We keep the *distilled, human-approved procedure* and expire the raw trace. Customers who want episodic recall pair us with a memory layer. |
 
 > **Note on Gmail:** a Gmail connector has since been implemented alongside Google Drive (`feature/kan-2-connectors`). It is treated as a seventh, optional source; onboarding UI support and authority-tier signals for it land in a later PRD revision.
 
@@ -143,18 +151,24 @@ Company Brain is organized into three layers. The onboarding sweep populates the
 │  SOURCES                                                        │
 │  Slack · Notion · Google Drive · GitHub · Jira · Zendesk        │
 │  Connected via MCP clients + webhook subscriptions              │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │
-              ┌─────────────┴──────────────┐
-              │ ONBOARDING SWEEP           │ EVENT-DRIVEN
-              │ (one-time, at signup)      │ (ongoing, webhook)
-              └─────────────┬──────────────┘
-                            │
-┌───────────────────────────▼─────────────────────────────────────┐
-│  EXTRACTION ENGINE                                              │
-│  Relevance gate → Context expansion → Two-pass extraction       │
-│  → Boundary classification → Contradiction detection           │
-│  → Confidence scoring → Skill writing + embedding              │
+│  ─────────────────────────────────────────────────────────────  │
+│  AGENT RUNS (successful traces: tool calls, files, scripts)     │
+│  Pushed by the agent harness via POST /runs  ─────────────┐     │
+└───────────────────────────┬───────────────────────────────┼─────┘
+                            │                               │
+              ┌─────────────┴──────────────┐                │
+              │ ONBOARDING SWEEP           │ EVENT-DRIVEN   │
+              │ (one-time, at signup)      │ (ongoing)      │
+              └─────────────┬──────────────┘                │
+                            │                               │
+┌───────────────────────────▼───────────────────────────────┼─────┐
+│  EXTRACTION ENGINE                                        │     │
+│  Relevance gate → Context expansion → Two-pass extraction │     │
+│  → Boundary classification → Contradiction detection      │     │
+│  → Confidence scoring → Skill writing + embedding         │     │
+│  ─────────────────────────────────────────────────────────┘     │
+│  Agent-run lane: success gate → trajectory compression →        │
+│  procedure extraction → (same boundary/contradiction/write)     │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────────┐
@@ -168,12 +182,37 @@ Company Brain is organized into three layers. The onboarding sweep populates the
 │  query_brain tool  ·  Query-driven extraction fallback         │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
-                     AI AGENTS
+                     AI AGENTS ──── successful run traces ────┐
+                            ▲                                 │
+                            └─────── self-improving loop ◄─────┘
 ```
 
 ### Living Currency
 
 Every source connected during onboarding also has a webhook subscription created for ongoing monitoring. When a relevant event occurs in a monitored Slack channel, Notion space, Google Drive folder, or Jira project, the extraction engine re-processes only the affected content. Updated skills publish within five minutes of the source event.
+
+### Self-Improving Loop
+
+The delivery layer is also an ingestion surface. When an agent finishes a task successfully, its harness pushes the full run trace — tool calls, file exploration, scripts written, commands run, final outcome — to `POST /runs`. Runs that clear the success gate (Feature 30) are distilled by the same extraction engine into **procedure skills**: ordered, executable steps with the dead ends removed, reviewed by a human before any agent can act on them.
+
+**The loop starts before signup.** Most teams arrive with months of agent history already sitting in LangSmith, Langfuse, an OTel store, or Claude Code transcripts. Run backfill (Feature 29a) imports that history through the same gate and distillation path, so a company gets its existing procedures on day one instead of waiting for three fresh runs of each task. It is the strongest cold-start asset the product has — see Section 13, Step 3.
+
+The loop:
+
+```
+[cold start] import historical runs → same gate → same distillation
+agent queries brain → executes task → run succeeds
+  → trace pushed to /runs → success gate → trajectory compression
+  → procedure extraction → review queue → human approves
+  → published procedure skill
+  → next agent asking the same thing gets the shortest known path
+     (fewer exploration steps, fewer tokens, fewer wrong turns)
+```
+
+Two properties keep this honest and distinguish it from an agent-memory store:
+
+- **Nothing is served unreviewed.** A distilled procedure enters the review queue like any other extraction; agent-run authority never auto-publishes (Feature 32). The trace is evidence, not truth.
+- **We keep the procedure, not the episode.** Raw traces are redacted at ingest and expire on a retention window (default 30 days). The durable artifact is the versioned skill with its provenance back to the run id. See Section 4.
 
 ### Hybrid Retrieval
 
@@ -252,6 +291,30 @@ Changed by: {system | human_authored | {reviewer_id}}
 
 Skills are stored and served as structured text, not as graph nodes or JSON blobs. Agents read and follow markdown instructions reliably. The exceptions table is the most important structural decision — it means most new policy extractions append a row to an existing skill's exception block rather than creating a new skill, which keeps the registry coherent and queryable.
 
+### Procedure skills (agent-run sourced)
+
+Skills distilled from successful agent runs (Features 29–34) use the **same format** — no second schema, no second retrieval path, no second review UI. The fields carry procedural meaning:
+
+| Field | Policy skill | Procedure skill (agent-run sourced) |
+| --- | --- | --- |
+| `Trigger` | when this policy applies | the task the run accomplished, in when-to-invoke framing ("when asked to rotate a leaked API key") |
+| `Base Logic` | IF/THEN decision rules | the **ordered minimal step sequence** that produced the outcome, with dead ends and retries removed |
+| `Exceptions` | policy overrides | failure branches actually encountered in the run — what went wrong, what recovered it |
+| `Actions` | actions the agent may take | the concrete tool calls / commands used, with their real parameter shapes |
+| `Source` | source URL + author | `agent_run:{run_id}` + the agent identity, task, and run count backing it |
+
+Two extra metadata lines appear on procedure skills:
+
+```markdown
+## Metadata
+
+Origin: agent_run
+Runs observed: {n}          # successful runs that agreed on this procedure
+Median steps saved: {n}     # steps in observed runs − steps in this procedure
+```
+
+The exceptions table is what makes this compound rather than accumulate: the second successful run of the same task that took a different branch appends a row instead of creating a rival skill.
+
 ---
 
 ## 9. Data Model
@@ -274,6 +337,12 @@ CREATE TABLE skills (
   source_ids        JSONB DEFAULT '[]',
   source_authority  VARCHAR(10),
   -- high | medium | low  (authority of the primary backing source)
+  origin            VARCHAR(20) DEFAULT 'source_extraction',
+  -- source_extraction | agent_run | human
+  -- agent_run → procedure skill distilled from successful run traces (Feature 32)
+  run_support       JSONB DEFAULT '{}',
+  -- {run_ids: [...], runs_observed: n, median_steps_observed: n, median_steps_published: n}
+  -- populated only when origin = agent_run
   conflict_flags    JSONB DEFAULT '[]',
   status            VARCHAR(20) DEFAULT 'draft',
   -- draft | pending_review | published | archived
@@ -321,7 +390,7 @@ CREATE TABLE review_queue (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   skill_id        UUID REFERENCES skills(id),
   review_type     VARCHAR(30),
-  -- update | exception | contradiction | new | query_driven | sweep_sourced
+  -- update | exception | contradiction | new | query_driven | sweep_sourced | procedure
   proposed_update JSONB,
   -- the full proposed skill body
   source_a        JSONB,
@@ -349,9 +418,10 @@ Log of every incoming webhook event. Used for sweep resume, audit trail, and deb
 CREATE TABLE source_events (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   source       VARCHAR(50),
-  -- slack | notion | google_drive | github | jira | zendesk
+  -- slack | notion | google_drive | github | jira | zendesk | agent_run
   event_type   VARCHAR(50),
-  -- message | page_update | file_update | pr_merged | issue_closed | ticket_resolved | etc
+  -- message | page_update | file_update | pr_merged | issue_closed | ticket_resolved
+  -- | run_succeeded (agent_run: source_id = agent_runs.id)  | etc
   source_id    VARCHAR(255),
   payload      JSONB,
   processed    BOOLEAN DEFAULT FALSE,
@@ -403,9 +473,65 @@ CREATE TABLE agent_interactions (
   -- semantic | query_driven | no_match
   agent_action       JSONB,
   human_override     BOOLEAN DEFAULT FALSE,
+  run_id             UUID REFERENCES agent_runs(id),
+  -- set when the querying agent later reported the run this query fed into;
+  -- links a published skill to the outcomes it produced (Feature 34)
   created_at         TIMESTAMP DEFAULT NOW()
 );
 ```
+
+### `agent_runs`
+
+Traces of agent executions pushed by customer agent harnesses (Feature 29). The raw trace is the *evidence* for a distilled procedure skill, not a durable product artifact: `trace` is redacted at ingest and nulled by the retention job (`agent_runs.retention_days`, default 30) once distillation has completed. `trace_digest` and the resulting skill outlive it.
+
+```sql
+CREATE TABLE agent_runs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  external_id     VARCHAR(255),
+  -- caller's own run id; UNIQUE (workspace_id, external_id) for idempotent re-push
+  agent_name      VARCHAR(255),
+  -- logical agent identity, e.g. "support-triage-agent" — the clustering key with task
+  task            TEXT,
+  -- the goal string the agent was given
+  task_embedding  VECTOR(1536),
+  -- used to cluster runs of the same task before distillation (Feature 31)
+  outcome         VARCHAR(20),
+  -- success | failure | partial | unknown  (caller-reported)
+  outcome_signals JSONB DEFAULT '{}',
+  -- {human_confirmed, tests_passed, ticket_resolved, no_override, error_free_tail}
+  eligible        BOOLEAN,
+  -- success gate verdict (Feature 30); NULL until gated
+  ineligible_reason VARCHAR(50),
+  -- not_successful | too_trivial | too_noisy | redaction_failed | duplicate_of_run | policy_excluded
+  trace           JSONB,
+  -- normalized step envelope (see Feature 29); NULLed by retention job
+  trace_digest    JSONB DEFAULT '{}',
+  -- {step_count, tool_histogram, tokens, cost_usd, duration_ms, files_touched} — survives retention
+  step_count      INTEGER,
+  tokens_used     INTEGER,
+  duration_ms     INTEGER,
+  harness         VARCHAR(50),
+  -- claude_code | agent_sdk | openai | langsmith | langfuse | otel | custom
+  -- (the adapter that normalized it)
+  ingest_mode     VARCHAR(10) DEFAULT 'live',
+  -- live | backfill  (backfill = imported run history, Feature 29a)
+  sweep_id        UUID,
+  -- set for backfilled runs; reuses the sweeps table for progress + resume
+  cluster_id      UUID,
+  -- set when the run joins a task cluster awaiting the distillation threshold
+  skill_id        UUID REFERENCES skills(id),
+  -- set once this run contributed to a distilled procedure skill
+  distilled_at    TIMESTAMP,
+  created_at      TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX ON agent_runs (agent_name, outcome);
+CREATE INDEX ON agent_runs (cluster_id) WHERE distilled_at IS NULL;
+CREATE INDEX ON agent_runs USING ivfflat (task_embedding vector_cosine_ops)
+  WITH (lists = 100);
+```
+
+> **Tenancy and privacy.** `agent_runs` carries `workspace_id` under RLS like every other table. Traces are the most sensitive payload in the system — they contain file contents, shell output, and customer records — so ingest runs a secret/PII redaction pass (Feature 29) *before* the row is written, and no endpoint ever returns a raw trace to an agent credential. Only the distilled skill is served.
 
 ### `source_connections`
 
@@ -487,12 +613,19 @@ tiers:
         signals: [channel=policy, channel=ops-decisions, channel=cs-escalations, channel=engineering-decisions]
       - type: zendesk
         signals: [tag=policy-exception, status=solved]
+      - type: agent_run
+        signals: [human_confirmed]
+        # a run a human explicitly confirmed as correct — the only agent-run
+        # signal that earns medium. Still never auto-publishes (see agent_runs below).
 
   low:
     weight: 0.4
     sources:
       - type: slack
         signals: []
+      - type: agent_run
+        signals: []
+        # machine-judged success (tests passed, ticket resolved, no override)
       - type: google_drive
         signals: [outside_designated_folder]
       - type: github
@@ -516,6 +649,36 @@ sweep:
   # high-tier designated sources (Notion policy pages, Drive policy folders)
   # surface first in the review queue with a lightweight one-click "verify"
   # flow instead of the full review card — see Onboarding Flow, Step 3
+
+agent_runs:
+  enabled: true
+  auto_publish: false
+  # NON-NEGOTIABLE. A distilled procedure always goes to the review queue,
+  # regardless of confidence. A machine-judged success is evidence, not approval.
+  success_gate:
+    require_outcome: success
+    require_no_override: true      # no human_override on the linked agent_interaction
+    require_error_free_tail: true  # last 3 steps contain no failed tool call
+    min_steps: 3                   # below this the run is trivial; nothing to learn
+    max_steps: 400                 # above this the trace is too noisy to compress reliably
+  distillation:
+    min_runs_per_cluster: 3
+    # distil only once N successful runs agree on a task — one lucky run is an anecdote.
+    # Overridden to 1 when the run is human_confirmed.
+    cluster_similarity: 0.85       # task-embedding cosine threshold for "same task"
+    max_distillations_per_day: 50  # cost ceiling per workspace
+  retention:
+    raw_trace_days: 30             # trace JSONB nulled after this; digest + skill persist
+    redact_secrets: true           # never storable: tokens, keys, auth headers, env values
+  backfill:                        # Feature 29a — importing pre-existing run history
+    enabled: true
+    lookback_days: 90              # older runs may reference decommissioned tools
+    infer_outcome_when_missing: true
+    # Groq classifies terminal state from the trace tail; "ambiguous" is excluded,
+    # never guessed into eligibility. Inferred runs are capped at low authority.
+    max_clusters_per_sweep: 200
+    cluster_order: frequency_desc  # biggest traffic first, then newest
+    import_batch_size: 10000       # NDJSON envelopes per POST /runs/import job
 ```
 
 ---
@@ -891,6 +1054,145 @@ Acceptance: zero hallucinated policy in agent output. Every decision traceable t
 
 ---
 
+### Layer 5 — Agent Run Ingestion (the self-improving loop)
+
+Successful agent runs are treated as a source like Slack or Notion: same relevance gating, same boundary classifier, same contradiction detection, same review queue, same versioned skills. Only the front of the pipeline differs — a trace is not prose, so it needs its own eligibility gate and its own compression pass before Sonnet can write a skill from it. Everything downstream of Feature 32 is the existing engine, unmodified.
+
+**Feature 29 — Run trace ingestion**
+`POST /runs` accepts a run trace from a customer's agent harness. Authenticated by `X-API-Key` with a new `runs:write` scope (write-only: a `runs:write` credential cannot read runs back). Rate-limited and size-capped (1 MB body, 400 steps; oversize → `413` with a pointer to the step cap in config).
+
+*Normalized trace envelope* — adapters translate each harness into this shape:
+
+```json
+{
+  "externalId": "run_8f21",
+  "agentName": "support-triage-agent",
+  "task": "Refund a customer whose order shipped damaged past the 30-day window",
+  "outcome": "success",
+  "outcomeSignals": { "humanConfirmed": true, "ticketResolved": true, "testsPassed": null },
+  "startedAt": "2026-08-01T10:04:00Z",
+  "steps": [
+    { "index": 0, "type": "tool_call",   "name": "query_brain", "args": {...}, "status": "ok", "latencyMs": 240 },
+    { "index": 1, "type": "file_read",   "name": "policies/refunds.md", "resultDigest": "…", "status": "ok" },
+    { "index": 2, "type": "shell",       "name": "python scripts/check_order.py 8821", "resultDigest": "…", "status": "error" },
+    { "index": 3, "type": "shell",       "name": "python scripts/check_order.py --env=prod 8821", "status": "ok" },
+    { "index": 4, "type": "tool_call",   "name": "approve_refund", "args": {...}, "status": "ok" },
+    { "index": 5, "type": "assistant_message", "text": "Refund approved under the damaged-in-transit exception." }
+  ]
+}
+```
+
+Adapters ship for: **Claude Agent SDK / Claude Code** transcripts, OpenAI-style tool-call message lists, LangSmith runs, and raw OTel spans. Custom harnesses post the envelope directly.
+
+Ingest does four things before the row is written, in order:
+
+1. **Redact** — secrets, tokens, auth headers, env values, and connection strings are stripped by pattern; step args and results over 2 KB are replaced by digests. Redaction failure marks the run `ineligible_reason = redaction_failed` and drops the trace body; it never stores the payload "just in case".
+2. **Normalize + digest** — compute `trace_digest` (step count, tool histogram, tokens, cost, duration, files touched), which survives the retention window after the raw trace is nulled.
+3. **Embed the task string** into `task_embedding` for clustering.
+4. **Enqueue** the success gate on the ARQ worker and return `202` immediately. Ingestion never blocks the agent's critical path — a run push must cost the caller a single fast round-trip.
+
+**Feature 29a — Run history backfill (cold start)**
+Agent runs do not begin when a company connects Brainite — most teams arrive with months of trace history sitting in an observability tool. That history is the single best cold-start asset in the product: it is *already* labeled by outcome, already scoped to this company's real tasks, and it costs the customer nothing to hand over.
+
+Backfill is the onboarding sweep's counterpart for traces, and reuses the same machinery: a `sweeps` row, the same rate limits and semaphore, the same review-queue destination.
+
+Import paths, in build order:
+
+| Where history lives | How we get it |
+| --- | --- |
+| **LangSmith / Langfuse** | API key + project id → paginate runs, filter to terminal successes, adapt to the step envelope |
+| **Claude Code / Agent SDK transcripts** | Customer uploads or points us at their transcript store (`.jsonl` session files); the same adapter as live ingest |
+| **OTel / trace store** | Span export (Jaeger/Tempo/Datadog) → spans with tool-call semantics adapted per convention |
+| **Customer's own logs** | Bulk `POST /runs/import` (NDJSON, up to 10k envelopes per job) for anything homegrown |
+
+Backfill differs from live ingest in four ways:
+
+1. **Outcome labels are weaker.** Historical runs often lack an explicit success flag. Where the harness recorded none, a Groq call classifies terminal state from the trace tail (`success | failure | ambiguous`); `ambiguous` is excluded — never guessed into eligibility. Backfilled runs carry `outcome_signals.inferred = true` and are capped at **low** authority even if a human later confirms the skill's *text*, because nobody confirmed the *run*.
+2. **Volume is lumpy.** A year of logs can be 100k runs. Clustering runs first and distilling **per cluster, highest-frequency first** keeps this bounded: the top 50 clusters usually cover the majority of an agent's traffic. `max_distillations_per_day` still applies; the sweep drains over days, newest clusters first (recent procedures beat stale ones).
+3. **Staleness is real.** A procedure from a run 11 months ago may reference a decommissioned tool. Backfill applies a lookback window (default 90 days, configurable) and stamps each procedure skill with the age of its newest supporting run; the review card shows it.
+4. **Everything lands in review.** Same rule as live: `origin = agent_run` never auto-publishes. The bulk review UI (Feature 23) clusters procedure cards the same way it clusters sweep items.
+
+*Value framing:* this is what makes the loop credible at signup rather than at month three — "point us at your LangSmith project and get back the twenty procedures your agents already know" is the demo. It is also the honest answer to why the corpus is a moat: a competitor can copy the pipeline, but not the customer's run history.
+
+**Feature 30 — Run success gate**
+The relevance gate's counterpart for traces. Cheap, deterministic checks first (no LLM):
+
+```
+eligible = outcome == success
+  AND no human_override on the linked agent_interaction
+  AND last 3 steps contain no failed tool call
+  AND min_steps <= step_count <= max_steps
+  AND not a duplicate trace_digest of an already-distilled run
+```
+
+Failing runs are kept with `eligible = false` and an `ineligible_reason` (they are still useful: failure rates per agent are a product signal, and Section 15 tracks them), but never distilled. Eligible runs join a **task cluster** — cosine ≥ 0.85 on `task_embedding` against undistilled runs of the same `agent_name`. Distillation fires when a cluster reaches `min_runs_per_cluster` (default 3), or immediately for a `humanConfirmed` run. **This threshold is the cost control**: one Sonnet distillation per *task*, not per run.
+
+*Why a threshold and not every run:* a single successful run is an anecdote — it may have succeeded through luck, a stale cache, or a path that only works for one customer. Three independent runs converging on the same spine is evidence of a procedure. It also caps spend: an agent running a task 500 times produces one distillation, not 500.
+
+**Feature 31 — Trajectory compression** (Groq fast classifier)
+Pass 1's counterpart for traces. Input: the cluster's traces. Output: the **causal spine** — the minimal ordered step sequence that actually produced the outcome.
+
+It drops:
+
+- Dead-end exploration (files read but never acted on; searches that returned nothing used)
+- Retries and their failed predecessors — *but records the failure→recovery pair as a candidate exception*
+- Steps present in only one run of the cluster (run-specific noise, not procedure)
+- Redundant re-reads of the same file, verbose intermediate reasoning
+
+It keeps: the steps common to all successful runs in the cluster, in order, plus the parameter shapes that mattered.
+
+Output: `{spine: [{step, tool, purpose, params}], divergences: [...], recoveries: [{failure, fix}], steps_observed_median, steps_in_spine}`
+
+**Feature 32 — Procedure extractor** (Claude Sonnet)
+Pass 2's counterpart. Takes the compressed spine plus the task string and writes a skill in the standard format (Section 8): `trigger` = when to run this task, `base_logic` = the ordered steps, `exceptions` = the recovery pairs and cluster divergences, `actions` = the tool signatures used.
+
+The prompt is explicitly constrained to prevent the failure mode that makes trace-learning dangerous — **generalizing from one company's accident into a stated rule**:
+
+- Describe only what the runs did; never invent a step no run performed
+- Do not state a policy the run merely *assumed* — if the run relied on a rule (a 30-day window), cite the skill or source it came from rather than restating it as fact
+- Mark any step whose necessity is uncertain as an open question for the reviewer
+- Emit `extraction_confidence` reflecting cluster agreement (unanimous spine → high; heavy divergence → low)
+
+From here the run rejoins the standard pipeline unchanged: **embed → boundary classifier → contradiction detector → confidence scorer → skill writer**. Two rules apply on top:
+
+- `origin = agent_run` forces review routing exactly as `sweep_sourced = true` does. **Agent-run skills never auto-publish**, at any confidence. This is the whole difference between us and an agent-memory store.
+- If the boundary classifier returns UPDATE against an *existing* skill and the run's procedure contradicts a **human-authored** or **high-authority** skill, the result is a contradiction card, not an update. A machine's success does not overturn a human's policy.
+
+**Feature 33 — Procedure review card**
+For `review_type = procedure`. Shows the reviewer what an approval actually means:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 🔁 Procedure learned: Rotate a leaked API key                │
+│    support-triage-agent · 4 successful runs · 2 human-confirmed│
+├──────────────────────────────────────────────────────────────┤
+│ PROPOSED PROCEDURE          │ WHAT THE RUNS ACTUALLY DID     │
+│ 1. Revoke key in dashboard  │ median 19 steps → 6 in spine   │
+│ 2. Rotate secret in vault   │ 3/4 runs identical             │
+│ 3. Redeploy affected svc    │ 1 run diverged at step 3 ▸     │
+│ 4. Post to #security-log    │                                 │
+├──────────────────────────────────────────────────────────────┤
+│ EXCEPTIONS FOUND            │ OPEN QUESTIONS                  │
+│ vault 429 → retry w/ backoff│ is step 4 required, or habit?   │
+├──────────────────────────────────────────────────────────────┤
+│ [Approve & publish] [Edit steps & publish] [Reject]          │
+│ [View run 8f21 ▸] (raw trace, dashboard JWT only)            │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Reject requires a reason (`wrong | unsafe | too_specific | already_covered | not_a_procedure`) — this is the labeled data that tunes the gate and the compression prompt.
+
+**Feature 34 — Run-outcome reinforcement**
+The positive mirror of Feature 15a. When a pushed run cites a `query_brain` interaction (`agent_interactions.run_id`) and the run succeeded following that skill:
+
+- Bump the skill's confidence by 0.02 (ceiling 1.0 for machine signal; only human review sets 1.0 outright)
+- Increment `run_support.runs_observed` and refresh `median_steps_observed`
+- If the run succeeded but *diverged* from the published procedure and did so in fewer steps, queue a `review_type = update` card — the agent found a shorter path and a human decides whether it's the new normal
+
+This is how the corpus gets *cheaper* over time, not just larger: the metric that matters is steps-to-completion on repeated tasks, tracked in Section 15.
+
+---
+
 ## 12. Processes
 
 ### Process 1 — Event-Driven Extraction
@@ -1128,6 +1430,69 @@ Reviewer opens item card
   → Reviewing top item → "Apply to similar" → approves entire cluster
 ```
 
+### Process 8 — Agent-Run Distillation
+
+The self-improving loop. Runs when an agent harness reports a completed run.
+
+```
+Agent finishes task
+  → POST /runs  (X-API-Key, scope runs:write)
+
+  [INGEST — synchronous, must stay fast]
+  → Adapter normalizes harness format → step envelope
+  → REDACT secrets/PII, digest oversize args   ← before any write
+  → Compute trace_digest, embed task string
+  → Insert agent_runs row, enqueue gate job
+  → Return 202 {runId}                          ← agent is unblocked here
+
+  [SUCCESS GATE — no LLM]
+  → outcome == success?  no override?  error-free tail?  step count in range?
+  → No  → eligible = false, ineligible_reason set. Stop. (still counted in metrics)
+  → Yes → continue
+
+  [CLUSTERING]
+  → cosine ≥ 0.85 vs undistilled runs of same agent_name → join/open cluster
+  → cluster size < min_runs_per_cluster AND not human_confirmed?
+      → wait for more runs. Stop.
+  → threshold met → continue
+
+  [TRAJECTORY COMPRESSION — Groq]
+  → Drop dead ends, retries, single-run noise
+  → Output: causal spine + recoveries + divergences
+
+  [PROCEDURE EXTRACTION — Sonnet]
+  → Input: spine + task + recoveries
+  → Output: {trigger, base_logic (ordered steps), exceptions, actions,
+             extraction_confidence, open_questions}
+
+  [EMBEDDING]  → same as Process 1
+
+  [BOUNDARY CLASSIFICATION — Groq]  → same as Process 1
+  UPDATE against human_authored or high-authority skill
+            → CONTRADICTION card (a run does not overturn a human)
+  UPDATE    → contradiction detector
+  EXCEPTION → append recovery/divergence row
+  DUPLICATE → link run to existing skill, bump run_support. Stop.
+  NEW       → contradiction detector
+
+  [CONTRADICTION DETECTOR]  → same as Process 1
+
+  [CONFIDENCE SCORER]
+  → final_confidence = extraction_confidence × authority_multiplier
+      (agent_run: low 0.65, or medium 0.85 when human_confirmed)
+
+  [SKILL WRITER]
+  → origin = agent_run ⇒ ALWAYS status = pending_review,
+     review_queue row with review_type = procedure. Never auto-publish.
+
+  → agent_runs.skill_id set, distilled_at = now() for every run in cluster
+  → raw trace nulled at retention window; digest + skill persist
+```
+
+**Backfill path (Feature 29a).** Historical runs enter at the ingest step with `ingest_mode = backfill` and a `sweep_id`, skip nothing else, and differ only in that (a) a missing outcome label is inferred by a Groq call on the trace tail with `ambiguous` excluded, (b) runs older than `lookback_days` are dropped, and (c) clusters are distilled in frequency order under the daily cap rather than as they arrive. Same gate, same compression, same review queue.
+
+**Reinforcement path (no distillation needed).** If the run cited a `query_brain` interaction and followed the returned skill successfully, Feature 34 runs instead of/alongside distillation: confidence bump, `run_support` refresh, and — if the run beat the published procedure on step count — an `update` review card proposing the shorter path.
+
 ---
 
 ## 13. Onboarding Flow
@@ -1147,10 +1512,16 @@ User sees a source connection screen. Each source has a Connect button that init
 │ ○ Jira           [Connect →]                           │
 │ ○ Zendesk        [Connect →]                           │
 ├─────────────────────────────────────────────────────────┤
+│ Already running agents? Import their history:           │
+│ ○ LangSmith  ○ Langfuse  ○ Claude Code  ○ Upload NDJSON │
+│   → distils procedures your agents already know         │
+├─────────────────────────────────────────────────────────┤
 │ Connected: 0 of 6                                       │
 │                        [Continue with connected →]      │
 └─────────────────────────────────────────────────────────┘
 ```
+
+Agent-run history (Feature 29a) is optional and independent of the six sources — a team with no Slack connected but a year of LangSmith traces still gets a useful brain.
 
 ### Step 2 — Configure What to Include
 
@@ -1223,6 +1594,7 @@ The review requirement creates a cold-start risk: dozens of queued items gated o
 
 1. **High-tier fast track** (`sweep.fast_track_high_tier`). Skills extracted from designated high-authority sources (Notion policy pages, Drive policy folders) surface at the top of the queue with a one-click "verify" flow — the reviewer confirms the source is current rather than reviewing full extraction detail. Combined with bulk cluster approval, this gets the first skills published fast without abandoning the human gate.
 2. **Time-to-first-value target:** **10 published skills within 1 hour of connecting sources.** This is a product acceptance metric (see Section 15), not just an aspiration — onboarding ordering, fast-track UX, and sweep priority all serve it.
+3. **Run-history backfill** (Feature 29a). For teams already running agents, importing existing traces is the fastest path to a populated brain: the runs are pre-labeled by outcome and already describe this company's real tasks. Distilling the top clusters by frequency yields a small set of high-traffic procedure cards — the highest-value review items a new customer can be handed on day one.
 
 ---
 
@@ -1238,6 +1610,12 @@ The review requirement creates a cold-start risk: dozens of queued items gated o
 | GET    | `/skills/{id}/versions`              | Full version history                                   |
 | GET    | `/skills/export`                     | Export all published skills as a markdown bundle (zip). The anti-lock-in guarantee — see Section 3, Moat. |
 | POST   | `/interactions/{id}/override`        | Report an agent override (Feature 15a feedback loop)   |
+| POST   | `/runs`                              | Push an agent run trace (scope `runs:write`, write-only). Returns `202 {runId}` — gating and distillation are async (Feature 29) |
+| POST   | `/runs/import`                       | Bulk import historical runs (NDJSON, ≤10k envelopes). Opens a `sweeps` row; JWT `admin` (Feature 29a) |
+| GET    | `/runs/import/{sweep_id}/status`     | Backfill progress: imported, gated, clustered, distilled, queued |
+| GET    | `/runs`                              | List runs with gate verdict, cluster, and distilled skill (JWT, `editor`+) |
+| GET    | `/runs/{id}`                         | Single run: digest, spine, and — for `admin` only — the redacted raw trace while it is still inside the retention window |
+| GET    | `/skills/{id}/runs`                  | Runs backing a procedure skill (its evidence trail)    |
 | POST   | `/skills`                            | Manual skill create (sets `changed_by=human_authored`) |
 | PATCH  | `/skills/{id}`                       | Manual skill edit                                      |
 | POST   | `/ingest/event`                      | Webhook receiver                                       |
@@ -1267,7 +1645,30 @@ async def query_brain(situation: str) -> dict:
     If no published skill matches, triggers a live extraction from
     connected sources and returns the result flagged as query_driven.
     """
+
+
+@mcp.tool()
+async def report_run(
+    task: str,
+    outcome: str,
+    steps: list[dict],
+    interaction_id: str | None = None,
+    external_id: str | None = None,
+) -> dict:
+    """
+    Report a completed agent run so the brain can learn from it.
+    Call this after finishing a task, whether it succeeded or not.
+
+    Successful runs are distilled into reviewed procedure skills; failed
+    runs are kept only as quality signal. Traces are redacted on ingest
+    and expire — the durable artifact is the reviewed skill.
+
+    Requires the runs:write scope. Returns {run_id, accepted} immediately;
+    gating and distillation happen asynchronously.
+    """
 ```
+
+`report_run` is the ergonomic path for agents already speaking MCP; `POST /runs` is the path for harnesses that ship traces out-of-band (batch exporters, OTel collectors). Both land on the same ingestion service.
 
 ---
 
@@ -1286,6 +1687,11 @@ async def query_brain(situation: str) -> dict:
 | Median review decision time | ≤ 30 seconds per item | Review UX |
 | Redis cache hit rate | ≥ 40% of `query_brain` calls | Delivery cost + latency |
 | Webhook-to-published latency | ≤ 5 minutes | Living currency promise |
+| **Steps-to-completion on repeat tasks** | ≥ 30% reduction after a procedure skill publishes, vs. the median of runs before it | **The self-improving loop working** — this is the number that proves "more usage → cheaper agents" |
+| Procedure approval rate | ≥ 60% of procedure cards approved (with or without edits) | Distillation precision — below this, the compression prompt or the cluster threshold is wrong |
+| Run distillation cost | ≤ 1 Sonnet call per task cluster, ≤ `max_distillations_per_day` per workspace | Cost discipline of the loop (a per-run distillation would bankrupt it) |
+| Backfill yield | ≥ 15 procedure cards from a 90-day trace import | Cold-start value of Feature 29a |
+| Agent run success rate | tracked per `agent_name`, no target | Product signal for the customer; ineligible runs are counted, not discarded |
 
 These are product acceptance metrics: phase acceptance criteria below reference them, and instrumentation for each must exist before the phase that depends on it closes.
 
@@ -1480,6 +1886,36 @@ Suggested phasing: ship **Zendesk-only** first (one provider, the wedge, real en
 
 ---
 
+### Phase 7 — Agent Run Ingestion (self-improving loop)
+
+**Scope:** successful agent runs become an extraction source. Live push + historical backfill, distilled into reviewed procedure skills. Depends on Phase 5 (delivery + `agent_interactions`) and Phase 4 (review queue); independent of the remaining Feature 16 live-source search.
+
+**Deliverables:**
+
+- `agent_runs` table + migration (`origin`, `run_support` on `skills`; `run_id` on `agent_interactions`; `procedure` review kind)
+- `POST /runs` + `report_run` MCP tool, scope `runs:write` (write-only credential), `202` async contract (Feature 29)
+- Redaction pass proven by test: secrets, tokens, auth headers, oversize args never reach the database
+- Harness adapters: Claude Agent SDK / Claude Code first, then OpenAI-style, LangSmith, OTel
+- Success gate + task clustering with the `min_runs_per_cluster` threshold (Feature 30)
+- Trajectory compression (Groq) + procedure extractor (Sonnet), rejoining the existing pipeline unchanged (Features 31–32)
+- Procedure review card + reject-reason taxonomy (Feature 33)
+- Run-outcome reinforcement, including the "agent found a shorter path" update card (Feature 34)
+- Run history backfill: `POST /runs/import` + status endpoint, lookback window, inferred-outcome classifier, frequency-ordered cluster draining (Feature 29a)
+- Retention job: raw traces nulled at `raw_trace_days`, digest + skill retained
+
+**Acceptance:**
+
+- Pushing 3 successful runs of the same task produces exactly **one** procedure card in the review queue — not three, not zero
+- A pushed run with `outcome = failure`, or with a human override on its interaction, produces **no** card and is recorded with an `ineligible_reason`
+- No agent-run-derived skill can reach `published` without a human approval, at any confidence — asserted by test, since this is the product's core claim
+- A procedure whose steps contradict a `human_authored` skill produces a contradiction card, not an update
+- Approving a procedure card publishes a skill whose `base_logic` is materially shorter than the median observed run (steps saved is displayed and non-zero)
+- Importing a 90-day trace export produces procedure cards ordered by task frequency, without exceeding `max_distillations_per_day`
+- After the retention window, the raw trace is gone but the published skill and its `run_support` provenance remain
+- Cross-tenant negative test: a `runs:write` key for workspace A cannot push to, or read runs from, workspace B
+
+---
+
 ## 17. Open Questions
 
 | Question                                                                                                                                                                                                                         | Priority | Needed by                                 |
@@ -1491,3 +1927,8 @@ Suggested phasing: ship **Zendesk-only** first (one provider, the wedge, real en
 | When a human writes a correction (`changed_by = human_authored`), should the original conflicting source URLs still be stored in `source_ids` for traceability, or replaced by the human correction as the sole source?          | Low      | Before Phase 4                            |
 | Should the `query_brain` tool accept an optional `entities` dict (customer tier, order value, etc.) that could be used to filter exception conditions? Adds precision but increases integration complexity for agent developers. | Low      | Before Phase 5                            |
 | FalkorDB as a lighter-weight future alternative to Neo4j if graph traversal is added post-MVP — worth evaluating now to avoid future migration pain?                                                                             | Low      | Post-MVP                                  |
+| Is `min_runs_per_cluster = 3` the right threshold? Too low and we distil luck; too high and rare-but-valuable procedures (incident runbooks, run a handful of times a year) never surface. Possibly frequency-dependent.        | High     | Before Phase 7                            |
+| Do customers accept pushing full run traces to us at all? Traces contain file contents and customer records. If redaction-at-ingest is not enough for security review, the fallback is **client-side distillation** — the harness compresses locally and pushes only the spine. Materially different integration; decide before building adapters. | High | Before Phase 7 |
+| Who is the reviewer for a procedure card? Policy cards go to a CS/ops lead; a "rotate the API key" procedure needs an engineer. Does the review queue need per-card routing by skill domain?                                    | Medium   | Before Phase 7                            |
+| Should a procedure skill record *which model* produced the run? A trace from a frontier model may encode steps a smaller model can't follow, making the procedure unusable for the agent that queries it.                       | Medium   | Before Phase 7                            |
+| Pricing implication of the loop: run ingestion costs us LLM spend per cluster but makes the customer's agents cheaper. Is backfill a paid onboarding accelerator, or free because it drives the moat?                          | Medium   | With pricing model                        |
