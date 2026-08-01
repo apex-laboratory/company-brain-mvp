@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")  # runtime is 3.11 — PEP 695 syntax not available yet
 
-_MAX_RETRY_AFTER = 30.0  # cap a single honored retry-after sleep (seconds)
+_MAX_RETRY_AFTER = 60.0  # cap a single honored retry-after sleep (seconds)
 
 
 class LLMExhaustedError(Exception):

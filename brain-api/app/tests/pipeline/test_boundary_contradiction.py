@@ -74,7 +74,7 @@ async def test_unparseable_label_falls_back_to_new() -> None:
 
 async def test_contradiction_true() -> None:
     with patch.object(
-        contradiction_detector, "sonnet_json",
+        contradiction_detector, "groq_json",
         AsyncMock(return_value=({"has_contradiction": True, "reason": "conflict"}, _USAGE)),
     ):
         has, usage = await contradiction_detector.detect_contradiction(_draft(), _skill(0.9))
@@ -84,7 +84,7 @@ async def test_contradiction_true() -> None:
 
 async def test_contradiction_false() -> None:
     with patch.object(
-        contradiction_detector, "sonnet_json",
+        contradiction_detector, "groq_json",
         AsyncMock(return_value=({"has_contradiction": False}, _USAGE)),
     ):
         has, _ = await contradiction_detector.detect_contradiction(_draft(), _skill(0.9))

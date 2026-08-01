@@ -93,7 +93,7 @@ async def test_skill_extractor_builds_draft() -> None:
         "extraction_confidence": 0.8,
         "uncertainty_notes": "",
     }
-    with patch.object(skill_extractor, "sonnet_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(skill_extractor, "groq_json", AsyncMock(return_value=(payload, _USAGE))):
         draft, usage = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
     assert draft.name == "Refund window"
     assert draft.extraction_confidence == 0.8
@@ -103,7 +103,7 @@ async def test_skill_extractor_builds_draft() -> None:
 
 async def test_skill_extractor_clamps_confidence() -> None:
     payload = {"trigger": "t", "base_logic": "b", "extraction_confidence": 5.0}
-    with patch.object(skill_extractor, "sonnet_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(skill_extractor, "groq_json", AsyncMock(return_value=(payload, _USAGE))):
         draft, _ = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
     assert draft.extraction_confidence == 1.0
     assert draft.name == "t"  # falls back to trigger prefix when name missing
@@ -112,7 +112,7 @@ async def test_skill_extractor_clamps_confidence() -> None:
 async def test_skill_extractor_rejects_empty_skill() -> None:
     payload = {"trigger": "", "base_logic": "", "extraction_confidence": 0.9}
     with (
-        patch.object(skill_extractor, "sonnet_json", AsyncMock(return_value=(payload, _USAGE))),
+        patch.object(skill_extractor, "groq_json", AsyncMock(return_value=(payload, _USAGE))),
         pytest.raises(ValueError, match="no trigger/base_logic"),
     ):
         await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)

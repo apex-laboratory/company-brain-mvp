@@ -74,7 +74,7 @@ async def test_retry_after_header_honored_and_capped() -> None:
     call = AsyncMock(side_effect=[err, "ok"])
     with patch("app.pipeline.llm.retry.asyncio.sleep") as sleep:
         assert await with_retries(call, stage="t", attempts=3) == "ok"
-    assert sleep.await_args_list[0].args[0] == 30.0  # capped at _MAX_RETRY_AFTER
+    assert sleep.await_args_list[0].args[0] == 60.0  # capped at _MAX_RETRY_AFTER
 
 
 async def test_permanent_error_raises_immediately() -> None:

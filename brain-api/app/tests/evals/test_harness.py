@@ -96,7 +96,7 @@ def _fake_sonnet(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake(system: str, user: str, *, stage: str, max_tokens: int = 0):
         return {"has_contradiction": "CONTRA" in user}, _USAGE
 
-    monkeypatch.setattr(cd, "sonnet_json", fake)
+    monkeypatch.setattr(cd, "groq_json", fake)
 
 
 async def test_relevance_precision_recall_math(
@@ -147,7 +147,7 @@ async def test_stage_error_counts_as_miss_not_crash(
     async def exploding(system: str, user: str, *, stage: str, max_tokens: int = 0):
         raise RuntimeError("model emitted garbage")
 
-    monkeypatch.setattr(cd, "sonnet_json", exploding)
+    monkeypatch.setattr(cd, "groq_json", exploding)
     report = await run_contradiction(dataset_dir)
     assert all(r.error for r in report.items)
     assert report.metrics["recall"] == 0.0

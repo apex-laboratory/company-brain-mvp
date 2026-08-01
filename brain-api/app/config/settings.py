@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     groq_model: str = "llama-3.3-70b-versatile"
     anthropic_model: str = "claude-sonnet-5"
     embedding_model: str = "text-embedding-3-small"
-    llm_max_attempts: int = 3  # per-call attempts inside the pipeline retry wrapper
+    llm_max_attempts: int = 5  # per-call attempts inside the pipeline retry wrapper
 
     # ── brain chat (delivery — BACKEND_ASKS §7) ───────────────────────────────
     # Global kill-switch for the "Ask the brain" chat surface. Ops can hard-disable
