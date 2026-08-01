@@ -12,13 +12,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from fastapi import Response
 from jose import jwt
 from pydantic import ValidationError
 from starlette.requests import Request
 
 from app.config.settings import settings
+from app.modules.auth import router as auth_router
 from app.modules.auth.repository import AuthRepository, MembershipRecord, RefreshTokenRow
-from app.modules.auth.router import _refresh_failed, _token_from
+from app.modules.auth.router import _refresh_failed, _set_refresh_cookie, _token_from
 from app.modules.auth.schemas import LogoutRequest, RefreshRequest
 from app.modules.auth.service import AuthService
 from app.shared.errors.app_error import UnauthorizedError
@@ -367,3 +369,36 @@ def test_refresh_failed_returns_401_and_clears_cookie() -> None:
     joined = " ".join(set_cookies).lower()
     assert "refresh_token=" in joined
     assert "max-age=0" in joined  # cookie deletion
+
+
+# ── refresh cookie: Secure must be environment-gated ──────────────────────────
+# A `Secure` cookie is silently refused by the browser on a non-HTTPS origin —
+# it never gets stored. Dev runs over plain http://localhost, so hardcoding
+# `secure=True` meant the refresh cookie never actually landed in the browser's
+# jar: sessions looked fine (the access token lives in memory) until the next
+# full-page navigation, e.g. the OAuth-connect redirect round trip, wiped that
+# in-memory token and fell back to a cookie that was never there.
+def _set_cookie_header(response: Response) -> str:
+    return next(v.decode() for k, v in response.raw_headers if k == b"set-cookie")
+
+
+def test_set_refresh_cookie_omits_secure_outside_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(auth_router, "_REFRESH_COOKIE_SECURE", False)
+    response = Response()
+
+    _set_refresh_cookie(response, "raw-token")
+
+    assert "secure" not in _set_cookie_header(response).lower()
+
+
+def test_set_refresh_cookie_sets_secure_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(auth_router, "_REFRESH_COOKIE_SECURE", True)
+    response = Response()
+
+    _set_refresh_cookie(response, "raw-token")
+
+    assert "secure" in _set_cookie_header(response).lower()

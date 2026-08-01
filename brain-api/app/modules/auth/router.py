@@ -70,11 +70,17 @@ def _optional_auth(
 # *different registrable domains* needs `none` (with Secure) or the browser drops
 # the cookie on the cross-site refresh call. If FE and BE are same-site
 # subdomains in prod, `strict` still works — override via topology if so.
+#
+# Secure is environment-driven too: dev runs over plain http://localhost, and a
+# `Secure` cookie is silently refused by the browser on a non-HTTPS origin — it
+# never gets stored, so any full-page reload (e.g. the OAuth-connect redirect
+# round trip) loses the session with no error until the dead refresh call 401s.
 _REFRESH_COOKIE = "refresh_token"
 _REFRESH_COOKIE_PATH = "/api/v1/auth"
 _REFRESH_COOKIE_SAMESITE: Literal["strict", "none"] = (
     "none" if settings.environment == "production" else "strict"
 )
+_REFRESH_COOKIE_SECURE: bool = settings.environment == "production"
 
 
 def get_auth_service() -> AuthService:
@@ -102,7 +108,7 @@ def _set_refresh_cookie(response: Response, raw_token: str) -> None:
         raw_token,
         max_age=settings.refresh_token_ttl_seconds,
         httponly=True,
-        secure=True,
+        secure=_REFRESH_COOKIE_SECURE,
         samesite=_REFRESH_COOKIE_SAMESITE,
         path=_REFRESH_COOKIE_PATH,
     )
@@ -131,7 +137,9 @@ async def signup(
         user_agent=request.headers.get("user-agent"),
         ip=_client_ip(request),
     )
-    return created(request, session.model_dump(by_alias=True))
+    response = created(request, session.model_dump(by_alias=True))
+    _set_refresh_cookie(response, session.refresh_token)
+    return response
 
 
 @router.post("/signin")
@@ -146,7 +154,9 @@ async def signin(
         user_agent=request.headers.get("user-agent"),
         ip=_client_ip(request),
     )
-    return ok(request, session.model_dump(by_alias=True))
+    response = ok(request, session.model_dump(by_alias=True))
+    _set_refresh_cookie(response, session.refresh_token)
+    return response
 
 
 @router.get("/me")
@@ -287,4 +297,6 @@ async def oauth_callback(
         user_agent=request.headers.get("user-agent"),
         ip=_client_ip(request),
     )
-    return ok(request, session_out.model_dump(by_alias=True))
+    response = ok(request, session_out.model_dump(by_alias=True))
+    _set_refresh_cookie(response, session_out.refresh_token)
+    return response
