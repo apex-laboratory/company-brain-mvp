@@ -3,7 +3,7 @@
 Prices are the public list prices at the time of writing; they exist to make
 per-event/per-sweep cost rollups *comparable*, not to reconcile invoices.
 Unknown models cost 0.0 and log once so a model bump can't silently break the
-pipeline — update the table when changing ``settings.groq_model`` /
+pipeline — update the table when changing ``settings.gemini_model`` /
 ``anthropic_model`` / ``embedding_model``.
 """
 from __future__ import annotations
@@ -13,8 +13,13 @@ import logging
 log = logging.getLogger(__name__)
 
 # model → (input $/Mtok, output $/Mtok)
+# "gemini-flash-lite-latest" is an alias Google resolves to whatever its current
+# cheapest flash-lite model is — priced here at that tier's rate as an
+# approximation, since the alias can silently repoint to a different-priced
+# model over time (acceptable: cost telemetry is for comparability, not
+# invoice reconciliation — see module docstring).
 _PRICES: dict[str, tuple[float, float]] = {
-    "llama-3.3-70b-versatile": (0.59, 0.79),
+    "gemini-flash-lite-latest": (0.10, 0.40),
     "claude-sonnet-5": (3.00, 15.00),
     "text-embedding-3-small": (0.02, 0.0),
 }
@@ -38,7 +43,7 @@ def ensure_priced(*models: str) -> None:
     """Raise if any configured model lacks a price entry.
 
     The price table is keyed by hardcoded model names while the model names are
-    env-configurable (``settings.groq_model`` / ``anthropic_model`` /
+    env-configurable (``settings.gemini_model`` / ``anthropic_model`` /
     ``embedding_model``). Without this check, rotating a model via env silently
     makes every cost rollup read $0 while real spend continues. Call it at worker
     startup so a model bump fails loudly at boot instead of corrupting telemetry."""

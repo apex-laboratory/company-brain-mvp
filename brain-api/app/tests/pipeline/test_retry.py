@@ -19,9 +19,9 @@ class _FakeSDKError(Exception):
             self.response = type("R", (), {"headers": headers})()
 
 
-# Pretend the fake error comes from the groq SDK so connection-style errors
+# Pretend the fake error comes from the Gemini SDK so connection-style errors
 # (no status_code) classify as transient.
-_FakeSDKError.__module__ = "groq"
+_FakeSDKError.__module__ = "google.genai"
 
 
 # ── classification ───────────────────────────────────────────────────────────
@@ -70,11 +70,11 @@ async def test_transient_then_success_backs_off_exponentially() -> None:
 
 
 async def test_retry_after_header_honored_and_capped() -> None:
-    err = _FakeSDKError(status_code=429, headers={"retry-after": "120"})
+    err = _FakeSDKError(status_code=429, headers={"retry-after": "500"})
     call = AsyncMock(side_effect=[err, "ok"])
     with patch("app.pipeline.llm.retry.asyncio.sleep") as sleep:
         assert await with_retries(call, stage="t", attempts=3) == "ok"
-    assert sleep.await_args_list[0].args[0] == 60.0  # capped at _MAX_RETRY_AFTER
+    assert sleep.await_args_list[0].args[0] == 400.0  # capped at _MAX_RETRY_AFTER
 
 
 async def test_permanent_error_raises_immediately() -> None:

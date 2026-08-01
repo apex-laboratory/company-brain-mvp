@@ -2,10 +2,11 @@
 
 Modeled on ``app/integrations/google_common.api_request``: exponential backoff,
 ``retry-after`` honored when the SDK surfaces it, transient errors only. The
-Groq/Anthropic/OpenAI SDKs share the same exception taxonomy (all wrap httpx):
+Anthropic/OpenAI SDKs expose ``.status_code``; the Gemini SDK (``google-genai``)
+exposes ``.code`` instead — ``_status_code`` checks both:
 
-* transient → retry: ``RateLimitError`` (429), ``APIStatusError`` >= 500,
-  ``APIConnectionError`` / ``APITimeoutError``
+* transient → retry: ``RateLimitError``/``ClientError`` (429), ``ServerError``/
+  ``APIStatusError`` >= 500, connection-level failures
 * permanent → raise immediately: 4xx status errors (bad request, auth, ...)
 
 Exhausted retries raise :class:`LLMExhaustedError`; the ARQ task translates that
@@ -26,7 +27,7 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")  # runtime is 3.11 — PEP 695 syntax not available yet
 
-_MAX_RETRY_AFTER = 60.0  # cap a single honored retry-after sleep (seconds)
+_MAX_RETRY_AFTER = 400.0  # cap a single honored retry-after sleep (seconds)
 
 
 class LLMExhaustedError(Exception):
@@ -34,8 +35,12 @@ class LLMExhaustedError(Exception):
 
 
 def _status_code(exc: Exception) -> int | None:
-    """Best-effort status code across the three SDKs (all expose .status_code)."""
+    """Best-effort status code across the three SDKs — Anthropic/OpenAI expose
+    ``.status_code``, the Gemini SDK's ``APIError`` exposes ``.code`` instead."""
     code = getattr(exc, "status_code", None)
+    if isinstance(code, int):
+        return code
+    code = getattr(exc, "code", None)
     return code if isinstance(code, int) else None
 
 
@@ -63,7 +68,7 @@ def is_transient(exc: Exception) -> bool:
     # a status_code). Plain programming errors (TypeError, KeyError...) are not
     # SDK errors and must not be retried — detect SDK-ness by module origin.
     module = type(exc).__module__ or ""
-    return module.startswith(("groq", "anthropic", "openai", "httpx"))
+    return module.startswith(("google.genai", "anthropic", "openai", "httpx", "requests"))
 
 
 async def with_retries(  # noqa: UP047 — venv runs Python 3.11 (no PEP 695)

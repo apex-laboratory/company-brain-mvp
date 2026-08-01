@@ -1,17 +1,17 @@
-"""Skill extractor (Groq, Pass 2): decision moments + context → SkillDraft.
+"""Skill extractor (Gemini, Pass 2): decision moments + context → SkillDraft.
 
 The prompt mandates expressing uncertainty over hallucinating and prioritizing
 higher-authority statements on conflict. The model's self-reported
 ``extraction_confidence`` is clamped to [0, 1] before the confidence scorer
 multiplies it by the authority tier.
 
-Temporarily on Groq instead of Sonnet (ANTHROPIC_API_KEY unavailable) — swap
+Temporarily on Gemini instead of Sonnet (ANTHROPIC_API_KEY unavailable) — swap
 back to ``sonnet_json`` once the Anthropic key is restored.
 """
 from __future__ import annotations
 
 from app.pipeline.authority import AuthorityAnnotation
-from app.pipeline.llm.clients import groq_json
+from app.pipeline.llm.clients import gemini_json
 from app.pipeline.prompts import skill_extractor as prompts
 from app.pipeline.types import DecisionMoment, SkillDraft, StageUsage
 
@@ -38,7 +38,7 @@ async def extract_skill(
 ) -> tuple[SkillDraft, StageUsage]:
     """Return ``(draft, usage)``. Raises ``ValueError`` if the model returned no
     usable skill (missing trigger/base_logic) — the caller discards the event."""
-    parsed, usage = await groq_json(
+    parsed, usage = await gemini_json(
         prompts.SYSTEM,
         prompts.user_prompt(
             _decisions_block(decisions), context, authority.tier, authority.weight

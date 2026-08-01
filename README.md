@@ -9,7 +9,7 @@ Multi-tenant SaaS. Each company gets isolated data via Postgres Row Level Securi
 ```
 Sources (Slack / Jira / GitHub / Notion / Zendesk)
   → Webhook ingest + sweep pipeline
-  → Groq 6-step extraction → skills
+  → Gemini 6-step extraction → skills
   → PostgreSQL (Supabase) + pgvector
   → FastMCP SSE → AI agents
 ```
@@ -71,7 +71,7 @@ SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_JWT_SECRET=
 ENCRYPTION_KEY=          # used by pgcrypto for OAuth token encryption
-GROQ_API_KEY=
+GEMINI_API_KEY=
 ANTHROPIC_API_KEY=
 REDIS_URL=               # required by the worker (arq job queue)
 ```

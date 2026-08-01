@@ -29,7 +29,7 @@ async def startup(ctx: dict) -> None:
     model rotation can't silently zero the pipeline's cost telemetry."""
     from app.pipeline.llm.pricing import ensure_priced
 
-    ensure_priced(settings.groq_model, settings.anthropic_model, settings.embedding_model)
+    ensure_priced(settings.gemini_model, settings.anthropic_model, settings.embedding_model)
 
 
 async def shutdown(ctx: dict) -> None:
@@ -42,12 +42,16 @@ class WorkerSettings:
     # instead of the default 10-minute job_timeout; a timeout kill is resumed by
     # the ARQ retry (completed sources are skipped).
     # extract_event dead-letters internally (outcome='failed') and never re-raises,
-    # so ARQ's retry_jobs won't stack on top of the pipeline's own LLM retries.
+    # so ARQ's retry_jobs won't stack on top of the pipeline's own LLM retries. Its
+    # own retry budget (llm_max_attempts, each waiting up to _MAX_RETRY_AFTER on a
+    # 429) can now exceed the default 10-minute job_timeout, so it gets 30 minutes
+    # like the other LLM-heavy jobs — a timeout kill here WOULD stack an ARQ retry
+    # on top of an in-flight pipeline retry, so the wider budget matters.
     functions = [
         source_sync,
         webhook_ingest,
         watch_register,
-        extract_event,
+        func(extract_event, timeout=1800),
         func(onboarding_sweep, timeout=3600),
         # A large historical backfill can take a while to extract; give it an hour
         # like the sweep itself. A timeout kill resumes on retry (queued events only).

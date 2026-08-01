@@ -1,4 +1,4 @@
-"""Boundary classifier prompt (Groq): how does this draft relate to the closest
+"""Boundary classifier prompt (Gemini): how does this draft relate to the closest
 existing skill? Only runs when vector similarity already cleared the threshold."""
 
 SYSTEM = """\

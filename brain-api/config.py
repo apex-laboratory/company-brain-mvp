@@ -6,8 +6,8 @@ class Settings(BaseSettings):
     redis_url: str
     anthropic_api_key: str
     openai_api_key: str
-    groq_api_key: str
-    groq_model: str = "llama-3.3-70b-versatile"
+    gemini_api_key: str
+    gemini_model: str = "gemini-flash-lite-latest"
     semaphore_limit: int = 5
     sweep_rate_per_minute: int = 10
     source_authority_path: str = "source_authority.yaml"

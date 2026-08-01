@@ -6,9 +6,9 @@ import pytest
 from app.pipeline.llm.pricing import cost_usd
 
 
-def test_groq_pricing_math() -> None:
-    # 1M in @ $0.59 + 1M out @ $0.79
-    assert cost_usd("llama-3.3-70b-versatile", 1_000_000, 1_000_000) == pytest.approx(1.38)
+def test_gemini_pricing_math() -> None:
+    # 1M in @ $0.10 + 1M out @ $0.40
+    assert cost_usd("gemini-flash-lite-latest", 1_000_000, 1_000_000) == pytest.approx(0.50)
 
 
 def test_sonnet_pricing_math() -> None:

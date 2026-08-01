@@ -24,31 +24,31 @@ def _skill(sim: float, name: str = "Refund policy") -> SimilarSkill:
 # ── boundary: no-LLM NEW below threshold ──────────────────────────────────────
 
 async def test_no_similar_skills_is_new_without_llm() -> None:
-    groq = AsyncMock()
-    with patch.object(boundary_classifier, "groq_json", groq):
+    gemini = AsyncMock()
+    with patch.object(boundary_classifier, "gemini_json", gemini):
         result, usage = await boundary_classifier.classify_boundary(_draft(), [])
-    groq.assert_not_awaited()
+    gemini.assert_not_awaited()
     assert result.classification == "NEW"
     assert result.matched_skill_id is None
     assert usage is None
 
 
 async def test_similarity_at_or_below_threshold_is_new_without_llm() -> None:
-    groq = AsyncMock()
-    with patch.object(boundary_classifier, "groq_json", groq):
+    gemini = AsyncMock()
+    with patch.object(boundary_classifier, "gemini_json", gemini):
         result, usage = await boundary_classifier.classify_boundary(
             _draft(), [_skill(SIMILARITY_THRESHOLD)]
         )
-    groq.assert_not_awaited()
+    gemini.assert_not_awaited()
     assert result.classification == "NEW"
     assert usage is None
 
 
 # ── boundary: LLM path above threshold ────────────────────────────────────────
 
-async def test_above_threshold_calls_groq_and_returns_label() -> None:
+async def test_above_threshold_calls_gemini_and_returns_label() -> None:
     with patch.object(
-        boundary_classifier, "groq_json",
+        boundary_classifier, "gemini_json",
         AsyncMock(return_value=({"classification": "UPDATE", "reason": "newer"}, _USAGE)),
     ):
         result, usage = await boundary_classifier.classify_boundary(
@@ -62,7 +62,7 @@ async def test_above_threshold_calls_groq_and_returns_label() -> None:
 
 async def test_unparseable_label_falls_back_to_new() -> None:
     with patch.object(
-        boundary_classifier, "groq_json",
+        boundary_classifier, "gemini_json",
         AsyncMock(return_value=({"classification": "???"}, _USAGE)),
     ):
         result, _ = await boundary_classifier.classify_boundary(_draft(), [_skill(0.95)])
@@ -74,7 +74,7 @@ async def test_unparseable_label_falls_back_to_new() -> None:
 
 async def test_contradiction_true() -> None:
     with patch.object(
-        contradiction_detector, "groq_json",
+        contradiction_detector, "gemini_json",
         AsyncMock(return_value=({"has_contradiction": True, "reason": "conflict"}, _USAGE)),
     ):
         has, usage = await contradiction_detector.detect_contradiction(_draft(), _skill(0.9))
@@ -84,7 +84,7 @@ async def test_contradiction_true() -> None:
 
 async def test_contradiction_false() -> None:
     with patch.object(
-        contradiction_detector, "groq_json",
+        contradiction_detector, "gemini_json",
         AsyncMock(return_value=({"has_contradiction": False}, _USAGE)),
     ):
         has, _ = await contradiction_detector.detect_contradiction(_draft(), _skill(0.9))

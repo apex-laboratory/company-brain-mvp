@@ -3,9 +3,9 @@
 These tests exercise the Phase 3 acceptance criteria end-to-end — real
 migrations, real repositories, real orchestrator/stage/retry/JSON-parse code,
 real pgvector similarity search, real reviews API. Only the outermost provider
-transports are faked (the SDK call in ``clients._groq_call``/``_sonnet_call``
-and the OpenAI client inside the embedder), so every line of pipeline code
-above the network runs for real.
+transports are faked (the SDK call in ``clients._gemini_call`` and the OpenAI
+client inside the embedder), so every line of pipeline code above the network
+runs for real.
 
 Run explicitly against a throwaway database (never production!):
 
@@ -120,13 +120,18 @@ class TransientBlip(Exception):
     response = None
 
 
-def _fake_groq_call(state: dict):
+def _fake_gemini_call(state: dict):
+    """All five pipeline stages route through Gemini now, so one fake transport
+    dispatches on system prompt across relevance/decision/boundary/extractor/
+    contradiction — mirroring ``clients._gemini_call``'s single call site."""
     from app.pipeline.prompts import boundary_classifier as bc_p
+    from app.pipeline.prompts import contradiction_detector as cd_p
     from app.pipeline.prompts import decision_identifier as di_p
     from app.pipeline.prompts import relevance_gate as rg_p
+    from app.pipeline.prompts import skill_extractor as se_p
 
     async def call(system: str, user: str, *, max_tokens: int):
-        state["groq_calls"] = state.get("groq_calls", 0) + 1
+        state["gemini_calls"] = state.get("gemini_calls", 0) + 1
         if system == rg_p.SYSTEM:
             if "FLAKY" in user and not state.get("flaky_tripped"):
                 state["flaky_tripped"] = True
@@ -152,17 +157,6 @@ def _fake_groq_call(state: dict):
         if system == bc_p.SYSTEM:
             m = re.search(r"BOUNDARY=([A-Z]+)", user)  # draft's marker comes first
             return json.dumps({"classification": m.group(1) if m else "NEW"}), 10, 4
-        raise AssertionError(f"unexpected groq system prompt: {system[:60]!r}")
-
-    return call
-
-
-def _fake_sonnet_call(state: dict):
-    from app.pipeline.prompts import contradiction_detector as cd_p
-    from app.pipeline.prompts import skill_extractor as se_p
-
-    async def call(system: str, user: str, *, max_tokens: int):
-        state["sonnet_calls"] = state.get("sonnet_calls", 0) + 1
         if system == se_p.SYSTEM:
             m = re.search(r"SKILL<<(.*?)>>", user, re.S)
             if not m:
@@ -170,7 +164,7 @@ def _fake_sonnet_call(state: dict):
             return m.group(1), 20, 12  # real _parse_json validates it
         if system == cd_p.SYSTEM:
             return json.dumps({"has_contradiction": "[CONTRA]" in user}), 14, 4
-        raise AssertionError(f"unexpected sonnet system prompt: {system[:60]!r}")
+        raise AssertionError(f"unexpected gemini system prompt: {system[:60]!r}")
 
     return call
 
@@ -229,8 +223,7 @@ def e2e_stubs(monkeypatch: pytest.MonkeyPatch, tmp_path, llm_state: dict):
     from app.pipeline import embedder
     from app.pipeline.llm import clients
 
-    monkeypatch.setattr(clients, "_groq_call", _fake_groq_call(llm_state))
-    monkeypatch.setattr(clients, "_sonnet_call", _fake_sonnet_call(llm_state))
+    monkeypatch.setattr(clients, "_gemini_call", _fake_gemini_call(llm_state))
     monkeypatch.setattr(embedder, "openai_client", lambda: _FakeOpenAI())
 
     async def _no_redis():
