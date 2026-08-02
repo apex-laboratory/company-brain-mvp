@@ -31,13 +31,19 @@ def _clamp(value, default: float = 0.5) -> float:
         return default
 
 
+_KNOWLEDGE_TYPES = ("durable_policy", "project_decision")
+
+
 async def extract_skill(
     decisions: list[DecisionMoment],
     context: str,
     authority: AuthorityAnnotation,
 ) -> tuple[SkillDraft, StageUsage]:
     """Return ``(draft, usage)``. Raises ``ValueError`` if the model returned no
-    usable skill (missing trigger/base_logic) — the caller discards the event."""
+    usable skill — the caller discards the event. That covers three cases:
+    missing trigger/base_logic, an explicit abstention (``{"skill": null}`` for
+    content that only records completed work), and a ``one_off_task``
+    classification (the prompt says abstain instead; this is the backstop)."""
     parsed, usage = await gemini_json(
         prompts.SYSTEM,
         prompts.user_prompt(
@@ -47,10 +53,22 @@ async def extract_skill(
         max_tokens=2048,
     )
 
+    if "skill" in parsed and parsed.get("skill") is None:
+        reason = str(parsed.get("reason", "")).strip() or "no durable skill"
+        raise ValueError(f"skill_extractor: abstained — {reason}")
+
     trigger = str(parsed.get("trigger", "")).strip()
     base_logic = str(parsed.get("base_logic", "")).strip()
     if not trigger or not base_logic:
         raise ValueError("skill_extractor: model returned no trigger/base_logic")
+
+    knowledge_type = str(parsed.get("knowledge_type", "")).strip()
+    if knowledge_type == "one_off_task":
+        raise ValueError("skill_extractor: abstained — classified as one_off_task")
+    if knowledge_type not in _KNOWLEDGE_TYPES:
+        # Unknown/missing → the safe default: extractable, but the value came
+        # from the model, so don't invent a stricter class than it gave.
+        knowledge_type = "durable_policy"
 
     exceptions = parsed.get("exceptions")
     actions = parsed.get("actions")
@@ -64,5 +82,6 @@ async def extract_skill(
         if isinstance(actions, list) else [],
         extraction_confidence=_clamp(parsed.get("extraction_confidence")),
         uncertainty_notes=str(parsed.get("uncertainty_notes", "")),
+        knowledge_type=knowledge_type,
     )
     return draft, usage

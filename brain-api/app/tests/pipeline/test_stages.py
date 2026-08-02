@@ -116,3 +116,38 @@ async def test_skill_extractor_rejects_empty_skill() -> None:
         pytest.raises(ValueError, match="no trigger/base_logic"),
     ):
         await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
+
+
+async def test_skill_extractor_abstains_on_null_skill() -> None:
+    """Completed-work content: the model abstains and the event is discarded."""
+    payload = {"skill": None, "reason": "PR changelog of implemented code"}
+    with (
+        patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))),
+        pytest.raises(ValueError, match="abstained — PR changelog"),
+    ):
+        await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
+
+
+async def test_skill_extractor_rejects_one_off_task_backstop() -> None:
+    """The prompt says abstain instead of one_off_task; the parser backstops it."""
+    payload = {
+        "trigger": "t", "base_logic": "b",
+        "knowledge_type": "one_off_task", "extraction_confidence": 0.9,
+    }
+    with (
+        patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))),
+        pytest.raises(ValueError, match="one_off_task"),
+    ):
+        await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
+
+
+async def test_skill_extractor_parses_knowledge_type_with_safe_default() -> None:
+    payload = {"trigger": "t", "base_logic": "b", "knowledge_type": "project_decision"}
+    with patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
+        draft, _ = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
+    assert draft.knowledge_type == "project_decision"
+
+    payload = {"trigger": "t", "base_logic": "b", "knowledge_type": "garbage"}
+    with patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
+        draft, _ = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
+    assert draft.knowledge_type == "durable_policy"  # unknown → extractable default

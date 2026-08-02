@@ -45,6 +45,19 @@ def test_route_table(confidence, authority, sweep, expected) -> None:
     assert route(confidence, authority, sweep, _ROUTING) == expected
 
 
+def test_route_project_decision_never_auto_publishes() -> None:
+    """Release-scoped knowledge always gets a human look, even at max confidence."""
+    assert (
+        route(0.95, "high", False, _ROUTING, knowledge_type="project_decision")
+        == "review"
+    )
+    # …but still drops to draft below the review floor, same as everything else.
+    assert (
+        route(0.60, "high", False, _ROUTING, knowledge_type="project_decision")
+        == "draft"
+    )
+
+
 def test_to_review_confidence_scales_and_clamps() -> None:
     assert to_review_confidence(0.765) == 76
     assert to_review_confidence(1.5) == 100

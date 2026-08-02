@@ -40,15 +40,30 @@ def next_version(current: str) -> str:
 
 
 def route(
-    confidence: float, authority: str, sweep_sourced: bool, routing: RoutingConfig
+    confidence: float,
+    authority: str,
+    sweep_sourced: bool,
+    routing: RoutingConfig,
+    *,
+    knowledge_type: str = "durable_policy",
 ) -> str:
-    """Pure routing decision: 'published' | 'review' | 'draft'."""
+    """Pure routing decision: 'published' | 'review' | 'draft'.
+
+    Anything short of ``durable_policy`` (i.e. ``project_decision`` — release-
+    scoped knowledge that expires) never auto-publishes: a human confirms it in
+    review, same as sweep-sourced content.
+    """
     if confidence < routing.review_queue_confidence_floor:
         return "draft"
     meets_authority = _AUTHORITY_RANK.get(authority, 0) >= _AUTHORITY_RANK.get(
         routing.auto_publish_authority_floor, 1
     )
-    if confidence >= routing.auto_publish_confidence and meets_authority and not sweep_sourced:
+    if (
+        confidence >= routing.auto_publish_confidence
+        and meets_authority
+        and not sweep_sourced
+        and knowledge_type == "durable_policy"
+    ):
         return "published"
     return "review"
 
@@ -73,7 +88,10 @@ async def write_new_skill(
 ) -> PipelineResult:
     """Insert a NEW skill routed by confidence. Runs inside the caller's
     tenant transaction; the caller commits and finalizes the event."""
-    outcome = route(confidence, authority, sweep_sourced, routing)
+    outcome = route(
+        confidence, authority, sweep_sourced, routing,
+        knowledge_type=draft.knowledge_type,
+    )
     status = {"published": "active", "review": "review", "draft": "draft"}[outcome]
 
     name = await repo.resolve_skill_name(session, workspace_id, draft.name)
@@ -224,7 +242,10 @@ async def write_update(
     version, re-embed, invalidate). Review branch writes a ``policy_change``
     review WITHOUT mutating the live skill — the change is applied on approve (M5).
     """
-    outcome = route(confidence, authority, sweep_sourced, routing)
+    outcome = route(
+        confidence, authority, sweep_sourced, routing,
+        knowledge_type=draft.knowledge_type,
+    )
     new_version = next_version(matched.version)
 
     if outcome == "published":
@@ -281,7 +302,10 @@ async def write_exception(
     Publish branch appends to ``exceptions_block`` + version bump. Review branch
     writes an ``exception`` review; the append happens on approve (M5).
     """
-    outcome = route(confidence, authority, sweep_sourced, routing)
+    outcome = route(
+        confidence, authority, sweep_sourced, routing,
+        knowledge_type=draft.knowledge_type,
+    )
     new_exceptions = list(matched.exceptions_block) + (
         draft.exceptions or [{"condition": draft.trigger, "action": draft.base_logic}]
     )
