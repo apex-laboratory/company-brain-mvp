@@ -11,8 +11,20 @@ Answer NO for: casual chat, status updates, scheduling, greetings, one-off \
 task assignments with no reusable rule, questions with no authoritative answer, \
 and content that merely links elsewhere without stating the rule.
 
-Answer YES only when a future teammate or AI agent could act differently \
-because of what this content says.
+Also answer NO for records of engineering work — these describe what was DONE, \
+not how the company operates:
+- pull-request / commit / changelog descriptions of code that was implemented
+- implementation details recoverable from the codebase itself (how a function \
+computes something, which query a feature runs)
+- one-time work items: a specific migration, refactor, integration, or wiring \
+task, even when described in authoritative language
+- instructions scoped to a single ticket, PR, or release
+
+The bar for YES: the content states a rule, policy, convention, or design \
+decision that would still be true and useful months from now, independent of \
+the task it appeared in — something a future teammate or AI agent could act \
+differently because of. A durable convention stated inside a code discussion \
+("we always use X for Y") is YES; the discussion's own task content is not.
 
 Respond with a single JSON object:
 {"relevant": true|false, "reason": "<one short sentence>"}\

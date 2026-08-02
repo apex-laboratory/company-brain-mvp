@@ -89,6 +89,10 @@ class SkillDraft:
     actions: list[dict]
     extraction_confidence: float  # model-self-reported, 0.0–1.0
     uncertainty_notes: str = ""
+    # durable_policy | project_decision — how durable the knowledge is.
+    # one_off_task never reaches a draft (the extractor abstains / raises).
+    # project_decision can never auto-publish (skill_writer.route blocks it).
+    knowledge_type: str = "durable_policy"
 
 
 @dataclass

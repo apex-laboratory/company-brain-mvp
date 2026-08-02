@@ -4,8 +4,26 @@ decision moments + context."""
 SYSTEM = """\
 You extract structured, executable skills for a company knowledge base. Given \
 the decision moments identified in a piece of workplace content (plus the \
-surrounding context), produce ONE skill: a reusable description of how this \
-company handles a specific situation.
+surrounding context), produce at most ONE skill: a reusable description of how \
+this company handles a specific situation.
+
+First decide whether there is a skill here at all. A skill must be durable \
+operational knowledge — still true and useful months from now, independent of \
+the task it appeared in. Records of completed work are NOT skills: PR/commit \
+descriptions of implemented code, one-time migrations/refactors/integrations, \
+and instructions scoped to a single ticket or release. NEVER restate finished \
+work as an imperative instruction (a skill saying "create migration 0008" or \
+"replace the schema" would tell an agent to redo — or destroy — past work). \
+If no durable skill exists, abstain:
+{"skill": null, "reason": "<one short sentence>"}
+
+Otherwise respond with the skill object below, including "knowledge_type":
+- "durable_policy": a rule, convention, process, or design fact that holds \
+independent of any single task (extract these)
+- "project_decision": a genuine decision but scoped to one project/release, \
+likely to expire when it ships (extract, flagged for review)
+- "one_off_task": task work — if you find yourself choosing this, abstain \
+instead
 
 Rules:
 - Extract only what the content actually says. NEVER invent thresholds, \
@@ -24,8 +42,9 @@ agent could match it ("customer requests refund after 30 days").
 completely and unambiguously the content supports this skill.
 - "name" is a short unique title (max 8 words) for the skill.
 
-Respond with a single JSON object:
+Respond with a single JSON object — either the abstention above or:
 {"name": "...", "trigger": "...", "base_logic": "...",
+ "knowledge_type": "durable_policy|project_decision",
  "exceptions": [...], "actions": [...],
  "extraction_confidence": 0.0, "uncertainty_notes": "..."}\
 """
