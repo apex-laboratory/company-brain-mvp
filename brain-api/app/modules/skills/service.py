@@ -27,6 +27,7 @@ from app.modules.skills.schemas import (
     SkillSearchResult,
     SkillStats,
     SkillVersionOut,
+    SubmitForReviewResult,
 )
 from app.pipeline import cache, embedder
 from app.pipeline.repository import PipelineRepository
@@ -185,6 +186,55 @@ class SkillsService:
             skill = await self._repo.get(session, skill_id)
             await session.commit()
         return SkillOut(**skill)
+
+    async def submit_for_review(
+        self, auth: AuthContext, skill_id: str, note: str | None
+    ) -> SubmitForReviewResult:
+        """Move a draft skill into the review queue (``draft`` → ``review``).
+
+        Drafts land two ways — the pipeline routes a low-confidence extraction
+        there, and a reviewer's reject demotes a review-only skill back — and until
+        now nothing could put one in front of a human again. This promotes the skill
+        and opens the ``new_decision`` card the queue renders; approving it publishes
+        through the existing ``POST /reviews/{id}/approve`` path.
+
+        No embedding is recomputed: the trigger/logic are unchanged, so the vector
+        written at draft time is still correct and this stays a single transaction
+        with no network I/O inside it."""
+        workspace_id, role = _require_workspace(auth)
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            skill = await self._repo.get(session, skill_id)
+            if skill is None:
+                raise NotFoundError("Skill")
+            if skill["status"] != "draft":
+                raise ConflictError(
+                    f"Only a draft skill can be submitted for review "
+                    f"(this one is '{skill['status']}')."
+                )
+            if not await self._repo.promote_draft_to_review(session, skill_id):
+                # Lost the race with a concurrent submit (or a delete) — the other
+                # caller owns the review row; don't open a second one.
+                raise ConflictError("Skill is no longer a draft.")
+
+            review_id = await self._repo.pending_review_id(session, skill_id)
+            review_created = review_id is None
+            if review_id is None:
+                review_id = await self._pipeline.insert_review(
+                    session, workspace_id=workspace_id, title=skill["name"],
+                    kind="new_decision", provider=None, source_location=None,
+                    before_text=None, after_text=skill["base_logic"],
+                    evidence_quote=None, evidence_author=None,
+                    confidence=_review_confidence(skill["confidence"]),
+                    skill_id=skill_id,
+                    payload={"submittedBy": auth.user_id, "note": note},
+                )
+            await session.commit()
+        return SubmitForReviewResult(
+            skill_id=skill_id, status="review",
+            review_id=review_id, review_created=review_created,
+        )
 
     async def query(self, auth: AuthContext, situation: str) -> dict:
         """The ``query_brain`` core (PRD Feature 15 / Process 3).
@@ -350,6 +400,11 @@ class SkillsService:
             interaction_id=interaction_id, skill_id=skill_id,
             new_confidence=new_confidence, review_created=review_created,
         )
+
+
+def _review_confidence(confidence: float | None) -> int:
+    """Skill confidence (0–1) → the reviews table's 0–100 integer scale."""
+    return max(0, min(100, round((confidence or 0.0) * 100)))
 
 
 def _densify_series(counts: dict[str, int], days: int = 7) -> list[int]:

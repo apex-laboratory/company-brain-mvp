@@ -107,6 +107,28 @@ class CreateSkillRequest(CamelRequestModel):
     description: Annotated[str | None, Field(max_length=2000)] = None
 
 
+class SubmitForReviewRequest(CamelRequestModel):
+    """Send a draft skill to the human review queue.
+
+    ``note`` is context for the reviewer (why this draft is worth publishing); it
+    is stored on the review's payload, not on the skill."""
+
+    note: Annotated[str | None, Field(max_length=2000)] = None
+
+
+class SubmitForReviewResult(CamelModel):
+    """Outcome of ``POST /skills/{id}/submit``.
+
+    ``reviewCreated`` is ``False`` when the draft already had an open review (a
+    hand-authored skill opens one at creation) — the existing card is reused, so
+    ``reviewId`` still points at the item the reviewer will see."""
+
+    skill_id: str
+    status: str
+    review_id: str
+    review_created: bool
+
+
 class OverrideRequest(CamelRequestModel):
     """Report that an agent overrode a matched skill (Feature 15a feedback loop)."""
 
