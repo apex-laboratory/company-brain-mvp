@@ -273,6 +273,45 @@ class SkillsRepository:
         )
         return skill_id
 
+    async def promote_draft_to_review(self, session: AsyncSession, skill_id: str) -> bool:
+        """Move a ``draft`` skill into the review queue's ``review`` state.
+
+        The ``status = 'draft'`` predicate makes this the serialization point: two
+        concurrent submits both see a draft on read, but only one UPDATE matches, so
+        the loser is told the skill is no longer a draft instead of opening a second
+        review row. Returns ``False`` when nothing matched (already promoted,
+        deleted, or never a draft)."""
+        result = await session.execute(
+            text(
+                """
+                UPDATE skills
+                   SET status = CAST('review' AS skill_status),
+                       updated_at = now()
+                 WHERE id = :id AND deleted_at IS NULL AND status = 'draft'
+                """
+            ).bindparams(id=skill_id)
+        )
+        return result.rowcount == 1
+
+    async def pending_review_id(self, session: AsyncSession, skill_id: str) -> str | None:
+        """Id of the skill's still-open review, if any (newest first).
+
+        A hand-authored skill already opened a review at ``POST /skills``, so a
+        submit must reuse that card rather than queue the same skill twice."""
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id FROM reviews
+                     WHERE skill_id = :id AND status = 'pending'
+                     ORDER BY created_at DESC
+                     LIMIT 1
+                    """
+                ).bindparams(id=skill_id)
+            )
+        ).mappings().first()
+        return str(row["id"]) if row else None
+
     # ── embedding maintenance (re-embed job) ───────────────────────────────────
 
     async def list_stale_embeddings(

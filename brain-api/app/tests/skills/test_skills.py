@@ -79,6 +79,8 @@ def _svc(*, skill=None, hits=None, interaction=None, new_confidence=None,
             "stable": 0, "active": 0, "review": 0, "draft": 0, "total": 0, "calls30d": 0,
         }),
         insert_draft=AsyncMock(return_value="skl_new"),
+        promote_draft_to_review=AsyncMock(return_value=True),
+        pending_review_id=AsyncMock(return_value=None),
         decrement_confidence=AsyncMock(return_value=new_confidence),
         insert_interaction=AsyncMock(return_value="int_1"),
         get_interaction=AsyncMock(return_value=interaction),
@@ -326,6 +328,11 @@ class _StubService:
     async def get(self, auth, skill_id):
         return SkillOut(id=skill_id, name="Refund", version="v1", status="active")
 
+    async def submit_for_review(self, auth, skill_id, note):
+        from app.modules.skills.schemas import SubmitForReviewResult
+        return SubmitForReviewResult(skill_id=skill_id, status="review",
+                                     review_id="rev_1", review_created=True)
+
     async def versions(self, auth, skill_id):
         return [SkillVersionOut(version="v1")]
 
@@ -452,6 +459,38 @@ async def test_create_route_admin_ok(client: AsyncClient) -> None:
     assert resp.json()["data"]["status"] == "draft"
 
 
+async def test_submit_route_admin_ok(client: AsyncClient) -> None:
+    _set_auth(role="admin")
+    resp = await client.post("/api/v1/skills/skl_1/submit", json={"note": "ready"})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["status"] == "review" and data["reviewId"] == "rev_1"
+
+
+async def test_submit_route_without_body(client: AsyncClient) -> None:
+    _set_auth(role="admin")
+    resp = await client.post("/api/v1/skills/skl_1/submit")
+    assert resp.status_code == 200
+
+
+async def test_submit_route_requires_admin(client: AsyncClient) -> None:
+    _set_auth(role="editor")  # admin required
+    resp = await client.post("/api/v1/skills/skl_1/submit", json={})
+    assert resp.status_code == 403
+
+
+async def test_submit_route_api_key_forbidden(client: AsyncClient) -> None:
+    _set_auth(role="viewer", kind="api_key", scopes=["brain:query"])  # agents can't queue
+    resp = await client.post("/api/v1/skills/skl_1/submit", json={})
+    assert resp.status_code == 403
+
+
+async def test_submit_route_rejects_unknown_key(client: AsyncClient) -> None:
+    _set_auth(role="admin")
+    resp = await client.post("/api/v1/skills/skl_1/submit", json={"bogus": 1})
+    assert resp.status_code == 422
+
+
 async def test_create_route_rejects_unknown_key(client: AsyncClient) -> None:
     _set_auth(role="admin")
     resp = await client.post(
@@ -533,6 +572,75 @@ async def test_create_conflict_on_duplicate_name() -> None:
             )
     finally:
         _exit(patches)
+
+
+# ── submit a draft to the review queue ───────────────────────────────────────
+
+async def test_submit_promotes_draft_and_opens_review() -> None:
+    svc, repo, pipe, patches = _svc(skill=_skill(status="draft", confidence=0.62))
+    _enter(patches)
+    try:
+        out = await svc.submit_for_review(_auth(role="admin"), "skl_1", "ready")
+    finally:
+        _exit(patches)
+    assert out.status == "review" and out.review_id == "rev_1" and out.review_created
+    repo.promote_draft_to_review.assert_awaited_once()
+    review = pipe.insert_review.await_args.kwargs
+    assert review["kind"] == "new_decision" and review["skill_id"] == "skl_1"
+    assert review["after_text"] == "refund within 30 days"
+    assert review["confidence"] == 62  # 0–1 skill scale → the reviews 0–100 scale
+    assert review["payload"] == {"submittedBy": "usr_1", "note": "ready"}
+
+
+async def test_submit_reuses_an_already_open_review() -> None:
+    """A hand-authored draft already has a card — don't queue it twice."""
+    svc, repo, pipe, patches = _svc(skill=_skill(status="draft"))
+    repo.pending_review_id = AsyncMock(return_value="rev_existing")
+    _enter(patches)
+    try:
+        out = await svc.submit_for_review(_auth(role="admin"), "skl_1", None)
+    finally:
+        _exit(patches)
+    assert out.review_id == "rev_existing" and out.review_created is False
+    pipe.insert_review.assert_not_awaited()
+
+
+async def test_submit_missing_skill_404() -> None:
+    svc, _repo, _pipe, patches = _svc(skill=None)
+    _enter(patches)
+    try:
+        with pytest.raises(NotFoundError):
+            await svc.submit_for_review(_auth(role="admin"), "skl_x", None)
+    finally:
+        _exit(patches)
+
+
+async def test_submit_rejects_a_published_skill() -> None:
+    from app.shared.errors.app_error import ConflictError
+
+    svc, repo, pipe, patches = _svc(skill=_skill(status="active"))
+    _enter(patches)
+    try:
+        with pytest.raises(ConflictError):
+            await svc.submit_for_review(_auth(role="admin"), "skl_1", None)
+    finally:
+        _exit(patches)
+    repo.promote_draft_to_review.assert_not_awaited()
+    pipe.insert_review.assert_not_awaited()
+
+
+async def test_submit_conflicts_when_another_submit_won_the_race() -> None:
+    from app.shared.errors.app_error import ConflictError
+
+    svc, repo, pipe, patches = _svc(skill=_skill(status="draft"))
+    repo.promote_draft_to_review = AsyncMock(return_value=False)  # no row matched
+    _enter(patches)
+    try:
+        with pytest.raises(ConflictError):
+            await svc.submit_for_review(_auth(role="admin"), "skl_1", None)
+    finally:
+        _exit(patches)
+    pipe.insert_review.assert_not_awaited()  # the winner owns the review row
 
 
 async def test_search_result_carries_status() -> None:

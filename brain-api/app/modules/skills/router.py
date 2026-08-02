@@ -2,7 +2,8 @@
 
 Two routers mounted under ``/api/v1``:
 
-* ``/skills`` — semantic search, full body, version history, portable export.
+* ``/skills`` — semantic search, full body, version history, portable export, and
+  the draft → review-queue submit (admin, like manual authoring).
 * ``/interactions`` — the Feature 15a override feedback loop.
 
 Reads are gated by ``require_brain_access`` (API keys need the ``brain:query``
@@ -16,7 +17,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 
-from app.modules.skills.schemas import CreateSkillRequest, OverrideRequest
+from app.modules.skills.schemas import (
+    CreateSkillRequest,
+    OverrideRequest,
+    SubmitForReviewRequest,
+)
 from app.modules.skills.service import SkillsService
 from app.shared.http.respond import created, ok
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
@@ -118,6 +123,21 @@ async def get_skill(
     """Full skill body."""
     skill = await _service.get(auth, skill_id)
     return ok(request, skill.model_dump(by_alias=True))
+
+
+@router.post("/{skill_id}/submit", dependencies=[Depends(require_role("admin"))])
+@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
+async def submit_skill_for_review(
+    skill_id: str,
+    request: Request,
+    body: SubmitForReviewRequest | None = None,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Send a draft skill to the review queue (draft → review, opens a card)."""
+    result = await _service.submit_for_review(
+        auth, skill_id, (body or SubmitForReviewRequest()).note
+    )
+    return ok(request, result.model_dump(by_alias=True))
 
 
 @router.get(

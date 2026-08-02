@@ -2057,6 +2057,69 @@
         }
       }
     },
+    "/api/v1/skills/{skill_id}/submit": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "Submit Skill For Review",
+        "description": "Send a draft skill to the review queue (draft \u2192 review, opens a card).",
+        "operationId": "submit_skill_for_review_api_v1_skills__skill_id__submit_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "skill_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Skill Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SubmitForReviewRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills/{skill_id}/versions": {
       "get": {
         "tags": [
@@ -3162,6 +3225,26 @@
         "type": "object",
         "title": "ResolveRequest",
         "description": "Optional reviewer note attached to an approve/reject."
+      },
+      "SubmitForReviewRequest": {
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SubmitForReviewRequest",
+        "description": "Send a draft skill to the human review queue.\n\n``note`` is context for the reviewer (why this draft is worth publishing); it\nis stored on the review's payload, not on the skill."
       },
       "ValidationError": {
         "properties": {
