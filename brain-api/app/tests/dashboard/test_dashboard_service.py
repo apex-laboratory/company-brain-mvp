@@ -55,8 +55,13 @@ class _FakeRepo(DashboardRepository):
     async def get_user_name(self, session: Any, user_id: str) -> str | None:
         return "Dana Reyes"
 
-    async def metric(self, session: Any, workspace_id: str, spec: Any) -> MetricAgg:
-        return MetricAgg(total=184, recent=12, prior=10, spark=[1, 2, 3, 4, 5, 6, 7])
+    async def metrics(
+        self, session: Any, workspace_id: str, specs: Any
+    ) -> dict[str, MetricAgg]:
+        return {
+            spec.id: MetricAgg(total=184, recent=12, prior=10, spark=[1, 2, 3, 4, 5, 6, 7])
+            for spec in specs
+        }
 
     async def get_sync(self, session: Any, workspace_id: str) -> SyncRow:
         return SyncRow(

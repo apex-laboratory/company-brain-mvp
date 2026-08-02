@@ -294,49 +294,62 @@ class SourcesService:
 
     async def disconnect(self, auth: AuthContext, source_id: str) -> None:
         workspace_id, role = _require_workspace(auth)
+        # txn A: read-only secrets lookup, then release the connection — the
+        # provider revoke below can take the full HTTP timeout, and holding a
+        # pooled RLS connection across it starves the tenant pool.
         async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 secrets_row = await self._repo.get_connection_secrets(session, source_id)
-                if secrets_row is None:
-                    raise NotFoundError("Source connection")
-                integration = get_integration(secrets_row["provider"])
-                # Best-effort provider-side revoke before deleting locally.
-                try:
-                    await integration.revoke(_dec(secrets_row["access_token_enc"]))
-                except Exception:  # noqa: BLE001 — never block disconnect on a provider error
-                    pass
-                # Stop renewing any push channels for this source; the provider-side
-                # channel then expires on its own (<= 7 days for Google watch).
+        if secrets_row is None:
+            raise NotFoundError("Source connection")
+        integration = get_integration(secrets_row["provider"])
+        # Best-effort provider-side revoke before deleting locally (no txn open).
+        try:
+            await integration.revoke(_dec(secrets_row["access_token_enc"]))
+        except Exception:  # noqa: BLE001 — never block disconnect on a provider error
+            pass
+        # txn B: stop renewing any push channels for this source (the provider-side
+        # channel then expires on its own, <= 7 days for Google watch) and delete.
+        async with get_tenant_session() as session:
+            async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 await self._repo.revoke_subscriptions_for_source(session, source_id)
                 await self._repo.delete_connection(session, source_id)
                 await session.commit()
 
     # ── channels ───────────────────────────────────────────────────────────────
-    async def _resolve_access_token(self, session, secrets_row: dict) -> str:
+    async def _resolve_access_token(
+        self, auth: AuthContext, secrets_row: dict
+    ) -> str:
         """Decrypt the connection's access token, refreshing it if near expiry.
 
         The channel picker can be opened long after the last sync (GitHub installation
         and Jira access tokens expire in ~1h). Without this, ``list_channels`` would call
         the provider with a dead token and 500. Mirrors the jobs layer's ``_resolve_token``:
         a refreshed token is persisted so it isn't re-refreshed on the next open.
+
+        The provider refresh runs with **no transaction open**; only the persist of
+        a refreshed token opens a (short) tenant session of its own.
         """
         access_token = _dec(secrets_row["access_token_enc"])
         expires = secrets_row.get("token_expires_at")
         refresh_enc = secrets_row.get("refresh_token_enc")
         if expires and expires < datetime.now(UTC) + timedelta(minutes=5) and refresh_enc:
             integration = get_integration(secrets_row["provider"])
-            refreshed = await integration.refresh(_dec(refresh_enc))
+            refreshed = await integration.refresh(_dec(refresh_enc))  # network — no txn
             access_token = refreshed.access_token
-            await self._repo.update_tokens(
-                session,
-                secrets_row["id"],
-                access_token_enc=_enc(refreshed.access_token),  # type: ignore[arg-type]
-                token_expires_at=refreshed.expires_at,
-                refresh_token_enc=(
-                    _enc(refreshed.refresh_token) if refreshed.refresh_token else None
-                ),
-            )
-            await session.commit()
+            workspace_id, role = _require_workspace(auth)
+            async with get_tenant_session() as session:
+                async with run_in_tenant(session, workspace_id, auth.user_id, role):
+                    await self._repo.update_tokens(
+                        session,
+                        secrets_row["id"],
+                        access_token_enc=_enc(refreshed.access_token),  # type: ignore[arg-type]
+                        token_expires_at=refreshed.expires_at,
+                        refresh_token_enc=(
+                            _enc(refreshed.refresh_token) if refreshed.refresh_token else None
+                        ),
+                    )
+                    await session.commit()
         return access_token
 
     async def list_channels(self, auth: AuthContext, source_id: str) -> list[ChannelOut]:
@@ -348,8 +361,9 @@ class SourcesService:
                 if secrets_row is None:
                     raise NotFoundError("Source connection")
                 persisted = await self._repo.list_channels(session, source_id)
-                access_token = await self._resolve_access_token(session, secrets_row)
 
+        # Provider I/O (token refresh + discovery) with no pooled connection held.
+        access_token = await self._resolve_access_token(auth, secrets_row)
         integration = get_integration(secrets_row["provider"])
         discovered = await integration.list_channels(access_token)
 
@@ -379,17 +393,21 @@ class SourcesService:
                     raise NotFoundError("Source connection")
                 if req.lookback_days is not None:
                     await self._repo.update_lookback(session, source_id, req.lookback_days)
-                for ch in req.channels:
-                    await self._repo.upsert_channel(
-                        session,
-                        channel_id=generate_id("channel"),
-                        workspace_id=workspace_id,
-                        source_id=source_id,
-                        provider=provider,
-                        external_id=ch.external_id,
-                        name=ch.name,
-                        selected=ch.selected,
-                    )
+                await self._repo.upsert_channels(
+                    session,
+                    [
+                        {
+                            "id": generate_id("channel"),
+                            "workspace_id": workspace_id,
+                            "source_id": source_id,
+                            "provider": provider,
+                            "external_id": ch.external_id,
+                            "name": ch.name,
+                            "selected": ch.selected,
+                        }
+                        for ch in req.channels
+                    ],
+                )
                 rows = await self._repo.list_channels(session, source_id)
                 await session.commit()
         return [

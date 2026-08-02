@@ -104,7 +104,7 @@ def _svc(*, hits=None, full=None, synth=None, provenance=None, citations=None,
         touch_conversation=AsyncMock(),
     )
     skills_repo = MagicMock(
-        get=AsyncMock(return_value=full),
+        get_many=AsyncMock(return_value=[full] if full is not None else []),
         insert_interaction=AsyncMock(return_value="int_1"),
     )
     pipeline = MagicMock(similar_skills=AsyncMock(return_value=hits or []))

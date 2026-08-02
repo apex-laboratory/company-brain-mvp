@@ -19,7 +19,6 @@ row commits — a delivery failure is logged but does not roll back the invitati
 """
 from __future__ import annotations
 
-import asyncio
 import secrets
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -75,10 +74,11 @@ class MemberService:
         workspace_id = assert_workspace_member(auth, workspace_id)
 
         async with tenant_session(auth, workspace_id) as session:
-            rows, seat_limit = await asyncio.gather(
-                self._repository.list_members(session, workspace_id),
-                self._repository.get_seat_limit(session, workspace_id),
-            )
+            # Sequential on purpose: an AsyncSession drives ONE connection, so
+            # gathering coroutines on it doesn't parallelize — it interleaves
+            # statements on a shared connection and can raise InterfaceError.
+            rows = await self._repository.list_members(session, workspace_id)
+            seat_limit = await self._repository.get_seat_limit(session, workspace_id)
 
         if seat_limit is None:
             # The token names a workspace that is gone or soft-deleted.
@@ -124,12 +124,11 @@ class MemberService:
         # The caller is an admin (require_role), so invitations are readable under
         # the tenant RLS context here — no privileged session needed.
         async with tenant_session(auth, workspace_id) as session:
-            status, seat_limit, active_members, pending_invites = await asyncio.gather(
-                self._repository.email_status(session, workspace_id, email),
-                self._repository.get_seat_limit(session, workspace_id),
-                self._repository.count_active_members(session, workspace_id),
-                self._repository.count_pending_invites(session, workspace_id),
-            )
+            # Sequential on purpose — see list_members: one session, one connection.
+            status = await self._repository.email_status(session, workspace_id, email)
+            seat_limit = await self._repository.get_seat_limit(session, workspace_id)
+            active_members = await self._repository.count_active_members(session, workspace_id)
+            pending_invites = await self._repository.count_pending_invites(session, workspace_id)
 
             if seat_limit is None:
                 raise NotFoundError("Workspace")

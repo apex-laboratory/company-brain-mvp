@@ -7,13 +7,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
 
 from app.config.database import close_db_pool, get_session
@@ -71,9 +68,6 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
 app.add_middleware(RequestContextMiddleware)
 
 app.state.limiter = limiter
-# slowapi's handler signature (Request, RateLimitExceeded) is narrower than
-# Starlette's (Request, Exception); the cast bridges that known mismatch.
-app.add_exception_handler(RateLimitExceeded, cast(Any, _rate_limit_exceeded_handler))
 register_exception_handlers(app)
 
 app.include_router(auth_router, prefix="/api/v1")

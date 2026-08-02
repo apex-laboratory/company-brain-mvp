@@ -108,21 +108,54 @@ class ReviewsService:
         async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
-            review = await self._load_pending(session, review_id)
-            skill_id = review["skill_id"]
-            skill = await self._skills.get_skill(session, skill_id) if skill_id else None
+            skill_id, embed_input = await self._peek_approve(session, review_id)
 
         embedding: list[float] | None = None
         embedding_model: str | None = None
-        if skill is not None and review["kind"] in ("policy_change", "contradiction"):
-            new_logic = review["after_text"] or skill["base_logic"]
-            embedding, usage = await embedder.embed_text(
-                embedder.skill_embedding_text(skill["trigger"], new_logic)
-            )
+        if embed_input is not None:
+            embedding, usage = await embedder.embed_text(embed_input, interactive=True)
             embedding_model = usage.model
 
-        # Phase 2 (write): lock the review row so a concurrent approve/reject
-        # serializes behind us and then sees the resolved status (no double-apply).
+        await self._commit_approve(
+            auth, review_id, comment,
+            skill_id=skill_id, embedding=embedding, embedding_model=embedding_model,
+        )
+        if skill_id:
+            await cache.invalidate_skills(workspace_id)
+            await schedule_reindex(workspace_id)  # re-embed the approved version
+        return ResolveResult(id=review_id, status="approved", verdict="approve", skill_id=skill_id)
+
+    async def _peek_approve(
+        self, session, review_id: str
+    ) -> tuple[str | None, str | None]:
+        """Phase-1 read for an approve: ``(skill_id, text_to_embed_or_None)``.
+
+        Shared by ``approve`` and ``bulk_approve`` so both read the same state and
+        compute the same embedding input; neither holds this session across
+        network I/O.
+        """
+        review = await self._load_pending(session, review_id)
+        skill_id = review["skill_id"]
+        skill = await self._skills.get_skill(session, skill_id) if skill_id else None
+        embed_input: str | None = None
+        if skill is not None and review["kind"] in ("policy_change", "contradiction"):
+            new_logic = review["after_text"] or skill["base_logic"]
+            embed_input = embedder.skill_embedding_text(skill["trigger"], new_logic)
+        return skill_id, embed_input
+
+    async def _commit_approve(
+        self,
+        auth: AuthContext,
+        review_id: str,
+        comment: str | None,
+        *,
+        skill_id: str | None,
+        embedding: list[float] | None,
+        embedding_model: str | None,
+    ) -> None:
+        """Phase 2 (write): lock the review row so a concurrent approve/reject
+        serializes behind us and then sees the resolved status (no double-apply)."""
+        workspace_id, role = _require_workspace(auth)
         async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
@@ -138,10 +171,6 @@ class ReviewsService:
             if not resolved:
                 raise ConflictError("Review already resolved.")
             await session.commit()
-        if skill_id:
-            await cache.invalidate_skills(workspace_id)
-            await schedule_reindex(workspace_id)  # re-embed the approved version
-        return ResolveResult(id=review_id, status="approved", verdict="approve", skill_id=skill_id)
 
     async def reject(
         self, auth: AuthContext, review_id: str, comment: str | None
@@ -220,23 +249,73 @@ class ReviewsService:
     ) -> BulkApproveResult:
         """Approve many reviews at once (PRD Feature 23 bulk sweep review).
 
-        Each item runs through the single-item ``approve`` so it gets the same
-        row-lock + skill-mutation guarantees; a per-item failure (already resolved,
-        not found) is reported, never aborting the batch. De-dupes ids so a
-        repeated id can't double-apply."""
-        results: list[BulkApproveItem] = []
-        for review_id in dict.fromkeys(ids):
+        Each item commits through the same row-lock + skill-mutation path as the
+        single-item ``approve``; a per-item failure (already resolved, not found)
+        is reported, never aborting the batch. De-dupes ids so a repeated id
+        can't double-apply.
+
+        Batched for latency: ONE read transaction peeks every review, ONE OpenAI
+        call embeds every re-embed text, then each item commits under its own row
+        lock, and the cache invalidation + reindex enqueue run once at the end —
+        instead of N× (2 sessions + embed call + Redis SCAN + enqueue).
+        """
+        workspace_id, role = _require_workspace(auth)
+        unique_ids = list(dict.fromkeys(ids))
+        items: dict[str, BulkApproveItem] = {}
+
+        # Phase A: one read txn for every pending review + skill.
+        prepared: list[tuple[str, str | None, str | None]] = []
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            for review_id in unique_ids:
+                try:
+                    skill_id, embed_input = await self._peek_approve(session, review_id)
+                    prepared.append((review_id, skill_id, embed_input))
+                except (ConflictError, NotFoundError) as exc:
+                    items[review_id] = BulkApproveItem(
+                        id=review_id, status="skipped", detail=exc.message
+                    )
+                except AppError as exc:  # unexpected but bounded — report, don't abort
+                    items[review_id] = BulkApproveItem(
+                        id=review_id, status="error", detail=exc.message
+                    )
+
+        # Phase B: one batched embedding call (network — no txn open).
+        texts = [t for _, _, t in prepared if t is not None]
+        vectors: list[list[float]] = []
+        embedding_model: str | None = None
+        if texts:
+            vectors, usage = await embedder.embed_texts(texts, interactive=True)
+            embedding_model = usage.model
+
+        # Phase C: per-item locked commit (a failure never aborts the batch).
+        vector_iter = iter(vectors)
+        touched_skill = False
+        for review_id, skill_id, embed_input in prepared:
+            embedding = next(vector_iter) if embed_input is not None else None
             try:
-                await self.approve(auth, review_id, comment)
-                results.append(BulkApproveItem(id=review_id, status="approved"))
+                await self._commit_approve(
+                    auth, review_id, comment, skill_id=skill_id,
+                    embedding=embedding,
+                    embedding_model=embedding_model if embedding is not None else None,
+                )
+                items[review_id] = BulkApproveItem(id=review_id, status="approved")
+                touched_skill = touched_skill or bool(skill_id)
             except (ConflictError, NotFoundError) as exc:
-                results.append(
-                    BulkApproveItem(id=review_id, status="skipped", detail=exc.message)
+                items[review_id] = BulkApproveItem(
+                    id=review_id, status="skipped", detail=exc.message
                 )
-            except AppError as exc:  # unexpected but bounded — report, don't abort
-                results.append(
-                    BulkApproveItem(id=review_id, status="error", detail=exc.message)
+            except AppError as exc:
+                items[review_id] = BulkApproveItem(
+                    id=review_id, status="error", detail=exc.message
                 )
+
+        if touched_skill:
+            await cache.invalidate_skills(workspace_id)
+            await schedule_reindex(workspace_id)
+
+        results = [items[review_id] for review_id in unique_ids]
         approved = sum(1 for r in results if r.status == "approved")
         return BulkApproveResult(
             results=results, approved=approved, skipped=len(results) - approved
@@ -271,7 +350,7 @@ class ReviewsService:
             if skill is None:
                 raise NotFoundError("Skill")
         embedding, usage = await embedder.embed_text(
-            embedder.skill_embedding_text(skill["trigger"], base_logic)
+            embedder.skill_embedding_text(skill["trigger"], base_logic), interactive=True
         )
 
         # Phase 2: lock the review, apply the human version, resolve.

@@ -18,7 +18,11 @@ from typing import Any
 
 from app.config.settings import settings
 from app.pipeline.llm.pricing import cost_usd
-from app.pipeline.llm.retry import with_retries
+from app.pipeline.llm.retry import (
+    INTERACTIVE_ATTEMPTS,
+    INTERACTIVE_RETRY_AFTER_CAP,
+    with_retries,
+)
 from app.pipeline.types import StageUsage
 
 log = logging.getLogger(__name__)
@@ -56,10 +60,15 @@ def anthropic_client() -> Any:
     """Lazy ``AsyncAnthropic`` singleton."""
     global _anthropic_client
     if _anthropic_client is None:
+        import httpx
         from anthropic import AsyncAnthropic
 
+        # SDK default is 600s + 2 internal retries; synthesis (2048 max_tokens)
+        # finishes well inside 120s. Fail fast — with_retries owns retrying.
         _anthropic_client = AsyncAnthropic(
-            api_key=_require_key("ANTHROPIC_API_KEY", settings.anthropic_api_key)
+            api_key=_require_key("ANTHROPIC_API_KEY", settings.anthropic_api_key),
+            timeout=httpx.Timeout(120.0, connect=5.0),
+            max_retries=1,
         )
     return _anthropic_client
 
@@ -110,14 +119,25 @@ async def _sonnet_call(system: str, user: str, *, max_tokens: int) -> tuple[str,
 
 
 async def _json_call(
-    call, system: str, user: str, *, stage: str, model: str, max_tokens: int
+    call,
+    system: str,
+    user: str,
+    *,
+    stage: str,
+    model: str,
+    max_tokens: int,
+    attempts: int | None = None,
+    max_retry_after: float | None = None,
 ) -> tuple[dict, StageUsage]:
     """Retry-wrapped call + JSON parse with a single reprompt on parse failure."""
     in_tok = out_tok = 0
 
     async def _attempt(prompt_user: str) -> tuple[str, int, int]:
         return await with_retries(
-            lambda: call(system, prompt_user, max_tokens=max_tokens), stage=stage
+            lambda: call(system, prompt_user, max_tokens=max_tokens),
+            stage=stage,
+            attempts=attempts,
+            max_retry_after=max_retry_after,
         )
 
     text, i, o = await _attempt(user)
@@ -158,9 +178,17 @@ async def gemini_json(
 
 
 async def sonnet_json(
-    system: str, user: str, *, stage: str, max_tokens: int = 2048
+    system: str,
+    user: str,
+    *,
+    stage: str,
+    max_tokens: int = 2048,
+    interactive: bool = False,
 ) -> tuple[dict, StageUsage]:
-    """Sonnet chat call (JSON instructed via prompt) for the extraction stages."""
+    """Sonnet chat call (JSON instructed via prompt).
+
+    ``interactive=True`` uses the request-path budget (2 attempts, 5s
+    retry-after cap) — the brain synthesizer runs while a user waits."""
     return await _json_call(
         _sonnet_call,
         system,
@@ -168,6 +196,8 @@ async def sonnet_json(
         stage=stage,
         model=settings.anthropic_model,
         max_tokens=max_tokens,
+        attempts=INTERACTIVE_ATTEMPTS if interactive else None,
+        max_retry_after=INTERACTIVE_RETRY_AFTER_CAP if interactive else None,
     )
 
 

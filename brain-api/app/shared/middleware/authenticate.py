@@ -10,6 +10,7 @@ backstopped by RLS in the DB.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -31,6 +32,16 @@ bearer = HTTPBearer(auto_error=False)
 _API_KEY_ROLE = "viewer"
 
 _repository = AuthRepository()
+
+# Resolved-key cache: sha256(key) → (expiry, AuthContext). Every API-key request
+# used to cost a privileged-pool SELECT + UPDATE + COMMIT before the handler ran;
+# a 30s TTL removes that round trip from the hot path. Positive entries only —
+# invalid keys are never cached (and stay covered by the per-IP probe limit).
+# Trade-off: a revoked/expired key stays usable for up to TTL per process, and
+# ``last_used_at`` advances at most once per TTL window (it's a coarse "is this
+# key alive" signal, not an audit log).
+_API_KEY_CACHE_TTL_SECONDS = 30.0
+_api_key_cache: dict[bytes, tuple[float, AuthContext]] = {}
 
 
 @dataclass(frozen=True)
@@ -76,17 +87,24 @@ def _from_jwt(token: str) -> AuthContext | None:
 
 
 async def _from_api_key(raw_key: str) -> AuthContext | None:
+    key_hash = sha256_hash(raw_key)
+    entry = _api_key_cache.get(key_hash)
+    if entry is not None and time.monotonic() < entry[0]:
+        return entry[1]
     async with get_session() as session:
-        resolved = await _repository.resolve_api_key_by_hash(session, sha256_hash(raw_key))
+        resolved = await _repository.resolve_api_key_by_hash(session, key_hash)
     if resolved is None:
+        _api_key_cache.pop(key_hash, None)  # drop a stale positive on revocation
         return None
-    return AuthContext(
+    auth = AuthContext(
         user_id=resolved.created_by,
         workspace_id=resolved.workspace_id,
         role=_API_KEY_ROLE,
         scopes=resolved.scopes,
         kind="api_key",
     )
+    _api_key_cache[key_hash] = (time.monotonic() + _API_KEY_CACHE_TTL_SECONDS, auth)
+    return auth
 
 
 async def authenticate_api_key(raw_key: str) -> AuthContext | None:

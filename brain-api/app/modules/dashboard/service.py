@@ -72,12 +72,9 @@ class DashboardService:
                 raise NotFoundError("Workspace")
 
             user_name = await repo.get_user_name(session, auth.user_id)
+            metrics = await repo.metrics(session, workspace_id, KPI_SPECS)
             kpis = [
-                self._build_kpi(
-                    spec.id,
-                    spec.label,
-                    await repo.metric(session, workspace_id, spec),
-                )
+                self._build_kpi(spec.id, spec.label, metrics[spec.id])
                 for spec in KPI_SPECS
             ]
             sync = await repo.get_sync(session, workspace_id)

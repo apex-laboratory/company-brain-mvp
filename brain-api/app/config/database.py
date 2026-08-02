@@ -39,7 +39,9 @@ engine: AsyncEngine = create_async_engine(
     settings.database_url,  # must be postgresql+asyncpg://...
     pool_size=5,
     max_overflow=10,
-    pool_pre_ping=True,
+    # pre_ping costs ~3 WAN round-trips per checkout against the Supabase pooler;
+    # recycling idle connections after 5 min catches stale ones for free instead.
+    pool_recycle=300,
     echo=False,
 )
 
@@ -65,7 +67,7 @@ tenant_engine: AsyncEngine = create_async_engine(
     _tenant_url,
     pool_size=5,
     max_overflow=10,
-    pool_pre_ping=True,
+    pool_recycle=300,  # same rationale as the privileged pool above
     echo=False,
 )
 

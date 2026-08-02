@@ -182,7 +182,7 @@ async def answer(
     int 0-100. Must be called OUTSIDE any open DB transaction (it does network I/O).
     """
     user = _build_user(question, skills, provenance, history, evidence)
-    parsed, _usage = await sonnet_json(_SYSTEM, user, stage=_STAGE)
+    parsed, _usage = await sonnet_json(_SYSTEM, user, stage=_STAGE, interactive=True)
     grounded, confidence, used_ids = _score(parsed, top_similarity)
     return {
         "answer": str(parsed.get("answer") or "").strip(),
