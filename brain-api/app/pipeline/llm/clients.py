@@ -1,4 +1,4 @@
-"""Groq + Anthropic chat wrappers: JSON-mode calls with retry and cost capture.
+"""Gemini + Anthropic chat wrappers: JSON-mode calls with retry and cost capture.
 
 One lazy SDK singleton per provider (mirrors ``http_client()`` in
 ``app/integrations/base.py``). Keys are validated at first use, not import, so
@@ -18,12 +18,16 @@ from typing import Any
 
 from app.config.settings import settings
 from app.pipeline.llm.pricing import cost_usd
-from app.pipeline.llm.retry import with_retries
+from app.pipeline.llm.retry import (
+    INTERACTIVE_ATTEMPTS,
+    INTERACTIVE_RETRY_AFTER_CAP,
+    with_retries,
+)
 from app.pipeline.types import StageUsage
 
 log = logging.getLogger(__name__)
 
-_groq_client: Any = None
+_gemini_client: Any = None
 _anthropic_client: Any = None
 
 
@@ -40,24 +44,31 @@ def _require_key(name: str, value: str) -> str:
     return value
 
 
-def groq_client() -> Any:
-    """Lazy ``AsyncGroq`` singleton."""
-    global _groq_client
-    if _groq_client is None:
-        from groq import AsyncGroq
+def gemini_client() -> Any:
+    """Lazy ``genai.Client`` singleton (used via its ``.aio`` async surface)."""
+    global _gemini_client
+    if _gemini_client is None:
+        from google import genai
 
-        _groq_client = AsyncGroq(api_key=_require_key("GROQ_API_KEY", settings.groq_api_key))
-    return _groq_client
+        _gemini_client = genai.Client(
+            api_key=_require_key("GEMINI_API_KEY", settings.gemini_api_key)
+        )
+    return _gemini_client
 
 
 def anthropic_client() -> Any:
     """Lazy ``AsyncAnthropic`` singleton."""
     global _anthropic_client
     if _anthropic_client is None:
+        import httpx
         from anthropic import AsyncAnthropic
 
+        # SDK default is 600s + 2 internal retries; synthesis (2048 max_tokens)
+        # finishes well inside 120s. Fail fast — with_retries owns retrying.
         _anthropic_client = AsyncAnthropic(
-            api_key=_require_key("ANTHROPIC_API_KEY", settings.anthropic_api_key)
+            api_key=_require_key("ANTHROPIC_API_KEY", settings.anthropic_api_key),
+            timeout=httpx.Timeout(120.0, connect=5.0),
+            max_retries=1,
         )
     return _anthropic_client
 
@@ -74,22 +85,24 @@ def _parse_json(text: str) -> dict:
     return parsed
 
 
-async def _groq_call(system: str, user: str, *, max_tokens: int) -> tuple[str, int, int]:
-    resp = await groq_client().chat.completions.create(
-        model=settings.groq_model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.0,
-        max_tokens=max_tokens,
+async def _gemini_call(system: str, user: str, *, max_tokens: int) -> tuple[str, int, int]:
+    from google.genai import types
+
+    resp = await gemini_client().aio.models.generate_content(
+        model=settings.gemini_model,
+        contents=user,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=0.0,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json",
+        ),
     )
-    usage = resp.usage
+    usage = resp.usage_metadata
     return (
-        resp.choices[0].message.content or "",
-        usage.prompt_tokens if usage else 0,
-        usage.completion_tokens if usage else 0,
+        resp.text or "",
+        usage.prompt_token_count if usage and usage.prompt_token_count else 0,
+        usage.candidates_token_count if usage and usage.candidates_token_count else 0,
     )
 
 
@@ -106,14 +119,25 @@ async def _sonnet_call(system: str, user: str, *, max_tokens: int) -> tuple[str,
 
 
 async def _json_call(
-    call, system: str, user: str, *, stage: str, model: str, max_tokens: int
+    call,
+    system: str,
+    user: str,
+    *,
+    stage: str,
+    model: str,
+    max_tokens: int,
+    attempts: int | None = None,
+    max_retry_after: float | None = None,
 ) -> tuple[dict, StageUsage]:
     """Retry-wrapped call + JSON parse with a single reprompt on parse failure."""
     in_tok = out_tok = 0
 
     async def _attempt(prompt_user: str) -> tuple[str, int, int]:
         return await with_retries(
-            lambda: call(system, prompt_user, max_tokens=max_tokens), stage=stage
+            lambda: call(system, prompt_user, max_tokens=max_tokens),
+            stage=stage,
+            attempts=attempts,
+            max_retry_after=max_retry_after,
         )
 
     text, i, o = await _attempt(user)
@@ -143,19 +167,28 @@ async def _json_call(
     return parsed, usage
 
 
-async def groq_json(
+async def gemini_json(
     system: str, user: str, *, stage: str, max_tokens: int = 1024
 ) -> tuple[dict, StageUsage]:
-    """Groq JSON-mode chat call for the fast classifier stages."""
+    """Gemini JSON-mode chat call for the fast classifier + extraction stages."""
     return await _json_call(
-        _groq_call, system, user, stage=stage, model=settings.groq_model, max_tokens=max_tokens
+        _gemini_call, system, user, stage=stage, model=settings.gemini_model,
+        max_tokens=max_tokens,
     )
 
 
 async def sonnet_json(
-    system: str, user: str, *, stage: str, max_tokens: int = 2048
+    system: str,
+    user: str,
+    *,
+    stage: str,
+    max_tokens: int = 2048,
+    interactive: bool = False,
 ) -> tuple[dict, StageUsage]:
-    """Sonnet chat call (JSON instructed via prompt) for the extraction stages."""
+    """Sonnet chat call (JSON instructed via prompt).
+
+    ``interactive=True`` uses the request-path budget (2 attempts, 5s
+    retry-after cap) — the brain synthesizer runs while a user waits."""
     return await _json_call(
         _sonnet_call,
         system,
@@ -163,6 +196,8 @@ async def sonnet_json(
         stage=stage,
         model=settings.anthropic_model,
         max_tokens=max_tokens,
+        attempts=INTERACTIVE_ATTEMPTS if interactive else None,
+        max_retry_after=INTERACTIVE_RETRY_AFTER_CAP if interactive else None,
     )
 
 

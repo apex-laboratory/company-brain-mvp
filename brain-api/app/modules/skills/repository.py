@@ -56,6 +56,29 @@ class SkillsRepository:
         row = (await session.execute(stmt)).mappings().first()
         return dict(row) if row else None
 
+    async def get_many(
+        self,
+        session: AsyncSession,
+        skill_ids: list[str],
+        *,
+        statuses: tuple[str, ...] | None = None,
+    ) -> list[dict]:
+        """Full skill bodies for ``skill_ids`` in one round trip, returned in the
+        input order (callers pass ids ranked by similarity). Missing/deleted/
+        out-of-status ids are simply absent."""
+        if not skill_ids:
+            return []
+        clause = " AND status = ANY(:statuses)" if statuses is not None else ""
+        stmt = text(
+            f"SELECT {_SKILL_COLUMNS} FROM skills "
+            f"WHERE id = ANY(:ids) AND deleted_at IS NULL{clause}"
+        ).bindparams(ids=list(skill_ids))
+        if statuses is not None:
+            stmt = stmt.bindparams(statuses=list(statuses))
+        rows = (await session.execute(stmt)).mappings().all()
+        by_id = {r["id"]: dict(r) for r in rows}
+        return [by_id[i] for i in skill_ids if i in by_id]
+
     async def list_versions(self, session: AsyncSession, skill_id: str) -> list[dict]:
         """Version history for a skill, oldest first."""
         rows = (

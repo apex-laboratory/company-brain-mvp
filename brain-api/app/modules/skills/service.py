@@ -8,6 +8,7 @@ connection — the orchestrator/reviews rule). Every read runs RLS-scoped.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import io
@@ -64,7 +65,7 @@ class SkillsService:
     ) -> list[SkillSearchResult]:
         """Semantic search over published skills; logs the interaction."""
         workspace_id, role = _require_workspace(auth)
-        embedding, _ = await embedder.embed_text(query)
+        embedding, _ = await embedder.embed_text(query, interactive=True)
         async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
@@ -79,18 +80,18 @@ class SkillsService:
                 matched_confidence=top.similarity if top else None,
                 match_type="semantic" if matched else "no_match",
             )
-            hit_ids = [h.id for h in hits]
-            usage = await self._repo.usage_by_ids(session, hit_ids)
-            series = await self._repo.call_series(session, hit_ids)
+            # calls_30d/updated_at ride along on the vector query itself —
+            # no second SELECT over the rows we just retrieved.
+            series = await self._repo.call_series(session, [h.id for h in hits])
             await session.commit()
         return [
             SkillSearchResult(
                 id=h.id, name=h.name, version=h.version, status=h.status,
                 base_logic=h.base_logic, exceptions_block=h.exceptions_block,
                 source_authority=h.source_authority, similarity=round(h.similarity, 4),
-                calls30d=usage.get(h.id, {}).get("calls_30d", 0),
+                calls30d=h.calls_30d,
                 call_series=_densify_series(series.get(h.id, {})),
-                updated_at=usage.get(h.id, {}).get("updated_at"),
+                updated_at=h.updated_at,
             )
             for h in hits
         ]
@@ -256,7 +257,7 @@ class SkillsService:
             )
             return {**cached, "interaction_id": interaction_id, "cache_hit": True}
 
-        embedding, _ = await embedder.embed_text(situation)
+        embedding, _ = await embedder.embed_text(situation, interactive=True)
         async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
@@ -341,13 +342,9 @@ class SkillsService:
             session, workspace_id, auth.user_id, role
         ):
             skills = await self._repo.list_published(session)
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            used: set[str] = set()
-            for skill in skills:
-                fname = _unique_filename(_slug(skill["name"]), used)
-                zf.writestr(fname, _render_markdown(skill))
-        return buf.getvalue()
+        # DEFLATE over every skill body is CPU-bound — run it off the event loop
+        # so a large export doesn't stall every other in-flight request.
+        return await asyncio.to_thread(_build_export_zip, skills)
 
     async def override(
         self, auth: AuthContext, interaction_id: str, reason: str | None
@@ -459,6 +456,17 @@ def _semantic_response(skill: dict, similarity: float) -> dict:
 def _slug(name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", (name or "skill").lower()).strip("-")
     return s or "skill"
+
+
+def _build_export_zip(skills: list[dict]) -> bytes:
+    """Render + DEFLATE the export bundle (sync, CPU-bound — call via to_thread)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        used: set[str] = set()
+        for skill in skills:
+            fname = _unique_filename(_slug(skill["name"]), used)
+            zf.writestr(fname, _render_markdown(skill))
+    return buf.getvalue()
 
 
 def _unique_filename(slug: str, used: set[str]) -> str:

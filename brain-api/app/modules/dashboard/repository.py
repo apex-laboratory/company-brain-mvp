@@ -133,6 +133,62 @@ KPI_SPECS: tuple[_MetricSpec, ...] = (
 )
 
 
+def _metric_subquery(spec: _MetricSpec) -> str:
+    """One KPI's aggregate as a self-contained subquery (own WITH clause), so
+    ``metrics`` can UNION ALL every spec into a single statement.
+
+    ``spec.table``/``spec.predicate`` are trusted module constants — never
+    request data; ``workspace_id`` stays a bound parameter.
+    """
+    return f"""
+        WITH t AS (
+            SELECT created_at FROM {spec.table}
+            WHERE workspace_id = :workspace_id AND {spec.predicate}
+        ),
+        days AS (
+            SELECT generate_series(
+                date_trunc('day', now()) - interval '6 days',
+                date_trunc('day', now()),
+                interval '1 day'
+            ) AS day
+        ),
+        -- One scan of t for every count: total + the two trend windows + the
+        -- cumulative base (everything created before the 7-day spark window).
+        agg AS (
+            SELECT
+                count(*) AS total,
+                count(*) FILTER (
+                    WHERE created_at >= now() - interval '7 days') AS recent,
+                count(*) FILTER (
+                    WHERE created_at >= now() - interval '14 days'
+                      AND created_at <  now() - interval '7 days') AS prior,
+                count(*) FILTER (
+                    WHERE created_at <  date_trunc('day', now())
+                                        - interval '6 days') AS base
+            FROM t
+        ),
+        -- One grouped scan of t for the per-day buckets inside the window.
+        daily AS (
+            SELECT date_trunc('day', created_at) AS day, count(*) AS c
+            FROM t
+            WHERE created_at >= date_trunc('day', now()) - interval '6 days'
+            GROUP BY 1
+        )
+        SELECT
+            a.total, a.recent, a.prior,
+            (SELECT array_agg(cum ORDER BY day) FROM (
+                -- cumulative total at each day-end: the base plus the running
+                -- sum of that day's new items, oldest first.
+                SELECT d.day,
+                       a.base + sum(COALESCE(dd.c, 0))
+                           OVER (ORDER BY d.day) AS cum
+                FROM days d
+                LEFT JOIN daily dd ON dd.day = d.day
+            ) s) AS spark
+        FROM agg a
+    """
+
+
 class DashboardRepository:
     """Stateless repository; methods take the session they run in."""
 
@@ -161,76 +217,34 @@ class DashboardRepository:
         ).first()
         return row.name if row is not None else None
 
-    async def metric(
-        self, session: AsyncSession, workspace_id: str, spec: _MetricSpec
-    ) -> MetricAgg:
-        """Aggregate one KPI from ``created_at`` (no historical snapshot table).
+    async def metrics(
+        self, session: AsyncSession, workspace_id: str, specs: tuple[_MetricSpec, ...]
+    ) -> dict[str, MetricAgg]:
+        """Aggregate every KPI in ONE round trip, keyed by spec id.
 
-        ``spec.table``/``spec.predicate`` are module constants; ``workspace_id``
+        ``spec.id``/``table``/``predicate`` are module constants; ``workspace_id``
         is bound. ``spark`` is the cumulative total at the end of each of the
         last 7 days; ``recent``/``prior`` are the trailing-7-day windows used for
-        the trend.
+        the trend. The per-spec aggregates are UNION ALL branches of a single
+        statement — the overview used to await them sequentially (4 round trips).
         """
-        sql = f"""
-            WITH t AS (
-                SELECT created_at FROM {spec.table}
-                WHERE workspace_id = :workspace_id AND {spec.predicate}
-            ),
-            days AS (
-                SELECT generate_series(
-                    date_trunc('day', now()) - interval '6 days',
-                    date_trunc('day', now()),
-                    interval '1 day'
-                ) AS day
-            ),
-            -- One scan of t for every count: total + the two trend windows + the
-            -- cumulative base (everything created before the 7-day spark window).
-            agg AS (
-                SELECT
-                    count(*) AS total,
-                    count(*) FILTER (
-                        WHERE created_at >= now() - interval '7 days') AS recent,
-                    count(*) FILTER (
-                        WHERE created_at >= now() - interval '14 days'
-                          AND created_at <  now() - interval '7 days') AS prior,
-                    count(*) FILTER (
-                        WHERE created_at <  date_trunc('day', now())
-                                            - interval '6 days') AS base
-                FROM t
-            ),
-            -- One grouped scan of t for the per-day buckets inside the window.
-            daily AS (
-                SELECT date_trunc('day', created_at) AS day, count(*) AS c
-                FROM t
-                WHERE created_at >= date_trunc('day', now()) - interval '6 days'
-                GROUP BY 1
-            )
-            SELECT
-                a.total, a.recent, a.prior,
-                (SELECT array_agg(cum ORDER BY day) FROM (
-                    -- cumulative total at each day-end: the base plus the running
-                    -- sum of that day's new items, oldest first.
-                    SELECT d.day,
-                           a.base + sum(COALESCE(dd.c, 0))
-                               OVER (ORDER BY d.day) AS cum
-                    FROM days d
-                    LEFT JOIN daily dd ON dd.day = d.day
-                ) s) AS spark
-            FROM agg a
-        """  # table/predicate are trusted module constants, never request input
+        sql = " UNION ALL ".join(
+            f"SELECT '{spec.id}' AS id, m.* FROM ({_metric_subquery(spec)}) m"
+            for spec in specs
+        )  # id/table/predicate are trusted module constants, never request input
 
-        row = (
-            await session.execute(
-                text(sql).bindparams(workspace_id=workspace_id)
+        rows = (
+            await session.execute(text(sql).bindparams(workspace_id=workspace_id))
+        ).all()
+        return {
+            row.id: MetricAgg(
+                total=int(row.total),
+                recent=int(row.recent),
+                prior=int(row.prior),
+                spark=[int(x) for x in (row.spark or [])],
             )
-        ).one()
-        spark = [int(x) for x in (row.spark or [])]
-        return MetricAgg(
-            total=int(row.total),
-            recent=int(row.recent),
-            prior=int(row.prior),
-            spark=spark,
-        )
+            for row in rows
+        }
 
     async def get_sync(self, session: AsyncSession, workspace_id: str) -> SyncRow:
         row = (

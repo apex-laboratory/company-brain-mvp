@@ -56,20 +56,27 @@ def _wire(repo, integration):  # noqa: ANN001
 
 @pytest.mark.asyncio
 async def test_event_fans_out_to_every_workspace_with_the_account() -> None:
+    # Each workspace gets its own event id — a single truthy stub would let the
+    # per-workspace enqueue assertion below pass on the wrong id.
     repo = MagicMock(
         resolve_all_by_account=AsyncMock(
             return_value=[("src_1", "wrk_1"), ("src_2", "wrk_2")]
         ),
-        insert_event=AsyncMock(return_value=True),
+        insert_event=AsyncMock(side_effect=["evt_1", "evt_2"]),
     )
     integration = MagicMock(normalize=MagicMock(return_value=_event()))
     p = _wire(repo, integration)
-    with p[0], p[1], p[2], p[3], p[4]:
+    with p[0], p[1], p[2], p[3], p[4], patch.object(wi, "enqueue", AsyncMock()) as enq:
         result = await wi.webhook_ingest({}, "slack", {"team_id": "T1", "id": "m1"})
 
     assert result == {"inserted": 2}
     workspaces = [c.args[1] for c in repo.insert_event.await_args_list]
     assert workspaces == ["wrk_1", "wrk_2"]
+    # Extraction is fanned out per workspace, each with that workspace's event id.
+    assert [c.args for c in enq.await_args_list] == [
+        ("extract_event", "wrk_1", "evt_1"),
+        ("extract_event", "wrk_2", "evt_2"),
+    ]
 
 
 @pytest.mark.asyncio

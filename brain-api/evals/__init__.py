@@ -15,7 +15,7 @@ after touching anything in ``app/pipeline/prompts/``:
     python -m evals --suite relevance          # one suite
     python -m evals --json                     # machine-readable report
 
-Requires real ``GROQ_API_KEY`` / ``ANTHROPIC_API_KEY`` in the environment — the
+Requires real ``GEMINI_API_KEY`` / ``ANTHROPIC_API_KEY`` in the environment — the
 harness measures prompt quality, so there is nothing meaningful to run against
 mocks. (The harness *logic* is unit-tested with fakes in ``app/tests/evals/``.)
 """

@@ -1,4 +1,4 @@
-"""Relevance gate prompt (Groq): binary — does this contain operational logic?"""
+"""Relevance gate prompt (Gemini): binary — does this contain operational logic?"""
 
 SYSTEM = """\
 You are a relevance classifier for a company knowledge base. You are shown one \

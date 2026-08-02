@@ -50,7 +50,7 @@ Every new endpoint or agent-facing tool MUST:
 4. **Keep SQL parameter-bound** — never string-interpolate. Repositories are stateless, take `session` first, and are the only place SQL lives.
 5. **Return** via the `ok()/created()` envelope (`app/shared/http/respond.py`); raise typed `AppError` subclasses (never bare `HTTPException` for domain errors).
 6. **Rate-limit** internet-facing routes with `@limiter.limit(...)`.
-7. **Do network I/O (LLM/embedding calls) OUTSIDE any open transaction** — never pin a pooled connection during an OpenAI/Groq call. See the two-phase pattern in `app/modules/reviews/service.py::approve`.
+7. **Do network I/O (LLM/embedding calls) OUTSIDE any open transaction** — never pin a pooled connection during an OpenAI/Gemini call. See the two-phase pattern in `app/modules/reviews/service.py::approve`.
 8. **Module shape**: `router` (paths + deps only) → `service` (business logic) → `repository` (SQL). Response schemas serialize camelCase (`CamelModel`); request schemas reject unknown keys (`CamelRequestModel`).
 
 ### Auth model in one line

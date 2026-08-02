@@ -93,6 +93,15 @@ def _svc(review: dict | None, skill: dict | None = None):
             service_module.embedder, "embed_text",
             AsyncMock(return_value=([0.0] * 1536, StageUsage("e", "m", 1, 0, 0.0))),
         ),
+        patch.object(
+            service_module.embedder, "embed_texts",
+            AsyncMock(
+                side_effect=lambda texts, **_kw: (
+                    [[0.0] * 1536 for _ in texts],
+                    StageUsage("e", "m", 1, 0, 0.0),
+                )
+            ),
+        ),
     )
     return svc, repo, skills, patches
 
@@ -299,21 +308,24 @@ async def test_resolve_contradiction_write_requires_correction() -> None:
 async def test_bulk_approve_reports_per_item() -> None:
     svc, _repo, _skills, patches = _svc(None)
     _enter(patches)
-    # Stub the single-item approve: rev_1 succeeds, rev_2 already resolved, rev_3 missing.
-    outcomes = {
-        "rev_1": ResolveResult(id="rev_1", status="approved", verdict="approve"),
+    # Stub the shared phases: rev_1 peeks fine, rev_2 already resolved, rev_3 missing.
+    peek_outcomes = {
+        "rev_1": ("skl_1", None),
         "rev_2": ConflictError("Review already approved."),
         "rev_3": NotFoundError("Review"),
     }
 
-    async def fake_approve(auth, review_id, comment):
-        val = outcomes[review_id]
+    async def fake_peek(session, review_id):
+        val = peek_outcomes[review_id]
         if isinstance(val, Exception):
             raise val
         return val
 
     try:
-        with patch.object(svc, "approve", side_effect=fake_approve):
+        with (
+            patch.object(svc, "_peek_approve", side_effect=fake_peek),
+            patch.object(svc, "_commit_approve", AsyncMock()) as commit,
+        ):
             result = await svc.bulk_approve(_auth(), ["rev_1", "rev_2", "rev_3", "rev_1"], None)
     finally:
         _exit(patches)
@@ -321,6 +333,7 @@ async def test_bulk_approve_reports_per_item() -> None:
     assert result.approved == 1 and result.skipped == 2  # rev_1 de-duped
     by_id = {r.id: r.status for r in result.results}
     assert by_id == {"rev_1": "approved", "rev_2": "skipped", "rev_3": "skipped"}
+    commit.assert_awaited_once()  # only the peek-clean item reaches the write phase
 
 
 # ── reject ─────────────────────────────────────────────────────────────────────

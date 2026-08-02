@@ -65,6 +65,10 @@ class SimilarSkill:
     source_authority: str | None
     similarity: float
     status: str | None = None
+    # Usage columns projected by the same vector query so the search surface
+    # doesn't have to re-SELECT the rows it just retrieved.
+    calls_30d: int = 0
+    updated_at: object | None = None
 
 
 def _vector_literal(embedding: list[float]) -> str:
@@ -157,7 +161,7 @@ class PipelineRepository:
                 text(
                     """
                     SELECT id, name, version, base_logic, exceptions_block,
-                           source_authority, status,
+                           source_authority, status, calls_30d, updated_at,
                            1 - (embedding <=> CAST(:vec AS vector)) AS similarity
                       FROM skills
                      WHERE workspace_id = :ws
@@ -185,6 +189,8 @@ class PipelineRepository:
                 source_authority=r["source_authority"],
                 similarity=float(r["similarity"]),
                 status=r["status"],
+                calls_30d=int(r["calls_30d"] or 0),
+                updated_at=r["updated_at"],
             )
             for r in rows
         ]

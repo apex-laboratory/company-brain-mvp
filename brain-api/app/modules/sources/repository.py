@@ -337,6 +337,30 @@ class SourcesRepository:
             )
         )
 
+    async def upsert_channels(
+        self, session: AsyncSession, rows: list[dict]
+    ) -> None:
+        """Batch form of ``upsert_channel`` — one executemany instead of a round
+        trip per channel (a Slack picker can submit hundreds). ``rows`` carry the
+        same keys as ``upsert_channel``'s parameters (``id``, ``workspace_id``,
+        ``source_id``, ``provider``, ``external_id``, ``name``, ``selected``)."""
+        if not rows:
+            return
+        await session.execute(
+            text(
+                """
+                INSERT INTO source_channels
+                    (id, workspace_id, source_id, provider, external_id, name, selected)
+                VALUES
+                    (:id, :workspace_id, :source_id, CAST(:provider AS source_provider),
+                     :external_id, :name, :selected)
+                ON CONFLICT ON CONSTRAINT source_channels_source_id_external_id_key
+                DO UPDATE SET name = EXCLUDED.name, selected = EXCLUDED.selected
+                """
+            ),
+            rows,
+        )
+
     async def get_connection_provider(
         self, session: AsyncSession, connection_id: str
     ) -> str | None:

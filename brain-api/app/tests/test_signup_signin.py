@@ -326,6 +326,22 @@ async def test_signup_route_returns_201_envelope(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_signup_route_sets_refresh_cookie(client: AsyncClient) -> None:
+    """Signup must set the httpOnly refresh cookie, not just return the raw
+    token in the JSON body — the FE's silent-refresh-on-reload only ever reads
+    the cookie (tokens.ts), so a session that never gets a cookie can't survive
+    any full-page navigation (e.g. an OAuth-connect redirect round trip)."""
+    _override(_StubService(result=_session_out(workspace=None, next_step="onboarding")))
+
+    resp = await client.post("/api/v1/auth/signup", json={"email": "dana@riverline.io"})
+
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "refresh_token=refresh.raw" in set_cookie
+    assert "httponly" in set_cookie.lower()
+    assert "path=/api/v1/auth" in set_cookie.lower()
+
+
+@pytest.mark.asyncio
 async def test_signin_route_returns_200_with_workspace(client: AsyncClient) -> None:
     workspace = WorkspaceOut(id="wrk_1", name="Riverline", slug="riverline")
     _override(_StubService(result=_session_out(workspace=workspace, next_step="dashboard")))
@@ -336,6 +352,18 @@ async def test_signin_route_returns_200_with_workspace(client: AsyncClient) -> N
     body = resp.json()
     assert body["data"]["nextStep"] == "dashboard"
     assert body["data"]["workspace"]["slug"] == "riverline"
+
+
+@pytest.mark.asyncio
+async def test_signin_route_sets_refresh_cookie(client: AsyncClient) -> None:
+    workspace = WorkspaceOut(id="wrk_1", name="Riverline", slug="riverline")
+    _override(_StubService(result=_session_out(workspace=workspace, next_step="dashboard")))
+
+    resp = await client.post("/api/v1/auth/signin", json={"email": "dana@riverline.io"})
+
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "refresh_token=refresh.raw" in set_cookie
+    assert "httponly" in set_cookie.lower()
 
 
 @pytest.mark.asyncio

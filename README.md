@@ -9,35 +9,33 @@ Multi-tenant SaaS. Each company gets isolated data via Postgres Row Level Securi
 ```
 Sources (Slack / Jira / GitHub / Notion / Zendesk)
   → Webhook ingest + sweep pipeline
-  → Groq 6-step extraction → skills
+  → Gemini 6-step extraction → skills
   → PostgreSQL (Supabase) + pgvector
   → FastMCP SSE → AI agents
 ```
 
 ## Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Database | Supabase (Postgres 16 + pgvector + RLS) |
-| API | FastAPI |
-| Agent delivery | FastMCP SSE |
-| Vector search | HNSW index (1536-dim) |
-| Token encryption | pgcrypto (BYTEA) |
-| Auth | Supabase Auth (JWT with org_id claim) |
+| Layer            | Technology                              |
+| ---------------- | --------------------------------------- |
+| Database         | Supabase (Postgres 16 + pgvector + RLS) |
+| API              | FastAPI                                 |
+| Agent delivery   | FastMCP SSE                             |
+| Vector search    | HNSW index (1536-dim)                   |
+| Token encryption | pgcrypto (BYTEA)                        |
+| Auth             | Supabase Auth (JWT with workspace_id claim) |
 
 ## Database schema
 
-16 tables across three concerns:
+**Tenant layer** — `workspaces`, `users`, `workspace_members`, `invitations`, `workspace_settings`
 
-**Tenant layer** — `organizations`, `users`, `organization_members`, `invitations`, `organization_settings`
+**Knowledge layer** — `skills`, `skill_versions`, `reviews`, `agent_interactions`
 
-**Knowledge layer** — `skills`, `skill_versions`, `review_queue`, `agent_interactions`
+**Integration layer** — `source_connections`, `source_channels`, `webhook_subscriptions`, `source_events`, `sweeps`
 
-**Integration layer** — `source_connections`, `webhook_subscriptions`, `source_events`, `sweeps`
+**Platform layer** — `api_keys`, `usage_periods`, `audit_log`
 
-**Platform layer** — `organization_api_keys`, `organization_usage`, `audit_log`
-
-RLS is enabled on every table. `org_id` is present on all data tables and enforced at the DB layer — no app-level filtering required. OAuth tokens and webhook secrets are stored encrypted (`BYTEA` via pgcrypto).
+RLS is enabled on every workspace-scoped table. `workspace_id` is present on all data tables and enforced at the DB layer — no app-level filtering required. `companies` is the one table with no `workspace_id`; it's a cross-tenant registry, so RLS does not apply. OAuth tokens and webhook secrets are stored encrypted (`BYTEA` via pgcrypto).
 
 See `docs/schema-future-improvements.md` for deferred architectural decisions.
 
@@ -58,7 +56,12 @@ owner > admin > editor > viewer
 cd brain-api
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn app.main:app --reload --port 4000
+
+# Worker (ARQ) — processes source syncs, extraction jobs, embedding backfills, etc.
+# Requires Redis (REDIS_URL) and runs in its own process, separate from the API.
+cd brain-api
+arq app.jobs.worker.WorkerSettings
 ```
 
 ## Environment variables
@@ -68,6 +71,7 @@ SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_JWT_SECRET=
 ENCRYPTION_KEY=          # used by pgcrypto for OAuth token encryption
-GROQ_API_KEY=
+GEMINI_API_KEY=
 ANTHROPIC_API_KEY=
+REDIS_URL=               # required by the worker (arq job queue)
 ```

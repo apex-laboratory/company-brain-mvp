@@ -116,13 +116,18 @@ class Settings(BaseSettings):
     # ── extraction pipeline LLMs (Phase 3) ───────────────────────────────────
     # Empty-string defaults so the API/worker boot without keys; the LLM client
     # raises at first use if a stage needs a missing key (pipeline-only failure).
-    groq_api_key: str = ""
+    gemini_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    # "-latest" alias always resolves to Google's current cheapest flash-lite
+    # model, so a future model retirement (like gemini-2.5-flash-lite's, which
+    # this pinned) doesn't silently 404 the whole pipeline again. Fine for the
+    # fast classifier stages and (for now, while ANTHROPIC_API_KEY is out) the
+    # extraction stages too.
+    gemini_model: str = "gemini-flash-lite-latest"
     anthropic_model: str = "claude-sonnet-5"
     embedding_model: str = "text-embedding-3-small"
-    llm_max_attempts: int = 3  # per-call attempts inside the pipeline retry wrapper
+    llm_max_attempts: int = 5  # per-call attempts inside the pipeline retry wrapper
 
     # ── brain chat (delivery — BACKEND_ASKS §7) ───────────────────────────────
     # Global kill-switch for the "Ask the brain" chat surface. Ops can hard-disable

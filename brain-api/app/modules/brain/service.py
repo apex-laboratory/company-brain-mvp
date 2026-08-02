@@ -127,17 +127,21 @@ class BrainService:
         """Answer ``question`` from the workspace's reviewed skills + provenance.
 
         Two-phase transaction discipline: retrieve (txn A) → synthesize (no txn) →
-        log + persist (txn B). A cache hit skips retrieval/synthesis entirely; a
-        below-threshold or ungrounded result returns an honest no-match, uncached.
+        log + persist (txn B). A cache hit skips retrieval/synthesis entirely — and
+        the readiness count (a cached grounded answer proves the workspace was
+        indexed; the kill-switch is still honored first). A below-threshold or
+        ungrounded result returns an honest no-match, uncached.
         """
-        await self._ensure_ready(auth)
+        if not settings.brain_chat_enabled:
+            raise BrainNotReadyError("disabled", "Brain chat is currently disabled.")
         workspace_id, role = _require_workspace(auth)
 
         cached = await cache.get_cached_search(workspace_id, question, kind=_CACHE_KIND)
         if cached is not None:
             return await self._finalize(auth, question, cached, conversation_id)
 
-        embedding, _ = await embedder.embed_text(question)  # network — outside any txn
+        await self._ensure_ready(auth)
+        embedding, _ = await embedder.embed_text(question, interactive=True)  # network — outside any txn
         ctx = await self._retrieve(auth, workspace_id, role, embedding)
 
         # Synthesis — network I/O, strictly OUTSIDE the transaction above.
@@ -180,12 +184,11 @@ class BrainService:
             citations: dict[str, dict] = {}
             history: list[dict] = []
             if skill_matched:
-                for h in hits:
-                    if h.similarity < _MATCH_THRESHOLD:
-                        continue
-                    full = await self._skills.get(session, h.id, statuses=PUBLISHED_STATUSES)
-                    if full is not None:
-                        skills_ctx.append(full)
+                skills_ctx = await self._skills.get_many(
+                    session,
+                    [h.id for h in hits if h.similarity >= _MATCH_THRESHOLD],
+                    statuses=PUBLISHED_STATUSES,
+                )
                 matched_ids = [s["id"] for s in skills_ctx]
                 provenance = jsonable_encoder(await self._repo.provenance(session, top.id))
                 citations = await self._repo.skill_citations(session, matched_ids)
@@ -213,13 +216,24 @@ class BrainService:
 
         The readiness check runs **here**, before any streaming begins, so an unready
         workspace still gets a typed 409 rather than a 200 whose body happens to carry
-        an error event.
+        an error event. A cache hit skips the readiness count (same reasoning as
+        ``query``): the kill-switch check still runs, and the cached answer proves
+        the workspace was indexed.
         """
-        await self._ensure_ready(auth)
-        return self._stream_events(auth, question, conversation_id)
+        if not settings.brain_chat_enabled:
+            raise BrainNotReadyError("disabled", "Brain chat is currently disabled.")
+        workspace_id, role = _require_workspace(auth)
+        cached = await cache.get_cached_search(workspace_id, question, kind=_CACHE_KIND)
+        if cached is None:
+            await self._ensure_ready(auth)
+        return self._stream_events(auth, question, conversation_id, cached=cached)
 
     async def _stream_events(
-        self, auth: AuthContext, question: str, conversation_id: str | None
+        self,
+        auth: AuthContext,
+        question: str,
+        conversation_id: str | None,
+        cached: dict | None = None,
     ) -> AsyncIterator[tuple[str, dict]]:
         """Yield ``(event, payload)``: ``status`` → ``token``* → ``done``.
 
@@ -229,14 +243,13 @@ class BrainService:
         """
         workspace_id, role = _require_workspace(auth)
 
-        cached = await cache.get_cached_search(workspace_id, question, kind=_CACHE_KIND)
         if cached is not None:
             response = await self._finalize(auth, question, cached, conversation_id)
             yield "done", response.model_dump(by_alias=True)
             return
 
         yield "status", {"stage": "retrieving"}
-        embedding, _ = await embedder.embed_text(question)
+        embedding, _ = await embedder.embed_text(question, interactive=True)
         ctx = await self._retrieve(auth, workspace_id, role, embedding)
 
         top, evidence = ctx["top"], ctx["evidence"]

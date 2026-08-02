@@ -64,66 +64,56 @@ class BrainRepository:
         ``skills.changed_by``/``skill_versions.changed_by`` are not yet populated by
         the pipeline, so ``createdBy``/``lastEditedBy`` names come back null). The
         service passes these through verbatim; unrecorded stays unrecorded.
+
+        One statement, one round trip: the four single-row lookups run as
+        ``row_to_json`` scalar subqueries (timestamps come back as ISO strings,
+        which the response schema parses).
         """
-        approved_by = (
+        row = (
             await session.execute(
                 text(
                     """
-                    SELECT r.resolved_by AS id, u.name, r.resolved_at AS at
-                      FROM reviews r
-                      LEFT JOIN users u ON u.id = r.resolved_by
-                     WHERE r.skill_id = :sid
-                       AND r.verdict = 'approve'
-                       AND r.resolved_by IS NOT NULL
-                     ORDER BY r.resolved_at DESC NULLS LAST
-                     LIMIT 1
+                    SELECT
+                      (SELECT row_to_json(x) FROM (
+                         SELECT u.name, r.resolved_at AS at
+                           FROM reviews r
+                           LEFT JOIN users u ON u.id = r.resolved_by
+                          WHERE r.skill_id = :sid
+                            AND r.verdict = 'approve'
+                            AND r.resolved_by IS NOT NULL
+                          ORDER BY r.resolved_at DESC NULLS LAST
+                          LIMIT 1) x) AS approved_by,
+                      (SELECT row_to_json(x) FROM (
+                         SELECT evidence_author AS name, source_provider AS via,
+                                source_location AS location
+                           FROM reviews
+                          WHERE skill_id = :sid AND evidence_author IS NOT NULL
+                          ORDER BY created_at DESC
+                          LIMIT 1) x) AS originated_by,
+                      (SELECT row_to_json(x) FROM (
+                         SELECT sv.change_type, u.name
+                           FROM skill_versions sv
+                           LEFT JOIN users u ON u.id = sv.changed_by
+                          WHERE sv.skill_id = :sid
+                          ORDER BY sv.created_at ASC
+                          LIMIT 1) x) AS created_by,
+                      (SELECT row_to_json(x) FROM (
+                         SELECT u.name, s.updated_at AS at
+                           FROM skills s
+                           LEFT JOIN users u ON u.id = s.changed_by
+                          WHERE s.id = :sid AND s.deleted_at IS NULL) x) AS last_edited_by
                     """
                 ).bindparams(sid=skill_id)
             )
         ).mappings().first()
 
-        originated_by = (
-            await session.execute(
-                text(
-                    """
-                    SELECT evidence_author AS name, source_provider AS via,
-                           source_location AS location
-                      FROM reviews
-                     WHERE skill_id = :sid AND evidence_author IS NOT NULL
-                     ORDER BY created_at DESC
-                     LIMIT 1
-                    """
-                ).bindparams(sid=skill_id)
-            )
-        ).mappings().first()
+        def _obj(value) -> dict | None:
+            return json.loads(value) if isinstance(value, str) else value
 
-        created_by = (
-            await session.execute(
-                text(
-                    """
-                    SELECT sv.change_type, sv.changed_by AS id, u.name
-                      FROM skill_versions sv
-                      LEFT JOIN users u ON u.id = sv.changed_by
-                     WHERE sv.skill_id = :sid
-                     ORDER BY sv.created_at ASC
-                     LIMIT 1
-                    """
-                ).bindparams(sid=skill_id)
-            )
-        ).mappings().first()
-
-        last_edited_by = (
-            await session.execute(
-                text(
-                    """
-                    SELECT s.changed_by AS id, u.name, s.updated_at AS at
-                      FROM skills s
-                      LEFT JOIN users u ON u.id = s.changed_by
-                     WHERE s.id = :sid AND s.deleted_at IS NULL
-                    """
-                ).bindparams(sid=skill_id)
-            )
-        ).mappings().first()
+        approved_by = _obj(row["approved_by"]) if row else None
+        originated_by = _obj(row["originated_by"]) if row else None
+        created_by = _obj(row["created_by"]) if row else None
+        last_edited_by = _obj(row["last_edited_by"]) if row else None
 
         return {
             "approved_by": (

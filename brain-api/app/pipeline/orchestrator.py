@@ -345,7 +345,7 @@ async def run_pipeline(
     routing = authority_mod.routing_config()
     evidence = decisions[0] if decisions else None
 
-    # ── boundary classification (pgvector search + optional Groq) ─────────────
+    # ── boundary classification (pgvector search + optional Gemini) ───────────
     scope = _SWEEP_SCOPE if sweep_sourced else _PUBLISHED_SCOPE
     async with get_tenant_session() as session, run_in_tenant(
         session, workspace_id, "system", "admin"

@@ -36,7 +36,7 @@ def _repo() -> MagicMock:
     return MagicMock(
         get_connection_provider=AsyncMock(return_value="slack"),
         update_lookback=AsyncMock(),
-        upsert_channel=AsyncMock(),
+        upsert_channels=AsyncMock(),
         list_channels=AsyncMock(return_value=[]),
     )
 
@@ -60,7 +60,7 @@ async def test_lookback_days_persisted_when_provided() -> None:
     repo = await _select(req)
     repo.update_lookback.assert_awaited_once()
     assert repo.update_lookback.await_args.args[1:] == ("src_1", 180)
-    repo.upsert_channel.assert_awaited_once()
+    repo.upsert_channels.assert_awaited_once()
 
 
 @pytest.mark.asyncio

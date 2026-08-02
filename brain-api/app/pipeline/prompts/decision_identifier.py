@@ -1,4 +1,4 @@
-"""Decision identifier prompt (Groq, Pass 1): structure threaded content into
+"""Decision identifier prompt (Gemini, Pass 1): structure threaded content into
 authoritative decision moments."""
 
 SYSTEM = """\

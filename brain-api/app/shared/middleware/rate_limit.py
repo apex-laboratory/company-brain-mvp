@@ -1,17 +1,30 @@
 """Rate limiting (BACKEND_BEST_PRACTICES.md §9, API_DOCUMENTATION.md §Rate Limits).
 
-slowapi with a Redis backend so limits hold across instances. Per-surface key
-functions: IP for auth, user_id for dashboard/OAuth callbacks, workspace_id for
-brain/skills. Limit values are applied per-route via ``@limiter.limit(...)``.
+Async Redis fixed-window counters so limits hold across instances. Per-surface
+key functions: IP for auth, user_id for dashboard/OAuth callbacks, workspace_id
+for brain/skills. Limit values are applied per-route via ``@limiter.limit(...)``.
+
+``limiter`` used to be a slowapi ``Limiter``; slowapi only supports synchronous
+storage, so every decorated route blocked the event loop on Redis I/O. The
+drop-in ``_AsyncRouteLimiter`` keeps the decorator surface (and the
+``limiter.enabled`` toggle the tests use) but awaits the same fixed-window
+counter as the manual checks below.
 """
 from __future__ import annotations
 
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+import functools
+import inspect
+from collections.abc import Callable
+
 from starlette.requests import Request
 
-from app.config.redis import get_redis, get_redis_url
+from app.config.redis import get_redis
 from app.shared.errors.app_error import RateLimitError
+
+
+def get_remote_address(request: Request) -> str:
+    """Client IP key (the pre-auth fallback for every surface)."""
+    return request.client.host if request.client else "127.0.0.1"
 
 # Per-surface defaults (documented; applied at the route).
 AUTH_LIMIT = "10/minute"
@@ -34,11 +47,64 @@ _API_KEY_WINDOW_SECONDS = 60
 _BRAIN_LIMIT = 120
 _BRAIN_WINDOW_SECONDS = 60
 
-limiter = Limiter(
-    key_func=get_remote_address,
-    storage_uri=get_redis_url(),
-    default_limits=[DASHBOARD_LIMIT],
-)
+_UNIT_SECONDS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
+
+
+def _parse_limit(value: str) -> tuple[int, int]:
+    """``"120/minute"`` → ``(120, 60)``."""
+    amount, _, unit = value.partition("/")
+    return int(amount), _UNIT_SECONDS[unit.strip()]
+
+
+class _AsyncRouteLimiter:
+    """slowapi-shaped ``@limiter.limit(...)`` decorator over the async fixed window.
+
+    Counters are keyed per endpoint function + caller subject, so two routes
+    sharing a limit value don't share a budget (same behavior as slowapi's
+    per-route keys). Raises the typed ``RateLimitError`` (429 envelope) instead
+    of slowapi's ``RateLimitExceeded``.
+    """
+
+    def __init__(self, key_func: Callable[[Request], str]) -> None:
+        self.key_func = key_func
+        self.enabled = True  # unit tests flip this off to skip Redis
+
+    def limit(
+        self, limit_value: str, key_func: Callable[[Request], str] | None = None
+    ) -> Callable:
+        amount, window = _parse_limit(limit_value)
+        resolve_key = key_func or self.key_func
+
+        def decorator(func: Callable) -> Callable:
+            bucket = f"route:{func.__module__}.{func.__qualname__}"
+
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs):
+                if self.enabled:
+                    request = kwargs.get("request")
+                    if not isinstance(request, Request):
+                        request = next(
+                            (a for a in args if isinstance(a, Request)), None
+                        )
+                    if request is None:
+                        raise RuntimeError(
+                            "BUG: @limiter.limit endpoint "
+                            f"{func.__qualname__} has no 'request' parameter"
+                        )
+                    await _enforce_fixed_window(
+                        bucket, resolve_key(request), amount, window
+                    )
+                result = func(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+
+            return wrapper
+
+        return decorator
+
+
+limiter = _AsyncRouteLimiter(key_func=get_remote_address)
 
 
 def user_key(request: Request) -> str:

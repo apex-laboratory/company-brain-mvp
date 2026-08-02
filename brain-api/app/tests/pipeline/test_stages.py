@@ -16,7 +16,7 @@ _USAGE = StageUsage(stage="s", model="m", input_tokens=1, output_tokens=1, cost_
 
 async def test_relevance_gate_true() -> None:
     with patch.object(
-        relevance_gate, "groq_json",
+        relevance_gate, "gemini_json",
         AsyncMock(return_value=({"relevant": True, "reason": "policy"}, _USAGE)),
     ):
         relevant, reason, usage = await relevance_gate.is_relevant("text", "slack")
@@ -27,7 +27,7 @@ async def test_relevance_gate_true() -> None:
 
 async def test_relevance_gate_false() -> None:
     with patch.object(
-        relevance_gate, "groq_json",
+        relevance_gate, "gemini_json",
         AsyncMock(return_value=({"relevant": False, "reason": "chit-chat"}, _USAGE)),
     ):
         relevant, _, _ = await relevance_gate.is_relevant("hi", "slack")
@@ -37,12 +37,12 @@ async def test_relevance_gate_false() -> None:
 # ── decision_identifier ───────────────────────────────────────────────────────
 
 async def test_non_threaded_provider_wraps_content_without_llm() -> None:
-    groq = AsyncMock()
-    with patch.object(decision_identifier, "groq_json", groq):
+    gemini = AsyncMock()
+    with patch.object(decision_identifier, "gemini_json", gemini):
         moments, usage = await decision_identifier.identify_decisions(
             "full page text", "notion", source_id="pg1", author="Ada", timestamp="t0"
         )
-    groq.assert_not_awaited()
+    gemini.assert_not_awaited()
     assert usage is None
     assert len(moments) == 1
     assert moments[0].decision_text == "full page text"
@@ -58,7 +58,7 @@ async def test_threaded_provider_parses_decision_moments() -> None:
             {"message_id": "m2", "author": "x", "timestamp": "t2", "decision_text": "  "},
         ]
     }
-    with patch.object(decision_identifier, "groq_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(decision_identifier, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
         moments, usage = await decision_identifier.identify_decisions(
             "thread", "slack", source_id="c1", author="", timestamp=""
         )
@@ -69,7 +69,7 @@ async def test_threaded_provider_parses_decision_moments() -> None:
 
 async def test_threaded_provider_empty_decisions() -> None:
     with patch.object(
-        decision_identifier, "groq_json", AsyncMock(return_value=({"decisions": []}, _USAGE))
+        decision_identifier, "gemini_json", AsyncMock(return_value=({"decisions": []}, _USAGE))
     ):
         moments, _ = await decision_identifier.identify_decisions(
             "thread", "slack", source_id="c1", author="", timestamp=""
@@ -93,7 +93,7 @@ async def test_skill_extractor_builds_draft() -> None:
         "extraction_confidence": 0.8,
         "uncertainty_notes": "",
     }
-    with patch.object(skill_extractor, "sonnet_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
         draft, usage = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
     assert draft.name == "Refund window"
     assert draft.extraction_confidence == 0.8
@@ -103,7 +103,7 @@ async def test_skill_extractor_builds_draft() -> None:
 
 async def test_skill_extractor_clamps_confidence() -> None:
     payload = {"trigger": "t", "base_logic": "b", "extraction_confidence": 5.0}
-    with patch.object(skill_extractor, "sonnet_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
         draft, _ = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
     assert draft.extraction_confidence == 1.0
     assert draft.name == "t"  # falls back to trigger prefix when name missing
@@ -112,7 +112,7 @@ async def test_skill_extractor_clamps_confidence() -> None:
 async def test_skill_extractor_rejects_empty_skill() -> None:
     payload = {"trigger": "", "base_logic": "", "extraction_confidence": 0.9}
     with (
-        patch.object(skill_extractor, "sonnet_json", AsyncMock(return_value=(payload, _USAGE))),
+        patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))),
         pytest.raises(ValueError, match="no trigger/base_logic"),
     ):
         await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)

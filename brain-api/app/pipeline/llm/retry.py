@@ -2,10 +2,11 @@
 
 Modeled on ``app/integrations/google_common.api_request``: exponential backoff,
 ``retry-after`` honored when the SDK surfaces it, transient errors only. The
-Groq/Anthropic/OpenAI SDKs share the same exception taxonomy (all wrap httpx):
+Anthropic/OpenAI SDKs expose ``.status_code``; the Gemini SDK (``google-genai``)
+exposes ``.code`` instead — ``_status_code`` checks both:
 
-* transient → retry: ``RateLimitError`` (429), ``APIStatusError`` >= 500,
-  ``APIConnectionError`` / ``APITimeoutError``
+* transient → retry: ``RateLimitError``/``ClientError`` (429), ``ServerError``/
+  ``APIStatusError`` >= 500, connection-level failures
 * permanent → raise immediately: 4xx status errors (bad request, auth, ...)
 
 Exhausted retries raise :class:`LLMExhaustedError`; the ARQ task translates that
@@ -26,7 +27,13 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T")  # runtime is 3.11 — PEP 695 syntax not available yet
 
-_MAX_RETRY_AFTER = 30.0  # cap a single honored retry-after sleep (seconds)
+_MAX_RETRY_AFTER = 400.0  # cap a single honored retry-after sleep (seconds)
+
+# Interactive budget: calls made while an HTTP request is waiting. The worker can
+# afford the full 5-attempt / 400s-retry-after budget; a user-facing request
+# cannot — one quick retry, then fail fast with a typed error.
+INTERACTIVE_ATTEMPTS = 2
+INTERACTIVE_RETRY_AFTER_CAP = 5.0
 
 
 class LLMExhaustedError(Exception):
@@ -34,12 +41,16 @@ class LLMExhaustedError(Exception):
 
 
 def _status_code(exc: Exception) -> int | None:
-    """Best-effort status code across the three SDKs (all expose .status_code)."""
+    """Best-effort status code across the three SDKs — Anthropic/OpenAI expose
+    ``.status_code``, the Gemini SDK's ``APIError`` exposes ``.code`` instead."""
     code = getattr(exc, "status_code", None)
+    if isinstance(code, int):
+        return code
+    code = getattr(exc, "code", None)
     return code if isinstance(code, int) else None
 
 
-def _retry_after(exc: Exception) -> float | None:
+def _retry_after(exc: Exception, cap: float = _MAX_RETRY_AFTER) -> float | None:
     """Honor a retry-after header when the SDK carries the response."""
     response = getattr(exc, "response", None)
     header = getattr(getattr(response, "headers", None), "get", lambda _k: None)(
@@ -47,7 +58,7 @@ def _retry_after(exc: Exception) -> float | None:
     )
     if header:
         try:
-            return max(1.0, min(float(header), _MAX_RETRY_AFTER))
+            return max(1.0, min(float(header), cap))
         except ValueError:
             pass
     return None
@@ -63,7 +74,7 @@ def is_transient(exc: Exception) -> bool:
     # a status_code). Plain programming errors (TypeError, KeyError...) are not
     # SDK errors and must not be retried — detect SDK-ness by module origin.
     module = type(exc).__module__ or ""
-    return module.startswith(("groq", "anthropic", "openai", "httpx"))
+    return module.startswith(("google.genai", "anthropic", "openai", "httpx", "requests"))
 
 
 async def with_retries(  # noqa: UP047 — venv runs Python 3.11 (no PEP 695)
@@ -71,14 +82,21 @@ async def with_retries(  # noqa: UP047 — venv runs Python 3.11 (no PEP 695)
     *,
     stage: str,
     attempts: int | None = None,
+    max_retry_after: float | None = None,
 ) -> T:
     """Run ``call`` with exponential backoff on transient errors.
 
     ``call`` is a zero-arg coroutine factory so each attempt issues a fresh
     request. Permanent errors propagate untouched; exhausted transient errors
     raise :class:`LLMExhaustedError` chained to the last failure.
+
+    ``max_retry_after`` caps a single honored retry-after sleep — pass
+    :data:`INTERACTIVE_RETRY_AFTER_CAP` (with ``attempts=INTERACTIVE_ATTEMPTS``)
+    for calls made inside an HTTP request so a provider 429 can't park a caller
+    for minutes.
     """
     max_attempts = attempts or settings.llm_max_attempts
+    retry_after_cap = max_retry_after if max_retry_after is not None else _MAX_RETRY_AFTER
     last: Exception | None = None
     for attempt in range(max_attempts):
         try:
@@ -88,7 +106,7 @@ async def with_retries(  # noqa: UP047 — venv runs Python 3.11 (no PEP 695)
                 raise
             last = exc
             if attempt + 1 < max_attempts:
-                delay = _retry_after(exc) or float(2**attempt)
+                delay = _retry_after(exc, retry_after_cap) or float(2**attempt)
                 log.warning(
                     "llm %s transient failure (%s); retrying in %.1fs (attempt %d/%d)",
                     stage, type(exc).__name__, delay, attempt + 1, max_attempts,
