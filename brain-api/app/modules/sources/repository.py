@@ -196,12 +196,23 @@ class SourcesRepository:
         return row.id  # type: ignore[union-attr]
 
     async def list_connections(self, session: AsyncSession) -> list[dict]:
+        # ``needs_backfill`` is computed here rather than left to each client: it is the
+        # single rule for "this source's history has never been imported, and nothing is
+        # currently importing it". The one-hour clause on 'syncing' is the escape hatch
+        # for a dropped enqueue (jobs/queue.py swallows Redis outages) — without it a
+        # connection could sit 'syncing' forever and never offer its import again.
         rows = (
             await session.execute(
                 text(
                     """
                     SELECT id, provider, name, status, sync_status,
-                           external_account_id, last_synced_at, health, created_at
+                           external_account_id, last_synced_at, backfilled_at,
+                           health, created_at,
+                           (status = 'connected'
+                            AND backfilled_at IS NULL
+                            AND NOT (sync_status = 'syncing'
+                                     AND updated_at > now() - interval '1 hour')
+                           ) AS needs_backfill
                       FROM source_connections
                      ORDER BY created_at DESC
                     """
@@ -217,7 +228,8 @@ class SourcesRepository:
             await session.execute(
                 text(
                     """
-                    SELECT id, provider, access_token_enc, refresh_token_enc, token_expires_at
+                    SELECT id, provider, access_token_enc, refresh_token_enc,
+                           token_expires_at, external_account_id
                       FROM source_connections
                      WHERE id = :id
                     """
@@ -263,6 +275,45 @@ class SourcesRepository:
             text("DELETE FROM source_connections WHERE id = :id").bindparams(id=connection_id)
         )
         return (result.rowcount or 0) > 0
+
+    async def count_other_connections_for_account(
+        self,
+        session: AsyncSession,
+        *,
+        provider: str,
+        external_account_id: str,
+        excluding_source_id: str,
+    ) -> int:
+        """How many *other* connections share this provider account, across all workspaces.
+
+        Deliberately cross-workspace, and therefore a **privileged-session** query (like
+        ``resolve_all_by_account`` in the jobs repository): the whole question is whether
+        a workspace other than the caller's still holds this account, which RLS would by
+        definition hide. Passing a tenant session here would always return 0 and make
+        every disconnect look like the last one.
+
+        Drives the uninstall decision on disconnect — one GitHub App installation can be
+        connected in several workspaces, and uninstalling on the first disconnect would
+        silently break the rest.
+        """
+        return int(
+            (
+                await session.execute(
+                    text(
+                        """
+                        SELECT count(*) FROM source_connections
+                         WHERE provider = CAST(:provider AS source_provider)
+                           AND external_account_id = :account
+                           AND id <> :excluding
+                        """
+                    ).bindparams(
+                        provider=provider,
+                        account=external_account_id,
+                        excluding=excluding_source_id,
+                    )
+                )
+            ).scalar_one()
+        )
 
     async def revoke_subscriptions_for_source(
         self, session: AsyncSession, source_id: str
@@ -360,6 +411,23 @@ class SourcesRepository:
             ),
             rows,
         )
+
+    async def get_connection_status(
+        self, session: AsyncSession, connection_id: str
+    ) -> str | None:
+        """The connection's ``status``, or ``None`` if it doesn't exist in this tenant.
+
+        Distinguishing "missing" from "not connected" is what lets the backfill route
+        answer 404 vs 422 rather than silently queueing an import for a dead source.
+        """
+        row = (
+            await session.execute(
+                text(
+                    "SELECT status FROM source_connections WHERE id = :id"
+                ).bindparams(id=connection_id)
+            )
+        ).first()
+        return row.status if row else None
 
     async def get_connection_provider(
         self, session: AsyncSession, connection_id: str

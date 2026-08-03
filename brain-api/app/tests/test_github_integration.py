@@ -15,6 +15,7 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from jose import jwt
 
 from app.integrations import base
 from app.integrations import github as github_module
@@ -337,3 +338,50 @@ def test_verify_webhook_rejects_bad_or_missing_signature(github: GitHubIntegrati
     assert github.verify_webhook({}, body, "shhh") is False
     # No secret configured → reject.
     assert github.verify_webhook({"X-Hub-Signature-256": "x"}, body, "") is False
+
+
+# ── uninstall (disconnect removes the App from the user's repos) ──────────────
+def _uninstall_handler(status: int, seen: dict):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers["Authorization"]
+        return httpx.Response(status, json={} if status < 300 else {"message": "nope"})
+
+    return handler
+
+
+async def test_uninstall_deletes_the_installation_with_an_app_jwt(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Must be the App JWT, not an installation token: the endpoint acts for the App
+    # itself, and the installation token is exactly what's being destroyed.
+    seen: dict = {}
+    _install_transport(monkeypatch, _uninstall_handler(204, seen))
+
+    await github.uninstall("inst-1")
+
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == "/app/installations/inst-1"
+    token = seen["auth"].removeprefix("Bearer ")
+    claims = jwt.get_unverified_claims(token)
+    assert claims["iss"] == "123456"  # App id ⇒ App JWT, not ghs_/ghu_ token
+
+
+async def test_uninstall_treats_404_as_already_gone(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Removed from GitHub's own settings page first — that's the desired end state,
+    # so it must not raise and get logged as a failure.
+    _install_transport(monkeypatch, _uninstall_handler(404, {}))
+    await github.uninstall("inst-1")
+
+
+async def test_uninstall_raises_on_a_real_failure(
+    github: GitHubIntegration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The service swallows this, but the connector must still report it so the
+    # "may need removing manually" log line actually fires.
+    _install_transport(monkeypatch, _uninstall_handler(500, {}))
+    with pytest.raises(httpx.HTTPStatusError):
+        await github.uninstall("inst-1")

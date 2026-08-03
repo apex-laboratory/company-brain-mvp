@@ -96,10 +96,19 @@ class JobsRepository:
         source_id: str,
         synced_at: datetime | None,
         sync_cursor: str | None = None,
+        mark_backfilled: bool = True,
     ) -> None:
         # ``sync_cursor`` is the opaque per-connection cursor for token-cursor
         # providers (Drive pageToken / Gmail historyId); NULL leaves it untouched so
         # timestamp providers (Notion/GitHub) keep relying on last_synced_at.
+        #
+        # ``backfilled_at`` records that this connection's *history* has been imported
+        # (migration 0022) — the predicate behind ``needs_backfill`` on GET /sources.
+        # It is stamped on the first run that finishes without a continuation cursor,
+        # so Drive/Gmail's chained backfill only counts once the chain is exhausted
+        # (``mark_backfilled=False`` while more chunks are pending). The IS NULL guard
+        # makes it idempotent: later incremental syncs never move the timestamp, so it
+        # stays the moment history landed rather than becoming a second last_synced_at.
         await session.execute(
             text(
                 """
@@ -108,10 +117,40 @@ class JobsRepository:
                        sync_cursor = COALESCE(:sync_cursor, sync_cursor),
                        sync_status = 'healthy',
                        status = 'connected',
+                       backfilled_at = CASE
+                           WHEN :mark_backfilled AND backfilled_at IS NULL THEN now()
+                           ELSE backfilled_at
+                       END,
                        updated_at = now()
                  WHERE id = :id
                 """
-            ).bindparams(id=source_id, synced_at=synced_at, sync_cursor=sync_cursor)
+            ).bindparams(
+                id=source_id,
+                synced_at=synced_at,
+                sync_cursor=sync_cursor,
+                mark_backfilled=mark_backfilled,
+            )
+        )
+
+    async def mark_syncing(self, session: AsyncSession, source_ids: list[str]) -> None:
+        """Flag connections as actively importing (the sweep is queued for them).
+
+        ``'syncing'`` is a long-declared ``sync_status`` value that nothing wrote until
+        now. It self-clears: ``advance_sync`` flips it to ``'healthy'`` and ``mark_error``
+        to ``'error'``. ``needs_backfill`` treats it as in-progress for one hour only, so
+        a dropped enqueue (``jobs/queue.py`` swallows Redis outages) can't hide the
+        connection's import button forever.
+        """
+        if not source_ids:
+            return
+        await session.execute(
+            text(
+                """
+                UPDATE source_connections
+                   SET sync_status = 'syncing', updated_at = now()
+                 WHERE id = ANY(:ids)
+                """
+            ).bindparams(ids=source_ids)
         )
 
     async def update_tokens(
@@ -374,7 +413,7 @@ class JobsRepository:
             await session.execute(
                 text(
                     """
-                    SELECT id, status, progress, skills_created, skills_queued,
+                    SELECT id, status, config, progress, skills_created, skills_queued,
                            started_at, completed_at
                       FROM sweeps
                      WHERE id = CAST(:id AS uuid)

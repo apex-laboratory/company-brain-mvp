@@ -499,6 +499,52 @@
         }
       }
     },
+    "/api/v1/sources/{source_id}/backfill": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Backfill",
+        "description": "Import this source's history (a sweep scoped to one connection).\n\n``202`` for a newly started import, ``200`` when one covering this source was\nalready in flight \u2014 the same created/existing split as ``POST /sweeps``, and the\nsame ``SweepOut`` body, so a caller can poll ``GET /sweeps/{id}`` either way.",
+        "operationId": "backfill_api_v1_sources__source_id__backfill_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Source Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sources/{source_id}/disconnect": {
       "post": {
         "tags": [
@@ -1304,6 +1350,31 @@
         "summary": "Start Sweep",
         "description": "Kick off the onboarding sweep across all connected sources.",
         "operationId": "start_sweep_api_v1_sweeps_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sweeps/active": {
+      "get": {
+        "tags": [
+          "sweeps"
+        ],
+        "summary": "Get Active Sweep",
+        "description": "The workspace's in-flight sweep, or ``null``.\n\nDeclared before ``/{sweep_id}`` so \"active\" is matched as a literal path rather\nthan captured as a sweep id.",
+        "operationId": "get_active_sweep_api_v1_sweeps_active_get",
         "responses": {
           "200": {
             "description": "Successful Response",

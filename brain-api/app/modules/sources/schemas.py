@@ -35,6 +35,13 @@ class SourceConnectionOut(_Response):
     sync_status: str
     external_account_id: str | None = None
     last_synced_at: datetime | None = None
+    # When this connection's *history* was imported (migration 0022). NULL means it
+    # never was — connecting a source ingests nothing on its own. Distinct from
+    # last_synced_at, which is the incremental cursor and moves on every sync.
+    backfilled_at: datetime | None = None
+    # Computed in the repository: history never imported and nothing importing it now.
+    # Drives the Sources page's "Import history" button.
+    needs_backfill: bool = False
     health: int | None = None
     created_at: datetime
 

@@ -10,6 +10,7 @@ from uuid import UUID
 
 from app.config.database import get_tenant_session
 from app.jobs.queue import enqueue
+from app.jobs.repository import JobsRepository
 from app.modules.sweeps.repository import SweepsRepository
 from app.modules.sweeps.schemas import SweepOut
 from app.shared.errors.app_error import NotFoundError
@@ -40,23 +41,46 @@ def _out(row: dict) -> SweepOut:
 
 
 class SweepsService:
-    def __init__(self, repository: SweepsRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: SweepsRepository | None = None,
+        jobs_repository: JobsRepository | None = None,
+    ) -> None:
         self._repo = repository or SweepsRepository()
+        # Connection-level writes (sync_status) live in the jobs repository, which
+        # already owns source_connections SQL for the worker.
+        self._jobs_repo = jobs_repository or JobsRepository()
 
-    async def start(self, auth: AuthContext) -> tuple[SweepOut, bool]:
-        """Start the onboarding sweep. Returns ``(sweep, created)``.
+    async def start(
+        self, auth: AuthContext, source_ids: list[str] | None = None
+    ) -> tuple[SweepOut, bool]:
+        """Start a sweep. Returns ``(sweep, created)``.
 
         ``created`` is False when an in-flight sweep was returned instead.
+
+        ``source_ids`` scopes the sweep to specific connections — the per-source
+        historical import (``POST /sources/{id}/backfill`` and the dashboard OAuth
+        callback). Omitted, this is the onboarding sweep across every connected
+        source, unchanged. The scope is stored in ``sweeps.config`` and read back by
+        the ``onboarding_sweep`` job.
         """
         workspace_id, role = _require_workspace(auth)
+        config = {"source_ids": source_ids} if source_ids else None
         async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
-                active = await self._repo.find_active(session)
+                active = await self._repo.find_covering(session, source_ids)
                 if active is None:
                     active = await self._repo.create(
-                        session, workspace_id=workspace_id, triggered_by=auth.user_id
+                        session,
+                        workspace_id=workspace_id,
+                        triggered_by=auth.user_id,
+                        config=config,
                     )
                     created = True
+                    # Surface the queued import on the connection itself, so the
+                    # Sources page can show it without holding a sweep id.
+                    if source_ids:
+                        await self._jobs_repo.mark_syncing(session, source_ids)
                 else:
                     created = False
                 await session.commit()
@@ -72,6 +96,20 @@ class SweepsService:
                 _job_id=f"onboarding-sweep:{active['id']}",
             )
         return _out(active), created
+
+    async def get_active(self, auth: AuthContext) -> SweepOut | None:
+        """The workspace's most recent in-flight sweep, or ``None``.
+
+        Lets a surface re-attach to a sweep it didn't start — a dashboard reload
+        mid-import, or onboarding resuming after a refresh (which previously had no
+        way to look up the running sweep and dropped the user back on the CTA).
+        Deliberately unfiltered by scope: the caller wants whatever is running.
+        """
+        workspace_id, role = _require_workspace(auth)
+        async with get_tenant_session() as session:
+            async with run_in_tenant(session, workspace_id, auth.user_id, role):
+                row = await self._repo.find_active(session)
+        return _out(row) if row else None
 
     async def get(self, auth: AuthContext, sweep_id: str) -> SweepOut:
         workspace_id, role = _require_workspace(auth)

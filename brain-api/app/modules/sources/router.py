@@ -18,7 +18,12 @@ from app.modules.sources.service import SourcesService
 from app.shared.http.respond import accepted, no_content, ok
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
 from app.shared.middleware.authorize import require_role
-from app.shared.middleware.rate_limit import OAUTH_CALLBACK_LIMIT, limiter
+from app.shared.middleware.rate_limit import (
+    DASHBOARD_LIMIT,
+    OAUTH_CALLBACK_LIMIT,
+    limiter,
+    user_key,
+)
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -75,6 +80,22 @@ async def callback(
         provider, state=state, code=code, installation_id=installation_id, error=error
     )
     return RedirectResponse(url=redirect_to, status_code=302)
+
+
+@router.post("/{source_id}/backfill", dependencies=[Depends(require_role("admin"))])
+@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
+async def backfill(
+    source_id: str, request: Request, auth: AuthContext = Depends(get_auth_context)
+):
+    """Import this source's history (a sweep scoped to one connection).
+
+    ``202`` for a newly started import, ``200`` when one covering this source was
+    already in flight — the same created/existing split as ``POST /sweeps``, and the
+    same ``SweepOut`` body, so a caller can poll ``GET /sweeps/{id}`` either way.
+    """
+    sweep, created = await _service.start_backfill(auth, source_id)
+    payload = sweep.model_dump(by_alias=True)
+    return accepted(request, payload) if created else ok(request, payload)
 
 
 @router.post("/{source_id}/disconnect", dependencies=[Depends(require_role("admin"))])

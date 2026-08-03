@@ -63,6 +63,7 @@ class _FakeRepo:
         self._dup_ids = dup_ids or set()
         self.advanced_to: datetime | None = None
         self.advanced_cursor: str | None = None
+        self.marked_backfilled: bool | None = None
         self.error_marked = False
         self.last_sweep_id: str | None = None
 
@@ -77,9 +78,12 @@ class _FakeRepo:
         # Real repo returns the new event id (or None on duplicate).
         return None if event.source_id in self._dup_ids else f"evt_{event.source_id}"
 
-    async def advance_sync(self, session, source_id, synced_at, sync_cursor=None) -> None:  # noqa: ANN001
+    async def advance_sync(  # noqa: ANN001
+        self, session, source_id, synced_at, sync_cursor=None, mark_backfilled=True
+    ) -> None:
         self.advanced_to = synced_at
         self.advanced_cursor = sync_cursor
+        self.marked_backfilled = mark_backfilled
 
     async def mark_error(self, session, source_id, *, auth_broken) -> None:  # noqa: ANN001
         self.error_marked = True
@@ -258,6 +262,8 @@ async def test_sync_roundtrips_opaque_cursor(monkeypatch: pytest.MonkeyPatch) ->
     assert result == {"inserted": 1}
     assert repo.advanced_cursor == "pageTokenXYZ"  # stored opaque, not parsed
     assert repo.advanced_to is not None  # last_synced_at still bumped for freshness
+    # No continuation cursor: the history is fully in, so the connection is backfilled.
+    assert repo.marked_backfilled is True
 
 
 async def test_sync_chains_next_chunk_on_backfill_continuation(
@@ -293,6 +299,10 @@ async def test_sync_chains_next_chunk_on_backfill_continuation(
 
     assert result == {"inserted": 1, "backfill": "continues"}
     assert repo.advanced_cursor == continuation  # continuation persisted first
+    # More chunks pending: the import is NOT complete, so backfilled_at must not be
+    # stamped yet — otherwise a half-imported Drive/Gmail account would stop offering
+    # its import and silently keep only the first chunk of history.
+    assert repo.marked_backfilled is False
     # Non-sweep run: the inserted event still extracts, then the next chunk chains.
     assert [(fn, args) for fn, args, _ in enqueued] == [
         ("extract_event", ("wrk_1", "evt_m1")),

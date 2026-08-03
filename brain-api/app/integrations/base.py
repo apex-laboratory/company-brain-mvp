@@ -139,7 +139,15 @@ class SourceIntegration(Protocol):
         ...
 
     async def revoke(self, access_token: str) -> None:
-        """Best-effort token revocation on disconnect. No-op where unsupported."""
+        """Best-effort token revocation on disconnect. No-op where unsupported.
+
+        A provider whose *installation* outlives its tokens (a GitHub App) also
+        declares the optional ``uninstall(external_account_id)`` coroutine, which
+        ``SourcesService.disconnect`` calls via ``getattr`` — the same optional-
+        capability convention as ``push_delivery`` / ``opaque_cursor`` /
+        ``supports_channel_filter``, so connectors with nothing to uninstall need
+        declare nothing.
+        """
         ...
 
     async def list_channels(self, access_token: str) -> list[ChannelRef]:

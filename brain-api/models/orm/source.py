@@ -40,6 +40,7 @@ class SourceConnection(Base):
     lookback_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("90"))
     health: Mapped[int | None] = mapped_column(Integer)                  # 0–100
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    backfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # historical import completed (NULL = never imported)
     connected_by: Mapped[str | None] = mapped_column(Text, ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
