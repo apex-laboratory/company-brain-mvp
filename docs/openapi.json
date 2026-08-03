@@ -731,6 +731,52 @@
         }
       }
     },
+    "/api/v1/workspaces/{workspace_id}/usage": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "summary": "Get Usage",
+        "description": "Measured usage counters \u2014 settings Usage tab + sidebar meter.",
+        "operationId": "get_usage_api_v1_workspaces__workspace_id__usage_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/activity": {
       "get": {
         "tags": [

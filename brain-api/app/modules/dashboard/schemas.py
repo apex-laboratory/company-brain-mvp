@@ -110,3 +110,20 @@ class OverviewResponse(_CamelModel):
     recent_decisions: list[DecisionSummary]
     source_health: list[SourceSummary]
     activity: list[ActivityEvent]
+
+
+class UsageResponse(_CamelModel):
+    """Real usage counters for the settings Usage tab + sidebar meter.
+
+    Everything here is measured, never estimated: ``queries30d`` counts
+    ``agent_interactions`` rows (dashboard brain chat + agent ``query_brain``),
+    ``skillsServed30d`` counts the subset that matched a skill, ``activeSkills``
+    counts published skills. ``querySeries`` is queries/day for the last 7 days,
+    oldest first. There is no quota system yet, so no limit/percent fields —
+    the FE must not fabricate one.
+    """
+
+    queries30d: int = Field(alias="queries30d")  # to_camel would mangle to queries30D
+    skills_served_30d: int = Field(alias="skillsServed30d")
+    active_skills: int
+    query_series: list[int]

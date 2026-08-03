@@ -168,12 +168,65 @@ async def _json_call(
 
 
 async def gemini_json(
-    system: str, user: str, *, stage: str, max_tokens: int = 1024
+    system: str,
+    user: str,
+    *,
+    stage: str,
+    max_tokens: int = 1024,
+    interactive: bool = False,
 ) -> tuple[dict, StageUsage]:
-    """Gemini JSON-mode chat call for the fast classifier + extraction stages."""
+    """Gemini JSON-mode chat call for the fast classifier + extraction stages.
+
+    ``interactive=True`` uses the request-path budget (2 attempts, 5s
+    retry-after cap) — the brain synthesizer runs while a user waits."""
     return await _json_call(
         _gemini_call, system, user, stage=stage, model=settings.gemini_model,
         max_tokens=max_tokens,
+        attempts=INTERACTIVE_ATTEMPTS if interactive else None,
+        max_retry_after=INTERACTIVE_RETRY_AFTER_CAP if interactive else None,
+    )
+
+
+async def gemini_stream(
+    system: str, user: str, *, stage: str, max_tokens: int = 2048
+) -> AsyncIterator[str | StageUsage]:
+    """Stream a Gemini reply, yielding text deltas then a final :class:`StageUsage`.
+
+    Deliberately **not** retry-wrapped, for the same reason as ``sonnet_stream``:
+    a retry mid-stream would replay text the caller has already forwarded to the
+    client.
+
+    ``response_mime_type="application/json"`` matches the non-streaming call, so
+    the brain synthesizer's incremental JSON parser sees the same shape — and the
+    ``grounded``-before-``answer`` key order the SSE path depends on holds.
+    """
+    from google.genai import types
+
+    in_tok = out_tok = 0
+    stream = await gemini_client().aio.models.generate_content_stream(
+        model=settings.gemini_model,
+        contents=user,
+        config=types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=0.0,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json",
+        ),
+    )
+    async for chunk in stream:
+        if chunk.text:
+            yield chunk.text
+        # Usage rides on the chunks; the last one carries the final totals.
+        usage = chunk.usage_metadata
+        if usage:
+            in_tok = usage.prompt_token_count or in_tok
+            out_tok = usage.candidates_token_count or out_tok
+    yield StageUsage(
+        stage=stage,
+        model=settings.gemini_model,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        cost_usd=cost_usd(settings.gemini_model, in_tok, out_tok),
     )
 
 

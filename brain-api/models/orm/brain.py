@@ -96,6 +96,12 @@ class BrainMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[int | None] = mapped_column(Integer)              # 0–100; assistant turns only
     sources: Mapped[dict | None] = mapped_column(JSONB)
+    # Replay parity (migration 0021): what a live answer carries that a replayed
+    # one must keep — trust facet, provenance dossier, and the interaction the
+    # flag-as-wrong button posts to. Assistant turns only; all nullable.
+    trust: Mapped[str | None] = mapped_column(Text)                      # skill | evidence | none
+    provenance: Mapped[dict | None] = mapped_column(JSONB)
+    interaction_id: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )

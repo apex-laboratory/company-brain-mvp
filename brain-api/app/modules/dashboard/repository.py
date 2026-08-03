@@ -273,6 +273,53 @@ class DashboardRepository:
             connected_count=int(row.connected_count),
         )
 
+    async def usage(self, session: AsyncSession, workspace_id: str) -> dict:
+        """Measured usage counters in one round trip (see ``UsageResponse``).
+
+        ``series`` is queries/day for the last 7 days including today, oldest
+        first, zero-filled via the ``days`` spine.
+        """
+        row = (
+            await session.execute(
+                text(
+                    """
+                    WITH i AS (
+                        SELECT created_at, skill_id FROM agent_interactions
+                        WHERE workspace_id = :workspace_id
+                          AND created_at >= now() - interval '30 days'
+                    ),
+                    days AS (
+                        SELECT generate_series(
+                            date_trunc('day', now()) - interval '6 days',
+                            date_trunc('day', now()),
+                            interval '1 day'
+                        ) AS day
+                    )
+                    SELECT
+                        (SELECT count(*) FROM i) AS queries_30d,
+                        (SELECT count(*) FROM i WHERE skill_id IS NOT NULL)
+                            AS skills_served_30d,
+                        (SELECT count(*) FROM skills
+                          WHERE workspace_id = :workspace_id
+                            AND deleted_at IS NULL
+                            AND status IN ('active', 'stable')) AS active_skills,
+                        (SELECT array_agg(c ORDER BY day) FROM (
+                            SELECT d.day, count(i.created_at) AS c
+                            FROM days d
+                            LEFT JOIN i ON date_trunc('day', i.created_at) = d.day
+                            GROUP BY d.day
+                        ) s) AS query_series
+                    """
+                ).bindparams(workspace_id=workspace_id),
+            )
+        ).one()
+        return {
+            "queries30d": int(row.queries_30d),
+            "skills_served_30d": int(row.skills_served_30d),
+            "active_skills": int(row.active_skills),
+            "query_series": [int(x) for x in (row.query_series or [])],
+        }
+
     async def recent_questions(
         self, session: AsyncSession, workspace_id: str, limit: int = 3
     ) -> list[str]:
