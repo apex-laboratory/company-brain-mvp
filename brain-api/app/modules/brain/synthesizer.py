@@ -1,8 +1,9 @@
 """Grounded answer synthesis — the "G" in RAG (BRAIN_CHAT_RAG_PLAN Phase 1).
 
 Retrieval already found the relevant human-reviewed skills; this turns them into a
-cited, confidence-scored answer. It reuses ``sonnet_json`` (claude-sonnet-5, temp
-0.0, JSON-instructed with one reprompt), so a malformed reply self-heals once.
+cited, confidence-scored answer. It reuses ``gemini_json`` (temp 0.0, JSON-mode
+with one reprompt), so a malformed reply self-heals once — the same client the
+extraction pipeline uses, so the whole app runs on one LLM provider.
 
 Anti-hallucination is the whole game here:
 
@@ -25,7 +26,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from app.modules.brain.stream_parser import GroundedAnswerParser
-from app.pipeline.llm.clients import sonnet_json, sonnet_stream
+from app.pipeline.llm.clients import gemini_json, gemini_stream
 from app.pipeline.types import StageUsage
 
 _STAGE = "brain_synthesis"
@@ -182,7 +183,9 @@ async def answer(
     int 0-100. Must be called OUTSIDE any open DB transaction (it does network I/O).
     """
     user = _build_user(question, skills, provenance, history, evidence)
-    parsed, _usage = await sonnet_json(_SYSTEM, user, stage=_STAGE, interactive=True)
+    parsed, _usage = await gemini_json(
+        _SYSTEM, user, stage=_STAGE, max_tokens=2048, interactive=True
+    )
     grounded, confidence, used_ids = _score(parsed, top_similarity)
     return {
         "answer": str(parsed.get("answer") or "").strip(),
@@ -216,7 +219,7 @@ async def answer_stream(
     grounded = False
     head_seen = False
 
-    async for piece in sonnet_stream(_SYSTEM, user, stage=_STAGE):
+    async for piece in gemini_stream(_SYSTEM, user, stage=_STAGE):
         if isinstance(piece, StageUsage):
             continue
         delta = parser.feed(piece)

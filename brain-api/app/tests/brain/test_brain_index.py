@@ -396,7 +396,7 @@ async def test_synthesizer_labels_history_superseded() -> None:
         return ({"answer": "x", "grounded": True, "usedSkillIds": ["skl_1"],
                  "confidence": 0.8}, StageUsage("s", "m", 1, 1, 0.0))
 
-    with patch.object(synthesizer, "sonnet_json", _fake_sonnet):
+    with patch.object(synthesizer, "gemini_json", _fake_sonnet):
         await synthesizer.answer(
             "what did the policy used to be",
             [{"id": "skl_1", "name": "Refund", "base_logic": "45 days"}],

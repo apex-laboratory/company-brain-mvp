@@ -77,15 +77,21 @@ class ConversationSummary(CamelModel):
 
 
 class BrainMessage(CamelModel):
-    """A persisted turn, replayed on reload. ``sources``/``confidence`` are populated
-    on assistant turns only; ``sources`` mirrors the ``SourceCitation`` shape the live
-    query returns, so the FE renders a replayed answer identically to a fresh one."""
+    """A persisted turn, replayed on reload. ``sources``/``confidence``/``trust``/
+    ``provenance``/``interactionId`` are populated on assistant turns only and
+    mirror the live ``BrainQueryResponse`` shape, so the FE renders a replayed
+    answer identically to a fresh one — trust badge, provenance line, and the
+    flag-as-wrong button (which posts to ``interactionId``) all survive a reload.
+    Turns persisted before migration 0021 replay these as null."""
 
     id: str
     role: str  # user | assistant
     content: str
     confidence: int | None = None
     sources: list[SourceCitation] = Field(default_factory=list)
+    trust: str | None = None  # skill | evidence | none
+    provenance: BrainProvenance | None = None
+    interaction_id: str | None = None
     created_at: datetime
 
 

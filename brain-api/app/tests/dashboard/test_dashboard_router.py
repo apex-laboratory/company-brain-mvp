@@ -19,6 +19,7 @@ from app.modules.dashboard.schemas import (
     Kpi,
     OverviewResponse,
     SyncState,
+    UsageResponse,
     WorkspaceSummary,
 )
 from app.modules.dashboard.service import ActivityPage
@@ -78,6 +79,14 @@ class _StubService:
             raise self._error
         assert self._page is not None
         return self._page
+
+    async def get_usage(self, auth: AuthContext, workspace_id: str) -> UsageResponse:
+        if self._error is not None:
+            raise self._error
+        return UsageResponse(
+            queries30d=42, skills_served_30d=31, active_skills=7,
+            query_series=[0, 1, 2, 3, 4, 5, 6],
+        )
 
 
 @pytest_asyncio.fixture
@@ -164,3 +173,31 @@ async def test_activity_rejects_unknown_query_param(client: AsyncClient) -> None
 
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "validation_error"
+
+
+# ── usage ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_usage_returns_camelcase_counters(client: AsyncClient) -> None:
+    _override(_StubService())
+
+    resp = await client.get("/api/v1/workspaces/wrk_1/usage")
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data == {
+        "queries30d": 42,
+        "skillsServed30d": 31,
+        "activeSkills": 7,
+        "querySeries": [0, 1, 2, 3, 4, 5, 6],
+    }
+
+
+@pytest.mark.asyncio
+async def test_usage_forbidden_for_non_member(client: AsyncClient) -> None:
+    _override(_StubService(error=ForbiddenError("You are not a member of this workspace.")))
+
+    resp = await client.get("/api/v1/workspaces/wrk_other/usage")
+
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "forbidden"

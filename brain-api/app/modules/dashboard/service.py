@@ -28,6 +28,7 @@ from app.modules.dashboard.schemas import (
     ReviewSummary,
     SourceSummary,
     SyncState,
+    UsageResponse,
     WorkspaceSummary,
 )
 from app.shared.errors.app_error import NotFoundError
@@ -127,6 +128,14 @@ class DashboardService:
         return ActivityPage(
             events=[_to_activity(a) for a in page], next_cursor=next_cursor
         )
+
+    # ── usage ─────────────────────────────────────────────────────────────────
+    async def get_usage(self, auth: AuthContext, workspace_id: str) -> UsageResponse:
+        """Measured usage counters (settings Usage tab + sidebar meter)."""
+        workspace_id = assert_workspace_member(auth, workspace_id)
+        async with tenant_session(auth, workspace_id) as session:
+            usage = await self._repository.usage(session, workspace_id)
+        return UsageResponse(**usage)
 
     # ── builders ──────────────────────────────────────────────────────────────
     @staticmethod

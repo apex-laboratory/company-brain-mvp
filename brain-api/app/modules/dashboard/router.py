@@ -43,6 +43,19 @@ async def get_overview(
     return ok(request, overview.model_dump(by_alias=True))
 
 
+@router.get("/{workspace_id}/usage")
+@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
+async def get_usage(
+    request: Request,
+    workspace_id: str,
+    auth: AuthContext = Depends(get_auth_context),
+    service: DashboardService = Depends(get_dashboard_service),
+) -> JSONResponse:
+    """Measured usage counters — settings Usage tab + sidebar meter."""
+    usage = await service.get_usage(auth, workspace_id)
+    return ok(request, usage.model_dump(by_alias=True))
+
+
 @router.get("/{workspace_id}/activity")
 @limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
 async def get_activity(

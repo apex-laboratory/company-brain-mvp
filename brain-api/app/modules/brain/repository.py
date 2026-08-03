@@ -255,7 +255,8 @@ class BrainRepository:
             await session.execute(
                 text(
                     """
-                    SELECT id, role, content, confidence, sources, created_at
+                    SELECT id, role, content, confidence, sources, trust,
+                           provenance, interaction_id, created_at
                       FROM brain_messages
                      WHERE conversation_id = :cid
                      ORDER BY created_at ASC
@@ -275,21 +276,28 @@ class BrainRepository:
         content: str,
         confidence: int | None = None,
         sources: list[dict] | None = None,
+        trust: str | None = None,
+        provenance: dict | None = None,
+        interaction_id: str | None = None,
     ) -> str:
         """Append one turn (append-only; both turns written by the backend).
 
         ``sources`` follows the stored contract ``[{provider, label, sourceItemId,
-        url, excerpt}]``. Returns the ``msg_`` id.
+        url, excerpt}]``. ``trust``/``provenance``/``interaction_id`` are the
+        replay-parity fields (migration 0021), assistant turns only. Returns the
+        ``msg_`` id.
         """
         message_id = generate_id("message")
         await session.execute(
             text(
                 """
                 INSERT INTO brain_messages
-                    (id, workspace_id, conversation_id, role, content, confidence, sources)
+                    (id, workspace_id, conversation_id, role, content, confidence,
+                     sources, trust, provenance, interaction_id)
                 VALUES
                     (:id, :ws, :cid, CAST(:role AS message_role), :content,
-                     :confidence, CAST(:sources AS jsonb))
+                     :confidence, CAST(:sources AS jsonb), :trust,
+                     CAST(:provenance AS jsonb), :interaction_id)
                 """
             ).bindparams(
                 id=message_id,
@@ -299,6 +307,9 @@ class BrainRepository:
                 content=content,
                 confidence=confidence,
                 sources=json.dumps(sources) if sources is not None else None,
+                trust=trust,
+                provenance=json.dumps(provenance) if provenance is not None else None,
+                interaction_id=interaction_id,
             )
         )
         return message_id

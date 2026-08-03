@@ -335,6 +335,11 @@ class BrainService:
                 id=r["id"], role=r["role"], content=r["content"],
                 confidence=r["confidence"],
                 sources=[_from_stored_source(s) for s in (r["sources"] or [])],
+                trust=r.get("trust"),
+                provenance=(
+                    BrainProvenance(**r["provenance"]) if r.get("provenance") else None
+                ),
+                interaction_id=r.get("interaction_id"),
                 created_at=r["created_at"],
             )
             for r in rows
@@ -383,7 +388,8 @@ class BrainService:
                 match_type=core["match_type"],
             )
             conv_id, message_id = await self._persist_turn(
-                session, auth, workspace_id, question, core, conversation_id
+                session, auth, workspace_id, question, core, conversation_id,
+                interaction_id=interaction_id,
             )
             await session.commit()
         return _build_response(
@@ -393,7 +399,7 @@ class BrainService:
 
     async def _persist_turn(
         self, session, auth: AuthContext, workspace_id: str, question: str,
-        core: dict, conversation_id: str | None,
+        core: dict, conversation_id: str | None, *, interaction_id: str,
     ) -> tuple[str | None, str | None]:
         """Append the user + assistant turns to the caller's conversation.
 
@@ -422,6 +428,9 @@ class BrainService:
             session, workspace_id=workspace_id, conversation_id=conv_id,
             role="assistant", content=core["answer"],
             confidence=core["confidence"], sources=stored_sources,
+            # Replay parity (migration 0021): what the live answer carried.
+            trust=core["trust"], provenance=core.get("provenance"),
+            interaction_id=interaction_id,
         )
         await self._repo.touch_conversation(session, conv_id)
         return conv_id, message_id

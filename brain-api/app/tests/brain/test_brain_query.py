@@ -171,7 +171,7 @@ async def test_synthesizer_confidence_capped_at_similarity() -> None:
     # model very confident (0.99) but retrieval only 0.72 → confidence <= 72.
     from app.modules.brain import synthesizer
     with patch.object(
-        synthesizer, "sonnet_json",
+        synthesizer, "gemini_json",
         AsyncMock(return_value=({"answer": "x", "grounded": True,
                                  "usedSkillIds": ["skl_1"], "confidence": 0.99},
                                 StageUsage("s", "m", 1, 1, 0.0))),
@@ -183,7 +183,7 @@ async def test_synthesizer_confidence_capped_at_similarity() -> None:
 async def test_synthesizer_ungrounded_scores_zero() -> None:
     from app.modules.brain import synthesizer
     with patch.object(
-        synthesizer, "sonnet_json",
+        synthesizer, "gemini_json",
         AsyncMock(return_value=({"answer": "I don't have a reviewed skill for that.",
                                  "grounded": False, "usedSkillIds": [], "confidence": 0.8},
                                 StageUsage("s", "m", 1, 1, 0.0))),

@@ -104,7 +104,7 @@ def _svc(*, hits, cached=None, grounded=True, answer="45 days.", evidence_hits=N
                      AsyncMock(return_value=([0.0] * 1536, StageUsage("e", "m", 1, 0, 0.0)))),
         patch.object(service_module.cache, "get_cached_search", AsyncMock(return_value=cached)),
         patch.object(service_module.cache, "set_cached_search", AsyncMock()),
-        patch("app.modules.brain.synthesizer.sonnet_stream", _fake_stream),
+        patch("app.modules.brain.synthesizer.gemini_stream", _fake_stream),
     )
     return svc, brain_repo, skills_repo, patches
 
