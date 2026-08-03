@@ -12,6 +12,7 @@ the row (race-safe single use).
 """
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -29,6 +30,8 @@ from app.modules.sources.schemas import (
     ChannelSelectRequest,
     SourceConnectionOut,
 )
+from app.modules.sweeps.schemas import SweepOut
+from app.modules.sweeps.service import SweepsService
 from app.shared.errors.app_error import (
     ConfigurationError,
     NotFoundError,
@@ -39,6 +42,9 @@ from app.shared.helpers.crypto import hmac_sign, hmac_verify, sha256_hash
 from app.shared.helpers.ids import generate_id
 from app.shared.middleware.authenticate import AuthContext
 from app.shared.middleware.with_tenant import run_in_tenant
+
+
+log = logging.getLogger(__name__)
 
 
 def _callback_uri(provider: str) -> str:
@@ -59,6 +65,9 @@ _SUBDOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$")
 # completes the connect.
 _RETURN_TO_ALLOWLIST = frozenset({"/onboarding", "/dashboard/sources"})
 _DEFAULT_RETURN_TO = "/settings/sources"
+# The one destination whose flow fires its own sweep afterwards; every other
+# connect auto-starts a scoped import in the callback (see handle_callback step 5).
+_ONBOARDING_RETURN_TO = "/onboarding"
 
 
 def _resolve_return_to(return_to: str | None) -> str | None:
@@ -129,8 +138,15 @@ def _require_workspace(auth: AuthContext) -> tuple[str, str]:
 
 
 class SourcesService:
-    def __init__(self, repository: SourcesRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: SourcesRepository | None = None,
+        sweeps_service: SweepsService | None = None,
+    ) -> None:
         self._repo = repository or SourcesRepository()
+        # A per-source import is a scoped sweep, so the sweep service owns it —
+        # idempotency, scoping, and the enqueue all stay in one place.
+        self._sweeps = sweeps_service or SweepsService()
 
     def _require_known(self, provider: str) -> None:
         try:
@@ -270,9 +286,22 @@ class SourcesService:
                 )
                 await session.commit()
 
-        # 5. No sync yet: the initial backfill is the onboarding sweep
-        #    (POST /sweeps after the user finishes the channel/lookback picker),
-        #    so we don't ingest channels the user is about to deselect.
+        # 5. Onboarding defers the backfill to the sweep the wizard fires after the
+        #    channel/lookback picker, so we don't ingest channels the user is about to
+        #    deselect. A connect from anywhere else has no such follow-up step: the
+        #    user lands back on Sources and nothing would ever fetch this source's
+        #    history (webhooks only carry events from now on, and webhook_ingest never
+        #    advances the cursor). So start a scoped import for it here.
+        #
+        #    For channel-scoped providers this reads every channel at the default
+        #    lookback, since a dashboard connect has no picker before the redirect.
+        #    That is the deliberate trade: over-ingesting is recoverable (skills land
+        #    in the review queue, and narrowing scope governs later syncs), whereas a
+        #    user who never opens Manage would otherwise get no history at all.
+        if resolved.return_to != _ONBOARDING_RETURN_TO:
+            await self._start_backfill_unattended(
+                resolved.workspace_id, resolved.user_id, connection_id
+            )
 
         # 6. Google connectors register a push channel (Drive changes.watch /
         #    Gmail users.watch) so updates arrive in real time.
@@ -291,6 +320,53 @@ class SourcesService:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 rows = await self._repo.list_connections(session)
         return [SourceConnectionOut(**row) for row in rows]
+
+    # ── historical backfill ──────────────────────────────────────────────────────
+    async def _start_backfill_unattended(
+        self, workspace_id: str, user_id: str, source_id: str
+    ) -> None:
+        """Kick off a scoped import from the OAuth callback (no request identity).
+
+        The callback is a provider redirect carrying no JWT, so it authenticates via
+        the signed state and there is no ``AuthContext`` to pass down. The state's
+        resolved workspace/user *is* the identity — the same pair step 4 just wrote
+        the connection under — so it is reconstructed here as the admin context the
+        rest of the callback already runs as.
+
+        Best-effort by design: a failed import must not turn a successful OAuth
+        connect into an error page. The connection stays ``needs_backfill``, so the
+        Sources page still offers the import.
+        """
+        auth = AuthContext(user_id=user_id, workspace_id=workspace_id, role="admin")
+        try:
+            await self._sweeps.start(auth, source_ids=[source_id])
+        except Exception:  # noqa: BLE001 — never fail the connect on the import
+            log.exception("auto-backfill failed for %s; left for manual import", source_id)
+
+    async def start_backfill(
+        self, auth: AuthContext, source_id: str
+    ) -> tuple[SweepOut, bool]:
+        """Import one connection's history. Returns ``(sweep, created)``.
+
+        Connecting a source ingests nothing (see ``handle_callback`` step 5), so this
+        is what actually gives a connection its past. It runs the ordinary sweep
+        machinery scoped to a single connection — same job, same progress shape, same
+        failure isolation — rather than a parallel code path.
+
+        Idempotent by way of ``SweepsService.start``: a sweep already covering this
+        source is returned instead of stacking a second import over it.
+        """
+        workspace_id, role = _require_workspace(auth)
+        async with get_tenant_session() as session:
+            async with run_in_tenant(session, workspace_id, auth.user_id, role):
+                status = await self._repo.get_connection_status(session, source_id)
+        if status is None:
+            raise NotFoundError("Source connection")
+        if status != "connected":
+            raise ValidationError(
+                {"source_id": f"This source is {status} — reconnect it before importing."}
+            )
+        return await self._sweeps.start(auth, source_ids=[source_id])
 
     async def disconnect(self, auth: AuthContext, source_id: str) -> None:
         workspace_id, role = _require_workspace(auth)

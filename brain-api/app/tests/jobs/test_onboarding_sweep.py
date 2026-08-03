@@ -162,3 +162,45 @@ async def test_enqueues_sweep_extract_after_ingestion() -> None:
     _result, _repo, _synced, enq = await _run(sources, {})
     # Ingestion done → the batched extraction pass is handed the sweep.
     enq.assert_awaited_once_with("sweep_extract", "wrk_1", "swp_1")
+
+
+# ── scoped sweeps (per-source historical import) ──────────────────────────────
+@pytest.mark.asyncio
+async def test_scoped_sweep_syncs_only_its_own_sources() -> None:
+    # The per-source import from the Sources page (or a dashboard OAuth connect) is
+    # this same job with config.source_ids set. It must touch only that connection —
+    # re-syncing the workspace's other sources would burn provider quota for nothing.
+    sources = [
+        {"id": "src_notion", "provider": "notion"},
+        {"id": "src_slack", "provider": "slack"},
+    ]
+    sweep = {**_FRESH_SWEEP, "config": {"source_ids": ["src_slack"]}}
+    result, _, synced, _enq = await _run(sources, {}, sweep=sweep)
+    assert synced == ["src_slack"]
+    assert result == {"sources": 1, "failed": 0, "status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_unscoped_sweep_syncs_everything() -> None:
+    # A sweep with no config (or an empty scope) is the onboarding sweep, unchanged.
+    sources = [
+        {"id": "src_notion", "provider": "notion"},
+        {"id": "src_slack", "provider": "slack"},
+    ]
+    for config in (None, {}, {"source_ids": []}):
+        _result, _, synced, _enq = await _run(
+            sources, {}, sweep={**_FRESH_SWEEP, "config": config}
+        )
+        assert synced == ["src_notion", "src_slack"], f"config={config!r}"
+
+
+@pytest.mark.asyncio
+async def test_scoped_sweep_for_a_disconnected_source_is_a_noop() -> None:
+    # The connection was disconnected between queueing and running: it drops out of
+    # list_connected_sources, so the scope matches nothing and the sweep completes
+    # empty rather than falling back to sweeping the whole workspace.
+    sources = [{"id": "src_notion", "provider": "notion"}]
+    sweep = {**_FRESH_SWEEP, "config": {"source_ids": ["src_gone"]}}
+    result, _, synced, _enq = await _run(sources, {}, sweep=sweep)
+    assert synced == []
+    assert result == {"sources": 0, "failed": 0, "status": "completed"}

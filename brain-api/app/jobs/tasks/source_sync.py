@@ -117,13 +117,19 @@ async def source_sync(
                         inserted_ids.append(event_id)
 
                 if opaque_cursor:
-                    await _repo.advance_sync(
-                        session, source_id, datetime.now(UTC), sync_cursor=next_cursor
-                    )
+                    # Determined before the write: advance_sync stamps backfilled_at
+                    # only on a run that leaves no continuation cursor, so a chained
+                    # backfill isn't declared complete halfway through.
                     chain_backfill = bool(
                         next_cursor and next_cursor.startswith(BACKFILL_CURSOR_PREFIX)
                     )
+                    await _repo.advance_sync(
+                        session, source_id, datetime.now(UTC), sync_cursor=next_cursor,
+                        mark_backfilled=not chain_backfill,
+                    )
                 else:
+                    # Timestamp providers fetch their whole window in one run, so the
+                    # first successful sync *is* the historical backfill.
                     await _repo.advance_sync(session, source_id, _parse_iso(next_cursor))
                 await session.commit()
             except httpx.HTTPStatusError as exc:

@@ -196,12 +196,23 @@ class SourcesRepository:
         return row.id  # type: ignore[union-attr]
 
     async def list_connections(self, session: AsyncSession) -> list[dict]:
+        # ``needs_backfill`` is computed here rather than left to each client: it is the
+        # single rule for "this source's history has never been imported, and nothing is
+        # currently importing it". The one-hour clause on 'syncing' is the escape hatch
+        # for a dropped enqueue (jobs/queue.py swallows Redis outages) — without it a
+        # connection could sit 'syncing' forever and never offer its import again.
         rows = (
             await session.execute(
                 text(
                     """
                     SELECT id, provider, name, status, sync_status,
-                           external_account_id, last_synced_at, health, created_at
+                           external_account_id, last_synced_at, backfilled_at,
+                           health, created_at,
+                           (status = 'connected'
+                            AND backfilled_at IS NULL
+                            AND NOT (sync_status = 'syncing'
+                                     AND updated_at > now() - interval '1 hour')
+                           ) AS needs_backfill
                       FROM source_connections
                      ORDER BY created_at DESC
                     """
@@ -360,6 +371,23 @@ class SourcesRepository:
             ),
             rows,
         )
+
+    async def get_connection_status(
+        self, session: AsyncSession, connection_id: str
+    ) -> str | None:
+        """The connection's ``status``, or ``None`` if it doesn't exist in this tenant.
+
+        Distinguishing "missing" from "not connected" is what lets the backfill route
+        answer 404 vs 422 rather than silently queueing an import for a dead source.
+        """
+        row = (
+            await session.execute(
+                text(
+                    "SELECT status FROM source_connections WHERE id = :id"
+                ).bindparams(id=connection_id)
+            )
+        ).first()
+        return row.status if row else None
 
     async def get_connection_provider(
         self, session: AsyncSession, connection_id: str

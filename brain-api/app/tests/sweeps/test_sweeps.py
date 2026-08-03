@@ -49,8 +49,13 @@ def _auth() -> AuthContext:
     return AuthContext(user_id="usr_1", workspace_id="wrk_1", role="admin", scopes=[], kind="jwt")
 
 
-def _service_with(repo: MagicMock) -> tuple[SweepsService, AsyncMock, tuple]:
-    svc = SweepsService(repository=repo)
+def _service_with(
+    repo: MagicMock, jobs_repo: MagicMock | None = None
+) -> tuple[SweepsService, AsyncMock, tuple]:
+    svc = SweepsService(
+        repository=repo,
+        jobs_repository=jobs_repo or MagicMock(mark_syncing=AsyncMock()),
+    )
     enqueue = AsyncMock()
     session = MagicMock(commit=AsyncMock())
     patches = (
@@ -64,7 +69,7 @@ def _service_with(repo: MagicMock) -> tuple[SweepsService, AsyncMock, tuple]:
 # ── service ───────────────────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_start_creates_and_enqueues() -> None:
-    repo = MagicMock(find_active=AsyncMock(return_value=None), create=AsyncMock(return_value=_ROW))
+    repo = MagicMock(find_covering=AsyncMock(return_value=None), create=AsyncMock(return_value=_ROW))
     svc, enqueue, patches = _service_with(repo)
     with patches[0], patches[1], patches[2]:
         sweep, created = await svc.start(_auth())
@@ -78,7 +83,7 @@ async def test_start_creates_and_enqueues() -> None:
 @pytest.mark.asyncio
 async def test_start_returns_inflight_sweep_without_enqueuing() -> None:
     active = {**_ROW, "status": "running"}
-    repo = MagicMock(find_active=AsyncMock(return_value=active), create=AsyncMock())
+    repo = MagicMock(find_covering=AsyncMock(return_value=active), create=AsyncMock())
     svc, enqueue, patches = _service_with(repo)
     with patches[0], patches[1], patches[2]:
         sweep, created = await svc.start(_auth())
@@ -93,7 +98,7 @@ async def test_start_reenqueues_stuck_pending_sweep() -> None:
     # A sweep still 'pending' has never been picked up (its enqueue may have been
     # dropped — queue.py swallows outages). Calling start again must re-enqueue it,
     # or onboarding spins on "Building your brain…" forever with no recovery path.
-    repo = MagicMock(find_active=AsyncMock(return_value=dict(_ROW)), create=AsyncMock())
+    repo = MagicMock(find_covering=AsyncMock(return_value=dict(_ROW)), create=AsyncMock())
     svc, enqueue, patches = _service_with(repo)
     with patches[0], patches[1], patches[2]:
         sweep, created = await svc.start(_auth())
@@ -102,6 +107,68 @@ async def test_start_reenqueues_stuck_pending_sweep() -> None:
     enqueue.assert_awaited_once_with(
         "onboarding_sweep", "wrk_1", _ROW["id"], _job_id=f"onboarding-sweep:{_ROW['id']}"
     )
+
+
+@pytest.mark.asyncio
+async def test_scoped_start_stores_source_ids_and_flags_connection() -> None:
+    # A per-source import is an ordinary sweep carrying its scope in `config`, and it
+    # flips the connection to 'syncing' so the Sources page can show the import in
+    # progress without holding a sweep id.
+    repo = MagicMock(find_covering=AsyncMock(return_value=None), create=AsyncMock(return_value=_ROW))
+    jobs_repo = MagicMock(mark_syncing=AsyncMock())
+    svc, enqueue, patches = _service_with(repo, jobs_repo)
+    with patches[0], patches[1], patches[2]:
+        _, created = await svc.start(_auth(), source_ids=["src_slack"])
+    assert created is True
+    assert repo.create.await_args.kwargs["config"] == {"source_ids": ["src_slack"]}
+    jobs_repo.mark_syncing.assert_awaited_once()
+    assert jobs_repo.mark_syncing.await_args.args[1] == ["src_slack"]
+    enqueue.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scoped_start_asks_coverage_for_its_own_sources() -> None:
+    # The scope must reach find_covering. If start() asked "is *any* sweep running?"
+    # instead, a Slack-scoped import would swallow a request for GitHub and GitHub
+    # would silently never be imported.
+    repo = MagicMock(find_covering=AsyncMock(return_value=None), create=AsyncMock(return_value=_ROW))
+    svc, _, patches = _service_with(repo)
+    with patches[0], patches[1], patches[2]:
+        await svc.start(_auth(), source_ids=["src_github"])
+    assert repo.find_covering.await_args.args[1] == ["src_github"]
+
+
+@pytest.mark.asyncio
+async def test_unscoped_start_stores_no_config_and_flags_nothing() -> None:
+    # The onboarding sweep is unchanged: no scope, and no connection marked 'syncing'
+    # (its progress screen reads the sweep, not the connections).
+    repo = MagicMock(find_covering=AsyncMock(return_value=None), create=AsyncMock(return_value=_ROW))
+    jobs_repo = MagicMock(mark_syncing=AsyncMock())
+    svc, _, patches = _service_with(repo, jobs_repo)
+    with patches[0], patches[1], patches[2]:
+        await svc.start(_auth())
+    assert repo.create.await_args.kwargs["config"] is None
+    assert repo.find_covering.await_args.args[1] is None
+    jobs_repo.mark_syncing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_returns_any_inflight_sweep() -> None:
+    # Unlike start(), this asks the unscoped question — a caller re-attaching after a
+    # reload wants whatever is running, scoped or not.
+    repo = MagicMock(find_active=AsyncMock(return_value={**_ROW, "status": "running"}))
+    svc, _, patches = _service_with(repo)
+    with patches[0], patches[1], patches[2]:
+        sweep = await svc.get_active(_auth())
+    assert sweep is not None and sweep.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_get_active_returns_none_when_idle() -> None:
+    repo = MagicMock(find_active=AsyncMock(return_value=None))
+    svc, _, patches = _service_with(repo)
+    with patches[0], patches[1], patches[2]:
+        assert await svc.get_active(_auth()) is None
 
 
 @pytest.mark.asyncio
@@ -124,11 +191,19 @@ async def test_get_unknown_sweep_raises_not_found() -> None:
 
 # ── router ────────────────────────────────────────────────────────────────────
 class _StubSweepsService:
-    async def start(self, auth: AuthContext) -> tuple[SweepOut, bool]:
+    def __init__(self, active: SweepOut | None = None) -> None:
+        self.active = active
+
+    async def start(
+        self, auth: AuthContext, source_ids: list[str] | None = None
+    ) -> tuple[SweepOut, bool]:
         return SweepOut(**{**_ROW, "progress": {"notion": {"status": "running"}}}), True
 
     async def get(self, auth: AuthContext, sweep_id: str) -> SweepOut:
         return SweepOut(**{**_ROW, "status": "completed", "skills_queued": 4})
+
+    async def get_active(self, auth: AuthContext) -> SweepOut | None:
+        return self.active
 
 
 def _set_auth(role: str) -> None:
@@ -176,7 +251,34 @@ async def test_get_sweep_returns_status(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_active_sweep_is_matched_as_a_literal_path(client: AsyncClient) -> None:
+    # "active" must route to the active-sweep handler, not be captured as a sweep id
+    # by /{sweep_id} — which would 404 on the UUID check and make resume impossible.
+    resp = await client.get("/api/v1/sweeps/active")
+    assert resp.status_code == 200
+    assert resp.json()["data"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_active_sweep_returns_running_sweep(client: AsyncClient) -> None:
+    from app.modules.sweeps import router as router_module
+
+    running = SweepOut(**{**_ROW, "status": "running"})
+    with patch.object(router_module, "_service", _StubSweepsService(active=running)):
+        resp = await client.get("/api/v1/sweeps/active")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "running"
+
+
+@pytest.mark.asyncio
 async def test_non_admin_gets_403(client: AsyncClient) -> None:
     _set_auth("editor")
     resp = await client.post("/api/v1/sweeps")
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_get_active_sweep_non_admin_gets_403(client: AsyncClient) -> None:
+    _set_auth("editor")
+    resp = await client.get("/api/v1/sweeps/active")
     assert resp.status_code == 403

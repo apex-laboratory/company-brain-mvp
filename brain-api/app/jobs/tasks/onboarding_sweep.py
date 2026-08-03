@@ -1,9 +1,13 @@
-"""``onboarding_sweep`` job — historical backfill across all connected sources (KAN-2).
+"""``onboarding_sweep`` job — historical backfill across connected sources (KAN-2).
 
 Orchestrates one :func:`source_sync` per connected source in authority-priority
 order (``source_authority.yaml`` → ``sweep.processing_order``), recording per-source
 progress in ``sweeps.progress`` so the onboarding UI can render the "Building your
 brain..." screen.
+
+Covers every connected source by default (onboarding), or just the connections in
+``sweeps.config.source_ids`` when the sweep was scoped — the per-source historical
+import triggered from the Sources page or by a dashboard OAuth connect.
 
 Key properties (PRD Phase 2 acceptance):
 
@@ -53,6 +57,14 @@ async def onboarding_sweep(ctx: dict, workspace_id: str, sweep_id: str) -> dict:
             sources = await _repo.list_connected_sources(session)
             await _repo.set_sweep_status(session, sweep_id, "running")
             await session.commit()
+
+    # A scoped sweep (``config.source_ids``) imports only those connections — the
+    # per-source backfill from the Sources page or a dashboard OAuth connect. No
+    # scope means every connected source, which is the onboarding sweep.
+    scope = ((sweep.get("config") or {}).get("source_ids")) or None
+    if scope:
+        wanted = set(scope)
+        sources = [s for s in sources if s["id"] in wanted]
 
     # On an ARQ retry after a crash, skip sources that already completed.
     prior: dict = sweep.get("progress") or {}

@@ -136,8 +136,18 @@ class _ReturnToRepo:
         return "src_1"
 
 
-async def _run_success_callback(return_to: str | None) -> str:
-    service = SourcesService(repository=_ReturnToRepo(return_to))  # type: ignore[arg-type]
+def _stub_sweeps() -> MagicMock:
+    """Stand-in for SweepsService — the callback's auto-import boundary."""
+    return MagicMock(start=AsyncMock(return_value=(MagicMock(), True)))
+
+
+async def _run_success_callback(
+    return_to: str | None, sweeps: MagicMock | None = None
+) -> str:
+    service = SourcesService(
+        repository=_ReturnToRepo(return_to),  # type: ignore[arg-type]
+        sweeps_service=sweeps or _stub_sweeps(),
+    )
     fake = MagicMock()
     fake.exchange_code = AsyncMock(
         return_value=OAuthTokens(access_token="tok", external_account_id="ws_1")
@@ -163,6 +173,39 @@ async def test_callback_success_without_return_to_keeps_default() -> None:
     """Omitted return_to preserves today's redirect exactly (backward compatible)."""
     redirect = await _run_success_callback(None)
     assert redirect == f"{settings.frontend_url}/settings/sources?connected=notion"
+
+
+# ── auto-start of the historical import ───────────────────────────────────────
+async def test_callback_from_onboarding_defers_the_import_to_the_wizard() -> None:
+    """Onboarding fires its own sweep after the channel/lookback picker, so starting
+    one here would ingest channels the user is about to deselect."""
+    sweeps = _stub_sweeps()
+    await _run_success_callback("/onboarding", sweeps)
+    sweeps.start.assert_not_awaited()
+
+
+async def test_callback_from_dashboard_auto_starts_a_scoped_import() -> None:
+    """A dashboard connect has no follow-up sweep step. Without this the source would
+    only ever receive future webhooks and its history would never be fetched."""
+    sweeps = _stub_sweeps()
+    await _run_success_callback("/dashboard/sources", sweeps)
+    sweeps.start.assert_awaited_once()
+    assert sweeps.start.await_args.kwargs["source_ids"] == ["src_1"]
+
+
+async def test_callback_without_return_to_auto_starts_a_scoped_import() -> None:
+    """The default landing page is a dashboard surface too — same reasoning."""
+    sweeps = _stub_sweeps()
+    await _run_success_callback(None, sweeps)
+    sweeps.start.assert_awaited_once()
+
+
+async def test_failed_auto_import_still_completes_the_connect() -> None:
+    """The OAuth connect succeeded; a queueing failure must not turn that into an
+    error page. The connection stays needs_backfill so Sources can offer the import."""
+    sweeps = MagicMock(start=AsyncMock(side_effect=RuntimeError("redis down")))
+    redirect = await _run_success_callback("/dashboard/sources", sweeps)
+    assert redirect == f"{settings.frontend_url}/dashboard/sources?connected=notion"
 
 
 class _NeverConsumeRepo:
