@@ -368,6 +368,49 @@ class SourcesService:
             )
         return await self._sweeps.start(auth, source_ids=[source_id])
 
+    async def _uninstall_if_last(self, secrets_row: dict, source_id: str) -> None:
+        """Remove the provider-side installation, if this was the last one using it.
+
+        Only providers whose installation outlives their tokens declare ``uninstall``
+        (today: GitHub) — the optional-capability convention used by ``push_delivery``
+        and friends, so nothing is required of the other connectors.
+
+        The count runs on the **privileged** pool on purpose. "Does another workspace
+        still hold this account?" is a cross-tenant question that RLS would answer
+        `no` by construction, which would uninstall a GitHub App out from under every
+        other workspace connected to it the first time any one of them disconnected.
+
+        Best-effort like ``revoke``: the local disconnect must succeed regardless, and
+        a leftover installation is a visible, user-fixable state — whereas failing the
+        disconnect would leave a connection the user has explicitly asked to remove.
+        """
+        integration = get_integration(secrets_row["provider"])
+        uninstall = getattr(integration, "uninstall", None)
+        account_id = secrets_row.get("external_account_id")
+        if uninstall is None or not account_id:
+            return
+        try:
+            async with get_session() as session:
+                others = await self._repo.count_other_connections_for_account(
+                    session,
+                    provider=secrets_row["provider"],
+                    external_account_id=account_id,
+                    excluding_source_id=source_id,
+                )
+            if others:
+                log.info(
+                    "%s account %s still connected in %d other workspace(s) — "
+                    "leaving the installation in place",
+                    secrets_row["provider"], account_id, others,
+                )
+                return
+            await uninstall(account_id)
+        except Exception:  # noqa: BLE001 — never block disconnect on a provider error
+            log.exception(
+                "provider-side uninstall failed for %s; the installation may need "
+                "removing manually", source_id,
+            )
+
     async def disconnect(self, auth: AuthContext, source_id: str) -> None:
         workspace_id, role = _require_workspace(auth)
         # txn A: read-only secrets lookup, then release the connection — the
@@ -384,6 +427,7 @@ class SourcesService:
             await integration.revoke(_dec(secrets_row["access_token_enc"]))
         except Exception:  # noqa: BLE001 — never block disconnect on a provider error
             pass
+        await self._uninstall_if_last(secrets_row, source_id)
         # txn B: stop renewing any push channels for this source (the provider-side
         # channel then expires on its own, <= 7 days for Google watch) and delete.
         async with get_tenant_session() as session:

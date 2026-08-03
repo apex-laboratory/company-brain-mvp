@@ -239,9 +239,35 @@ class GitHubIntegration:
         return await self._mint_tokens(refresh_token)
 
     async def revoke(self, access_token: str) -> None:
-        # Installation tokens expire on their own (~1h); the real revoke is the user
-        # uninstalling the App. Disconnect is local-only.
+        # Nothing to revoke: an installation token is not revocable and expires on its
+        # own (~1h). Ending access means removing the *installation* — see uninstall().
         return None
+
+    async def uninstall(self, external_account_id: str) -> None:
+        """Delete the App installation so it stops appearing on the user's repos.
+
+        Optional connector capability (see ``base.SourceIntegration.revoke``); GitHub
+        is the only provider that needs one, because a GitHub App install outlives
+        every token it mints. Without this, disconnecting removed our row and left the
+        App sitting on the repositories with no sign it had been disconnected.
+
+        Authenticated with the **App JWT**, not an installation token: the endpoint
+        acts on behalf of the App itself, and the installation token it would issue is
+        exactly what is being destroyed.
+
+        ``SourcesService.disconnect`` calls this only when the last workspace holding
+        the installation disconnects, and swallows failures — a GitHub-side error must
+        not block the local disconnect.
+        """
+        resp = await http_client().delete(
+            f"{_API_BASE}/app/installations/{external_account_id}",
+            headers={"Authorization": f"Bearer {self._app_jwt()}", **_BASE_HEADERS},
+        )
+        # 404 means it is already gone (uninstalled from GitHub's own settings page) —
+        # the desired end state, so treat it as success rather than an error to log.
+        if resp.status_code != 404:
+            resp.raise_for_status()
+        log.info("github: uninstalled App installation %s", external_account_id)
 
     # ── fetch ────────────────────────────────────────────────────────────────────
     async def list_channels(self, access_token: str) -> list[ChannelRef]:
