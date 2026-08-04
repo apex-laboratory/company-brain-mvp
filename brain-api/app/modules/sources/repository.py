@@ -313,7 +313,7 @@ class SourcesRepository:
                 text(
                     """
                     SELECT id, provider, access_token_enc, refresh_token_enc,
-                           token_expires_at, external_account_id
+                           token_expires_at, external_account_id, lookback_days
                       FROM source_connections
                      WHERE id = :id
                     """
@@ -427,16 +427,21 @@ class SourcesRepository:
 
     async def update_lookback(
         self, session: AsyncSession, source_id: str, lookback_days: int
-    ) -> None:
-        await session.execute(
-            text(
-                """
-                UPDATE source_connections
-                   SET lookback_days = :days, updated_at = now()
-                 WHERE id = :id
-                """
-            ).bindparams(id=source_id, days=lookback_days)
-        )
+    ) -> int | None:
+        """Persist the ingest window; returns the value now stored (``None`` if no row)."""
+        row = (
+            await session.execute(
+                text(
+                    """
+                    UPDATE source_connections
+                       SET lookback_days = :days, updated_at = now()
+                     WHERE id = :id
+                 RETURNING lookback_days
+                    """
+                ).bindparams(id=source_id, days=lookback_days)
+            )
+        ).first()
+        return row.lookback_days if row else None
 
     async def upsert_channel(
         self,
@@ -513,14 +518,15 @@ class SourcesRepository:
         ).first()
         return row.status if row else None
 
-    async def get_connection_provider(
+    async def get_connection_scope(
         self, session: AsyncSession, connection_id: str
-    ) -> str | None:
+    ) -> dict | None:
+        """The connection's provider + currently persisted ingest window."""
         row = (
             await session.execute(
                 text(
-                    "SELECT provider FROM source_connections WHERE id = :id"
+                    "SELECT provider, lookback_days FROM source_connections WHERE id = :id"
                 ).bindparams(id=connection_id)
             )
-        ).first()
-        return row.provider if row else None
+        ).mappings().first()
+        return dict(row) if row else None
