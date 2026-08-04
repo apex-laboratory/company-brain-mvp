@@ -201,22 +201,106 @@ class SourcesRepository:
         # currently importing it". The one-hour clause on 'syncing' is the escape hatch
         # for a dropped enqueue (jobs/queue.py swallows Redis outages) — without it a
         # connection could sit 'syncing' forever and never offer its import again.
+        #
+        # The event rollup answers "what has this source read, and how much of it
+        # became knowledge?" — the counts behind the card's read report. Aggregated
+        # in a grouped subquery rather than a correlated one so the whole list stays
+        # a single round trip (index: ix_source_events_workspace_connection_outcome).
+        #
+        # ``source_connection_id IS NULL`` is excluded deliberately. That FK is
+        # ON DELETE SET NULL, so those rows are the residue of *deleted* connections;
+        # attributing them to a live source would inflate its counts with another
+        # connection's history. COALESCE keeps a source with no events at 0, not null.
         rows = (
             await session.execute(
                 text(
                     """
-                    SELECT id, provider, name, status, sync_status,
-                           external_account_id, last_synced_at, backfilled_at,
-                           health, created_at,
-                           (status = 'connected'
-                            AND backfilled_at IS NULL
-                            AND NOT (sync_status = 'syncing'
-                                     AND updated_at > now() - interval '1 hour')
-                           ) AS needs_backfill
-                      FROM source_connections
-                     ORDER BY created_at DESC
+                    SELECT c.id, c.provider, c.name, c.status, c.sync_status,
+                           c.external_account_id, c.last_synced_at, c.backfilled_at,
+                           c.health, c.created_at,
+                           (c.status = 'connected'
+                            AND c.backfilled_at IS NULL
+                            AND NOT (c.sync_status = 'syncing'
+                                     AND c.updated_at > now() - interval '1 hour')
+                           ) AS needs_backfill,
+                           COALESCE(e.items_read, 0)    AS items_read,
+                           COALESCE(e.skills_kept, 0)   AS skills_kept,
+                           COALESCE(e.discarded, 0)     AS discarded,
+                           COALESCE(e.pending_items, 0) AS pending_items
+                      FROM source_connections c
+                      LEFT JOIN (
+                            SELECT source_connection_id,
+                                   count(*) AS items_read,
+                                   count(*) FILTER (
+                                       WHERE outcome IN ('published', 'review', 'draft')
+                                   ) AS skills_kept,
+                                   count(*) FILTER (WHERE outcome = 'discarded')
+                                       AS discarded,
+                                   count(*) FILTER (WHERE outcome = 'queued')
+                                       AS pending_items
+                              FROM source_events
+                             WHERE source_connection_id IS NOT NULL
+                             GROUP BY source_connection_id
+                      ) e ON e.source_connection_id = c.id
+                     ORDER BY c.created_at DESC
                     """
                 )
+            )
+        ).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def connection_event_totals(self, session: AsyncSession, source_id: str) -> dict:
+        """The same rollup as ``list_connections``, for one connection.
+
+        Kept as its own query rather than reusing the list: the report is opened for
+        a single card, and scanning every connection's events to answer for one would
+        be wasteful. Same FILTER vocabulary, so the two can't disagree.
+        """
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT count(*) AS items_read,
+                           count(*) FILTER (
+                               WHERE outcome IN ('published', 'review', 'draft')
+                           ) AS skills_kept,
+                           count(*) FILTER (WHERE outcome = 'discarded') AS discarded,
+                           count(*) FILTER (WHERE outcome = 'queued') AS pending_items
+                      FROM source_events
+                     WHERE source_connection_id = :source_id
+                    """
+                ).bindparams(source_id=source_id)
+            )
+        ).mappings().one()
+        return dict(row)
+
+    async def discard_breakdown(self, session: AsyncSession, source_id: str) -> list[dict]:
+        """Why this source's content was dropped, grouped by the stage that dropped it.
+
+        The per-event ``reason`` is a free-text LLM sentence, so it is near-unique —
+        56 discarded events produced 56 distinct sentences. Listing them raw is noise;
+        the *stage* is the signal, and a few verbatim samples give it texture. Hence
+        the count per stage plus at most three example reasons.
+
+        DISTINCT before the slice so three near-identical sentences don't crowd out
+        a genuinely different one.
+        """
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT pipeline_meta->>'stage' AS stage,
+                           count(*)                AS count,
+                           (array_agg(
+                               DISTINCT pipeline_meta->>'reason'
+                            ))[1:3]                AS sample_reasons
+                      FROM source_events
+                     WHERE source_connection_id = :source_id
+                       AND outcome = 'discarded'
+                     GROUP BY 1
+                     ORDER BY count DESC
+                    """
+                ).bindparams(source_id=source_id)
             )
         ).mappings().all()
         return [dict(r) for r in rows]

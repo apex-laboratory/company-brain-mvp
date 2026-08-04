@@ -82,6 +82,21 @@ async def callback(
     return RedirectResponse(url=redirect_to, status_code=302)
 
 
+@router.get("/{source_id}/report", dependencies=[Depends(require_role("admin"))])
+@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
+async def read_report(
+    source_id: str, request: Request, auth: AuthContext = Depends(get_auth_context)
+):
+    """What this source read, what became knowledge, and why the rest didn't.
+
+    A successful import that yields no skills is indistinguishable from a broken one
+    unless the discard reasons are visible — the pipeline records them per event, and
+    this is the surface that shows them.
+    """
+    report = await _service.get_report(auth, source_id)
+    return ok(request, report.model_dump(by_alias=True))
+
+
 @router.post("/{source_id}/backfill", dependencies=[Depends(require_role("admin"))])
 @limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
 async def backfill(

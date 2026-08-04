@@ -28,8 +28,10 @@ from app.modules.sources.schemas import (
     AuthorizeStartOut,
     ChannelOut,
     ChannelSelectRequest,
+    DiscardGroupOut,
     SourceConnectionOut,
     SourceScopeOut,
+    SourceReportOut,
 )
 from app.modules.sweeps.schemas import SweepOut
 from app.modules.sweeps.service import SweepsService
@@ -120,6 +122,25 @@ def _require_configured(provider: str) -> None:
         raise ConfigurationError(
             f"The {provider} connector is not configured on this deployment."
         )
+
+
+# The four pipeline stages that can discard an event (app/pipeline/orchestrator.py),
+# in the user's language. Mapped here rather than in the frontend so the pipeline's
+# internal vocabulary stays out of the UI, and so a stage added later renders as its
+# raw name (see _stage_label) instead of a blank row.
+_DISCARD_STAGE_LABELS = {
+    "normalize": "No readable content",
+    "relevance_gate": "Not durable knowledge",
+    "decision_identifier": "No decision found",
+    "skill_extractor": "Extractor abstained",
+}
+
+
+def _stage_label(stage: str | None) -> str:
+    """Human label for a discard stage; unknown stages degrade to the raw name."""
+    if not stage:
+        return "Unknown"
+    return _DISCARD_STAGE_LABELS.get(stage, stage)
 
 
 def _require_workspace(auth: AuthContext) -> tuple[str, str]:
@@ -321,6 +342,42 @@ class SourcesService:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
                 rows = await self._repo.list_connections(session)
         return [SourceConnectionOut(**row) for row in rows]
+
+    # ── read report ──────────────────────────────────────────────────────────────
+    async def get_report(self, auth: AuthContext, source_id: str) -> SourceReportOut:
+        """What this source has read, what became knowledge, and why the rest didn't.
+
+        Exists because "we read 56 things and kept none" is information the pipeline
+        already records per event (``source_events.pipeline_meta``) and nothing
+        surfaced — leaving a successful import that produced no skills looking
+        identical to a broken one.
+        """
+        workspace_id, role = _require_workspace(auth)
+        async with get_tenant_session() as session:
+            async with run_in_tenant(session, workspace_id, auth.user_id, role):
+                status = await self._repo.get_connection_status(session, source_id)
+                if status is None:
+                    raise NotFoundError("Source connection")
+                totals = await self._repo.connection_event_totals(session, source_id)
+                groups = await self._repo.discard_breakdown(session, source_id)
+
+        return SourceReportOut(
+            source_id=source_id,
+            items_read=totals["items_read"],
+            skills_kept=totals["skills_kept"],
+            discarded=totals["discarded"],
+            pending_items=totals["pending_items"],
+            discarded_by_stage=[
+                DiscardGroupOut(
+                    stage=g["stage"] or "unknown",
+                    label=_stage_label(g["stage"]),
+                    count=g["count"],
+                    # array_agg yields NULL, not [], for a group with no reasons.
+                    sample_reasons=[r for r in (g["sample_reasons"] or []) if r],
+                )
+                for g in groups
+            ],
+        )
 
     # ── historical backfill ──────────────────────────────────────────────────────
     async def _start_backfill_unattended(
