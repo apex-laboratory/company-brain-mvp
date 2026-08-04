@@ -447,7 +447,7 @@ class SkillsRepository:
                     SELECT id, workspace_id, skill_id, query, matched_confidence,
                            match_type, human_override
                       FROM agent_interactions
-                     WHERE id = :id
+                     WHERE id = CAST(:id AS uuid)
                     """
                 ).bindparams(id=interaction_id)
             )
@@ -460,6 +460,6 @@ class SkillsRepository:
         """Flag an interaction as human-overridden (idempotent)."""
         await session.execute(
             text(
-                "UPDATE agent_interactions SET human_override = TRUE WHERE id = :id"
+                "UPDATE agent_interactions SET human_override = TRUE WHERE id = CAST(:id AS uuid)"
             ).bindparams(id=interaction_id)
         )
