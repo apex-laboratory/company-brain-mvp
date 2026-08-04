@@ -42,8 +42,35 @@ class SourceConnectionOut(_Response):
     # Computed in the repository: history never imported and nothing importing it now.
     # Drives the Sources page's "Import history" button.
     needs_backfill: bool = False
+    # What this source has read and what became of it, over its whole lifetime
+    # (not just the last import — webhooks add events outside any sweep). Zero
+    # rather than null for a source that has read nothing yet.
+    items_read: int = 0
+    skills_kept: int = 0
+    discarded: int = 0
+    pending_items: int = 0
     health: int | None = None
     created_at: datetime
+
+
+class DiscardGroupOut(_Response):
+    """One reason-bucket in the read report, keyed by the pipeline stage."""
+
+    stage: str
+    label: str
+    count: int
+    sample_reasons: list[str] = []
+
+
+class SourceReportOut(_Response):
+    """`GET /sources/{id}/report` — what this source read and why things dropped."""
+
+    source_id: str
+    items_read: int
+    skills_kept: int
+    discarded: int
+    pending_items: int
+    discarded_by_stage: list[DiscardGroupOut] = []
 
 
 class ChannelOut(_Response):

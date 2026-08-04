@@ -15,6 +15,8 @@ Runs only with ``E2E=1`` against a throwaway database (see conftest).
 """
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import text
 
 from app.config.database import get_session
@@ -190,3 +192,123 @@ async def test_errored_connection_still_reports_its_missing_history() -> None:
     # since retrying is exactly what the user should be able to do.
     await _connection("src_slack", sync_status="error")
     assert (await _needs_backfill())["src_slack"] is True
+
+
+# ── read report: event rollup + discard breakdown ─────────────────────────────
+async def _event(
+    source_id: str | None,
+    outcome: str,
+    *,
+    stage: str | None = None,
+    reason: str | None = None,
+    ext: str = "",
+) -> None:
+    """Insert one source_event. ``source_id=None`` mimics a deleted connection."""
+    meta = json.dumps({"stage": stage, "reason": reason}) if stage else "{}"
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO source_events
+                    (workspace_id, provider, event_type, external_event_id,
+                     payload, outcome, source_connection_id, pipeline_meta)
+                VALUES (:ws, 'github', 'pr', :ext, '{}'::jsonb, :outcome,
+                        :src, CAST(:meta AS jsonb))
+                """
+            ).bindparams(
+                ws=WS, ext=ext or f"{outcome}-{stage}-{source_id}-{id(object())}",
+                outcome=outcome, src=source_id, meta=meta,
+            )
+        )
+        await session.commit()
+
+
+async def _totals(source_id: str) -> dict:
+    async with get_session() as session:
+        return await _sources.connection_event_totals(session, source_id)
+
+
+async def _rollup() -> dict[str, dict]:
+    async with get_session() as session:
+        rows = await _sources.list_connections(session)
+    return {r["id"]: r for r in rows}
+
+
+async def test_rollup_sorts_each_outcome_into_the_right_bucket() -> None:
+    await _reset()
+    await _connection("src_a")
+    # published/review/draft all produced a skill; the rest did not.
+    for outcome in ("published", "review", "draft"):
+        await _event("src_a", outcome)
+    await _event("src_a", "discarded", stage="relevance_gate", reason="one-off task")
+    await _event("src_a", "queued")
+
+    totals = await _totals("src_a")
+    assert totals["items_read"] == 5
+    assert totals["skills_kept"] == 3       # published + review + draft
+    assert totals["discarded"] == 1
+    assert totals["pending_items"] == 1
+
+
+async def test_rollup_excludes_events_from_deleted_connections() -> None:
+    await _reset()
+    await _connection("src_a")
+    await _event("src_a", "draft")
+    # ON DELETE SET NULL residue from a connection that was removed. Counting these
+    # would attribute another connection's history to this live source.
+    for i in range(3):
+        await _event(None, "discarded", stage="relevance_gate", ext=f"orphan-{i}")
+
+    assert (await _totals("src_a"))["items_read"] == 1
+    assert (await _rollup())["src_a"]["items_read"] == 1
+
+
+async def test_rollup_reports_zero_not_null_for_a_source_with_no_events() -> None:
+    # LEFT JOIN yields NULL without the COALESCE, which would break the schema's int.
+    await _reset()
+    await _connection("src_quiet")
+    row = (await _rollup())["src_quiet"]
+    assert (row["items_read"], row["skills_kept"], row["discarded"]) == (0, 0, 0)
+
+
+async def test_breakdown_groups_by_stage_ordered_by_count() -> None:
+    await _reset()
+    await _connection("src_a")
+    for i in range(4):
+        await _event(
+            "src_a", "discarded", stage="relevance_gate", reason=f"reason {i}", ext=f"r{i}"
+        )
+    await _event("src_a", "discarded", stage="skill_extractor", reason="abstained", ext="x1")
+
+    async with get_session() as session:
+        groups = await _sources.discard_breakdown(session, "src_a")
+    assert [(g["stage"], g["count"]) for g in groups] == [
+        ("relevance_gate", 4),
+        ("skill_extractor", 1),
+    ]
+
+
+async def test_breakdown_caps_sample_reasons_at_three() -> None:
+    # Reasons are free-text and near-unique; the report shows a few, not all of them.
+    await _reset()
+    await _connection("src_a")
+    for i in range(9):
+        await _event(
+            "src_a", "discarded", stage="relevance_gate", reason=f"distinct {i}", ext=f"s{i}"
+        )
+
+    async with get_session() as session:
+        groups = await _sources.discard_breakdown(session, "src_a")
+    assert groups[0]["count"] == 9
+    assert len(groups[0]["sample_reasons"]) == 3
+
+
+async def test_breakdown_ignores_non_discarded_outcomes() -> None:
+    await _reset()
+    await _connection("src_a")
+    await _event("src_a", "draft", stage="skill_writer", reason="kept")
+    await _event("src_a", "failed", stage="skill_extractor", reason="boom")
+
+    async with get_session() as session:
+        groups = await _sources.discard_breakdown(session, "src_a")
+    assert groups == []
