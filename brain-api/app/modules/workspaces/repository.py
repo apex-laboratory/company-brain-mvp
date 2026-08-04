@@ -7,6 +7,7 @@ to prevent injection (§5).
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -54,9 +55,16 @@ class WorkspaceRepository:
         slug: str,
         team_size: str,
         primary_use_case: str,
+        use_cases: list[str] | None = None,
+        use_case_other: str | None = None,
         created_by: str,
     ) -> WorkspaceRecord:
         """Insert a new workspace row and return it. Caller commits.
+
+        ``use_cases`` is the full multi-select answer; ``primary_use_case`` is its
+        first entry, kept as its own column because that is what every read path
+        uses. A caller that has only the single value leaves ``use_cases`` unset
+        and the column falls back to a one-element array.
 
         Raises IntegrityError on a slug UNIQUE violation.
         """
@@ -66,10 +74,12 @@ class WorkspaceRepository:
                     """
                     INSERT INTO workspaces
                         (id, name, slug, plan, seat_limit,
-                         team_size, primary_use_case, created_by)
+                         team_size, primary_use_case, use_cases, use_case_other,
+                         created_by)
                     VALUES
                         (:id, :name, :slug, 'trial', 5,
-                         :team_size, :primary_use_case, :created_by)
+                         :team_size, :primary_use_case, CAST(:use_cases AS jsonb),
+                         :use_case_other, :created_by)
                     RETURNING id, name, slug, plan
                     """
                 ).bindparams(
@@ -78,6 +88,8 @@ class WorkspaceRepository:
                     slug=slug,
                     team_size=team_size,
                     primary_use_case=primary_use_case,
+                    use_cases=json.dumps(use_cases or [primary_use_case]),
+                    use_case_other=use_case_other,
                     created_by=created_by,
                 )
             )
@@ -112,6 +124,8 @@ class WorkspaceRepository:
         name: str | None,
         team_size: str | None,
         primary_use_case: str | None,
+        use_cases: list[str] | None = None,
+        use_case_other: str | None = None,
     ) -> None:
         """Partially update workspace onboarding fields. Caller commits."""
         sets = ["onboarding_step = :step", "updated_at = now()"]
@@ -125,6 +139,14 @@ class WorkspaceRepository:
         if primary_use_case is not None:
             sets.append("primary_use_case = :primary_use_case")
             params["primary_use_case"] = primary_use_case
+        if use_cases is not None:
+            sets.append("use_cases = CAST(:use_cases AS jsonb)")
+            params["use_cases"] = json.dumps(use_cases)
+        # Written whenever the selection is — clearing "Other" has to clear the
+        # text too, so `use_cases is not None` (not the text itself) is the gate.
+        if use_cases is not None or use_case_other is not None:
+            sets.append("use_case_other = :use_case_other")
+            params["use_case_other"] = use_case_other
 
         await session.execute(
             text(

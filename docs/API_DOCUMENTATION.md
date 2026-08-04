@@ -512,7 +512,9 @@ Request:
 {
   "companyName": "Riverline",
   "teamSize": "51-200",
-  "primaryUseCase": "support"
+  "primaryUseCase": "support",
+  "useCases": ["support", "eng", "other"],
+  "useCaseOther": "Vendor security questionnaires"
 }
 ```
 
@@ -537,11 +539,18 @@ Allowed `teamSize` values:
 1-10, 11-50, 51-200, 200+
 ```
 
-Allowed `primaryUseCase` values:
+Allowed `primaryUseCase` / `useCases` values:
 
 ```txt
-support, ops, eng, agents
+support, ops, eng, agents, sales, product, people, finance, data, marketing, other
 ```
+
+The use-case question is multi-select. `useCases` carries the full selection and
+`primaryUseCase` (still required, still single) carries the first one — every read
+path and the `workspaces.primary_use_case` column predate multi-select. Omitting
+`useCases` is valid and stores `[primaryUseCase]`. `useCaseOther` is the free text
+typed behind the `other` checkbox (max 200 chars); it is stored on its own column,
+so `useCases` stays enum-only.
 
 ### Save Onboarding Progress
 
@@ -558,6 +567,7 @@ Request:
   "companyName": "Riverline",
   "teamSize": "51-200",
   "primaryUseCase": "support",
+  "useCases": ["support", "eng"],
   "connectedProviders": ["slack", "notion"],
   "timeRange": "90d",
   "channels": {

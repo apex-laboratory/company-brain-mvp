@@ -21,7 +21,9 @@ class Workspace(Base):
     plan: Mapped[str] = mapped_column(_workspace_plan, nullable=False, server_default=text("'trial'"))
     seat_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("5"))
     team_size: Mapped[str | None] = mapped_column(Text)                  # '1-10'|'11-50'|…
-    primary_use_case: Mapped[str | None] = mapped_column(Text)           # 'support'|'ops'|…
+    primary_use_case: Mapped[str | None] = mapped_column(Text)           # first pick: 'support'|…
+    use_cases: Mapped[list | None] = mapped_column(JSONB)                # whole multi-select answer
+    use_case_other: Mapped[str | None] = mapped_column(Text)             # text behind 'other'
     onboarding_step: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(Text, ForeignKey("users.id"))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

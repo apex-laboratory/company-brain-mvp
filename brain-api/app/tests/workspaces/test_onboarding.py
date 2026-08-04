@@ -55,6 +55,8 @@ class _FakeWorkspaceRepository(WorkspaceRepository):
         name: str | None,
         team_size: str | None,
         primary_use_case: str | None,
+        use_cases: list[str] | None = None,
+        use_case_other: str | None = None,
     ) -> None:
         self.last_update = {
             "workspace_id": workspace_id,
@@ -62,6 +64,8 @@ class _FakeWorkspaceRepository(WorkspaceRepository):
             "name": name,
             "team_size": team_size,
             "primary_use_case": primary_use_case,
+            "use_cases": use_cases,
+            "use_case_other": use_case_other,
         }
 
 
@@ -124,6 +128,63 @@ async def test_only_non_null_fields_forwarded_to_repository() -> None:
     assert repo.last_update["primary_use_case"] is None
     assert repo.last_update["step"] == "configure"
     assert repo.last_update["workspace_id"] == "wrk_1"
+
+
+@pytest.mark.asyncio
+async def test_multi_select_use_cases_forwarded_to_repository() -> None:
+    repo = _FakeWorkspaceRepository()
+    service = WorkspaceService(repository=repo)
+
+    await service.save_onboarding_step(
+        workspace_id="wrk_1",
+        user_id="usr_1",
+        role="admin",
+        request=OnboardingPatchRequest(
+            step="company",
+            primary_use_case="support",
+            use_cases=["support", "eng", "other"],
+            use_case_other="  Vendor security questionnaires  ",
+        ),
+    )
+
+    assert repo.last_update is not None
+    assert repo.last_update["use_cases"] == ["support", "eng", "other"]
+    # Trimmed by the request schema, not by the caller.
+    assert repo.last_update["use_case_other"] == "Vendor security questionnaires"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_use_cases_deduped_preserving_order() -> None:
+    repo = _FakeWorkspaceRepository()
+    service = WorkspaceService(repository=repo)
+
+    await service.save_onboarding_step(
+        workspace_id="wrk_1",
+        user_id="usr_1",
+        role="admin",
+        request=OnboardingPatchRequest(
+            step="company", use_cases=["eng", "support", "eng"]
+        ),
+    )
+
+    assert repo.last_update is not None
+    assert repo.last_update["use_cases"] == ["eng", "support"]
+
+
+@pytest.mark.asyncio
+async def test_blank_use_case_other_stored_as_null() -> None:
+    repo = _FakeWorkspaceRepository()
+    service = WorkspaceService(repository=repo)
+
+    await service.save_onboarding_step(
+        workspace_id="wrk_1",
+        user_id="usr_1",
+        role="admin",
+        request=OnboardingPatchRequest(step="company", use_case_other="   "),
+    )
+
+    assert repo.last_update is not None
+    assert repo.last_update["use_case_other"] is None
 
 
 @pytest.mark.asyncio

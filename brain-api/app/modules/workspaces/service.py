@@ -105,6 +105,8 @@ class WorkspaceService:
                         slug=slug,
                         team_size=request.team_size,
                         primary_use_case=request.primary_use_case,
+                        use_cases=request.use_cases,
+                        use_case_other=request.use_case_other,
                         created_by=user_id,
                     )
                     break
@@ -169,6 +171,8 @@ class WorkspaceService:
                     name=request.company_name,
                     team_size=request.team_size,
                     primary_use_case=request.primary_use_case,
+                    use_cases=request.use_cases,
+                    use_case_other=request.use_case_other,
                 )
                 await session.commit()
 

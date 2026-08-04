@@ -643,7 +643,7 @@
           "sources"
         ],
         "summary": "List Channels",
-        "description": "List provider-discoverable channels merged with persisted selection state.",
+        "description": "Return the source's scope: discoverable channels + the persisted lookback window.",
         "operationId": "list_channels_api_v1_sources__source_id__channels_get",
         "security": [
           {
@@ -687,7 +687,7 @@
           "sources"
         ],
         "summary": "Select Channels",
-        "description": "Toggle which channels are selected for ingestion.",
+        "description": "Persist the scope (channel selection + lookback) and echo back what was stored.",
         "operationId": "select_channels_api_v1_sources__source_id__channels_patch",
         "security": [
           {
@@ -3078,6 +3078,46 @@
       },
       "CreateWorkspaceRequest": {
         "properties": {
+          "useCases": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "support",
+                    "ops",
+                    "eng",
+                    "agents",
+                    "sales",
+                    "product",
+                    "people",
+                    "finance",
+                    "data",
+                    "marketing",
+                    "other"
+                  ]
+                },
+                "type": "array",
+                "maxItems": 11
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usecases"
+          },
+          "useCaseOther": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usecaseother"
+          },
           "companyName": {
             "type": "string",
             "maxLength": 100,
@@ -3100,7 +3140,14 @@
               "support",
               "ops",
               "eng",
-              "agents"
+              "agents",
+              "sales",
+              "product",
+              "people",
+              "finance",
+              "data",
+              "marketing",
+              "other"
             ],
             "title": "Primaryusecase"
           }
@@ -3221,6 +3268,46 @@
       },
       "OnboardingPatchRequest": {
         "properties": {
+          "useCases": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "support",
+                    "ops",
+                    "eng",
+                    "agents",
+                    "sales",
+                    "product",
+                    "people",
+                    "finance",
+                    "data",
+                    "marketing",
+                    "other"
+                  ]
+                },
+                "type": "array",
+                "maxItems": 11
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usecases"
+          },
+          "useCaseOther": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usecaseother"
+          },
           "step": {
             "type": "string",
             "enum": [
@@ -3269,7 +3356,14 @@
                   "support",
                   "ops",
                   "eng",
-                  "agents"
+                  "agents",
+                  "sales",
+                  "product",
+                  "people",
+                  "finance",
+                  "data",
+                  "marketing",
+                  "other"
                 ]
               },
               {
