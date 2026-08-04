@@ -54,6 +54,18 @@ class ChannelOut(_Response):
     item_count: int = 0
 
 
+class SourceScopeOut(_Response):
+    """Everything the scope picker edits, read and written as one unit.
+
+    ``lookback_days`` rides along with the channels so the client can render the
+    *saved* window instead of guessing — the column is NOT NULL (default 90), so
+    this is always a concrete number, never "unknown".
+    """
+
+    channels: list[ChannelOut]
+    lookback_days: int
+
+
 # ── requests ──────────────────────────────────────────────────────────────────
 class AuthorizeStartRequest(_Request):
     # Required for subdomain-scoped providers (e.g. Zendesk: 'acme' -> acme.zendesk.com);

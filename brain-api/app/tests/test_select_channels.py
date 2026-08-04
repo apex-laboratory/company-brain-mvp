@@ -32,24 +32,28 @@ def _auth() -> AuthContext:
     return AuthContext(user_id="usr_1", workspace_id="wrk_1", role="admin", scopes=[], kind="jwt")
 
 
-def _repo() -> MagicMock:
+def _repo(stored_lookback: int = 90) -> MagicMock:
     return MagicMock(
-        get_connection_provider=AsyncMock(return_value="slack"),
-        update_lookback=AsyncMock(),
+        get_connection_scope=AsyncMock(
+            return_value={"provider": "slack", "lookback_days": stored_lookback}
+        ),
+        update_lookback=AsyncMock(side_effect=lambda _s, _id, days: days),
         upsert_channels=AsyncMock(),
         list_channels=AsyncMock(return_value=[]),
     )
 
 
-async def _select(req: ChannelSelectRequest) -> MagicMock:
-    repo = _repo()
+async def _select(
+    req: ChannelSelectRequest, stored_lookback: int = 90
+) -> tuple[MagicMock, object]:
+    repo = _repo(stored_lookback)
     svc = SourcesService(repository=repo)
     session = MagicMock(commit=AsyncMock())
     with patch.object(service_module, "get_tenant_session", return_value=_AsyncCtx(session)), patch.object(
         service_module, "run_in_tenant", return_value=_AsyncCtx(None)
     ):
-        await svc.select_channels(_auth(), "src_1", req)
-    return repo
+        out = await svc.select_channels(_auth(), "src_1", req)
+    return repo, out
 
 
 @pytest.mark.asyncio
@@ -57,17 +61,21 @@ async def test_lookback_days_persisted_when_provided() -> None:
     req = ChannelSelectRequest(
         channels=[ChannelSelection(external_id="C1", name="#policy")], lookback_days=180
     )
-    repo = await _select(req)
+    repo, out = await _select(req)
     repo.update_lookback.assert_awaited_once()
     assert repo.update_lookback.await_args.args[1:] == ("src_1", 180)
     repo.upsert_channels.assert_awaited_once()
+    # The write is echoed back so the client can render the saved window.
+    assert out.lookback_days == 180
 
 
 @pytest.mark.asyncio
 async def test_lookback_untouched_when_omitted() -> None:
     req = ChannelSelectRequest(channels=[ChannelSelection(external_id="C1", name="#policy")])
-    repo = await _select(req)
+    repo, out = await _select(req, stored_lookback=365)
     repo.update_lookback.assert_not_awaited()
+    # …and the response still reports the *stored* window, not a guess.
+    assert out.lookback_days == 365
 
 
 def test_lookback_bounds_rejected() -> None:
@@ -95,6 +103,7 @@ async def test_list_channels_refreshes_expired_token_before_provider_call() -> N
                 "access_token_enc": encrypt("dead-token").encode(),
                 "refresh_token_enc": encrypt("refresh-1").encode(),
                 "token_expires_at": expired,
+                "lookback_days": 90,
             }
         ),
         list_channels=AsyncMock(return_value=[]),
@@ -123,7 +132,8 @@ async def test_list_channels_refreshes_expired_token_before_provider_call() -> N
     # The provider is called with the refreshed token, and the rotation is persisted.
     integration.list_channels.assert_awaited_once_with("fresh-token")
     repo.update_tokens.assert_awaited_once()
-    assert [c.external_id for c in out] == ["PROJ"]
+    assert [c.external_id for c in out.channels] == ["PROJ"]
+    assert out.lookback_days == 90
 
 
 def test_request_accepts_the_camelcase_keys_responses_emit() -> None:

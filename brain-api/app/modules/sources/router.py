@@ -109,9 +109,9 @@ async def disconnect(source_id: str, auth: AuthContext = Depends(get_auth_contex
 async def list_channels(
     source_id: str, request: Request, auth: AuthContext = Depends(get_auth_context)
 ):
-    """List provider-discoverable channels merged with persisted selection state."""
-    channels = await _service.list_channels(auth, source_id)
-    return ok(request, [c.model_dump(by_alias=True) for c in channels])
+    """Return the source's scope: discoverable channels + the persisted lookback window."""
+    scope = await _service.list_channels(auth, source_id)
+    return ok(request, scope.model_dump(by_alias=True))
 
 
 @router.patch("/{source_id}/channels", dependencies=[Depends(require_role("admin"))])
@@ -121,6 +121,6 @@ async def select_channels(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Toggle which channels are selected for ingestion."""
-    channels = await _service.select_channels(auth, source_id, body)
-    return ok(request, [c.model_dump(by_alias=True) for c in channels])
+    """Persist the scope (channel selection + lookback) and echo back what was stored."""
+    scope = await _service.select_channels(auth, source_id, body)
+    return ok(request, scope.model_dump(by_alias=True))

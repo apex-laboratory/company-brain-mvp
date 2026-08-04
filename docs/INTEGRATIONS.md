@@ -205,37 +205,43 @@ or already used.
 
 ---
 
-### List a source's channels
+### Read a source's scope (channels + lookback)
 
 ```http
 GET /api/v1/sources/{source_id}/channels
 Authorization: Bearer <accessToken>
 ```
 
-Merges the channels/pages/repos the provider currently exposes with the
-selection state persisted for this connection. `id` is `null` for a
-discovered-but-never-persisted channel.
+Returns the connection's whole scope: the channels/pages/repos the provider
+currently exposes merged with the selection state persisted for this connection,
+plus the persisted `lookbackDays`. `id` is `null` for a
+discovered-but-never-persisted channel. `lookbackDays` is always a concrete
+number (the column is NOT NULL, default `90`), so the client can pre-select the
+saved window instead of showing "unchanged".
 
 Response `200`:
 
 ```json
 {
-  "data": [
-    {
-      "id": "chn_01J…",
-      "externalId": "C012AB3CD",
-      "name": "cs-escalations",
-      "selected": true,
-      "itemCount": 880
-    },
-    {
-      "id": null,
-      "externalId": "C09ZZ",
-      "name": "random",
-      "selected": false,
-      "itemCount": 0
-    }
-  ],
+  "data": {
+    "channels": [
+      {
+        "id": "chn_01J…",
+        "externalId": "C012AB3CD",
+        "name": "cs-escalations",
+        "selected": true,
+        "itemCount": 880
+      },
+      {
+        "id": null,
+        "externalId": "C09ZZ",
+        "name": "random",
+        "selected": false,
+        "itemCount": 0
+      }
+    ],
+    "lookbackDays": 90
+  },
   "meta": { "requestId": "…", "timestamp": "…" }
 }
 ```
@@ -265,20 +271,25 @@ optional (`1`–`730`); omit to keep the current value:
 }
 ```
 
-Response `200` — the full persisted channel list after the update (same shape as
-the GET above):
+Response `200` — the full persisted scope after the update (same shape as the GET
+above). `lookbackDays` echoes what is now stored: the value just written, or the
+untouched current value when the key was omitted. Seed the client's cache from
+this instead of refetching.
 
 ```json
 {
-  "data": [
-    {
-      "id": "chn_01J…",
-      "externalId": "C012AB3CD",
-      "name": "cs-escalations",
-      "selected": true,
-      "itemCount": 0
-    }
-  ],
+  "data": {
+    "channels": [
+      {
+        "id": "chn_01J…",
+        "externalId": "C012AB3CD",
+        "name": "cs-escalations",
+        "selected": true,
+        "itemCount": 0
+      }
+    ],
+    "lookbackDays": 90
+  },
   "meta": { "requestId": "…", "timestamp": "…" }
 }
 ```

@@ -29,6 +29,7 @@ from app.modules.sources.schemas import (
     ChannelOut,
     ChannelSelectRequest,
     SourceConnectionOut,
+    SourceScopeOut,
 )
 from app.modules.sweeps.schemas import SweepOut
 from app.modules.sweeps.service import SweepsService
@@ -472,7 +473,7 @@ class SourcesService:
                     await session.commit()
         return access_token
 
-    async def list_channels(self, auth: AuthContext, source_id: str) -> list[ChannelOut]:
+    async def list_channels(self, auth: AuthContext, source_id: str) -> SourceScopeOut:
         """Merge provider-discovered channels with persisted selection state."""
         workspace_id, role = _require_workspace(auth)
         async with get_tenant_session() as session:
@@ -500,19 +501,24 @@ class SourcesService:
                     item_count=int(row["item_count"]) if row else 0,
                 )
             )
-        return out
+        return SourceScopeOut(channels=out, lookback_days=int(secrets_row["lookback_days"]))
 
     async def select_channels(
         self, auth: AuthContext, source_id: str, req: ChannelSelectRequest
-    ) -> list[ChannelOut]:
+    ) -> SourceScopeOut:
         workspace_id, role = _require_workspace(auth)
         async with get_tenant_session() as session:
             async with run_in_tenant(session, workspace_id, auth.user_id, role):
-                provider = await self._repo.get_connection_provider(session, source_id)
-                if provider is None:
+                scope = await self._repo.get_connection_scope(session, source_id)
+                if scope is None:
                     raise NotFoundError("Source connection")
+                provider = scope["provider"]
+                lookback_days = int(scope["lookback_days"])
                 if req.lookback_days is not None:
-                    await self._repo.update_lookback(session, source_id, req.lookback_days)
+                    updated = await self._repo.update_lookback(
+                        session, source_id, req.lookback_days
+                    )
+                    lookback_days = int(updated) if updated is not None else lookback_days
                 await self._repo.upsert_channels(
                     session,
                     [
@@ -530,16 +536,19 @@ class SourcesService:
                 )
                 rows = await self._repo.list_channels(session, source_id)
                 await session.commit()
-        return [
-            ChannelOut(
-                id=r["id"],
-                external_id=r["external_id"],
-                name=r["name"],
-                selected=bool(r["selected"]),
-                item_count=int(r["item_count"]),
-            )
-            for r in rows
-        ]
+        return SourceScopeOut(
+            channels=[
+                ChannelOut(
+                    id=r["id"],
+                    external_id=r["external_id"],
+                    name=r["name"],
+                    selected=bool(r["selected"]),
+                    item_count=int(r["item_count"]),
+                )
+                for r in rows
+            ],
+            lookback_days=lookback_days,
+        )
 
 
 def _connection_name(provider: str, tokens: OAuthTokens) -> str:
