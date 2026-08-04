@@ -88,6 +88,7 @@ class _FakeWorkspaceRepository(WorkspaceRepository):
         self._create_call_count = 0
         self.created_workspace: WorkspaceRecord | None = None
         self.created_member: dict[str, Any] | None = None
+        self.created_use_cases: tuple[list[str] | None, str | None] | None = None
 
     async def create_workspace(
         self,
@@ -98,11 +99,14 @@ class _FakeWorkspaceRepository(WorkspaceRepository):
         slug: str,
         team_size: str,
         primary_use_case: str,
+        use_cases: list[str] | None = None,
+        use_case_other: str | None = None,
         created_by: str,
     ) -> WorkspaceRecord:
         self._create_call_count += 1
         if self._fail_first and self._create_call_count == 1:
             raise IntegrityError("INSERT INTO workspaces ...", {}, self._fail_orig)
+        self.created_use_cases = (use_cases, use_case_other)
         self.created_workspace = WorkspaceRecord(id=id, name=name, slug=slug, plan="trial")
         return self.created_workspace
 
@@ -133,11 +137,15 @@ def _request(
     company_name: str = "Riverline",
     team_size: str = "51-200",
     use_case: str = "support",
+    use_cases: list[str] | None = None,
+    use_case_other: str | None = None,
 ) -> CreateWorkspaceRequest:
     return CreateWorkspaceRequest(
         company_name=company_name,
         team_size=team_size,
         primary_use_case=use_case,
+        use_cases=use_cases,
+        use_case_other=use_case_other,
     )
 
 
@@ -191,6 +199,39 @@ async def test_create_workspace_access_token_has_workspace_and_role() -> None:
     assert claims["workspace_id"] == result.workspace.id
     assert claims["role"] == "admin"
     assert claims["exp"] > claims["iat"]
+
+
+@pytest.mark.asyncio
+async def test_create_workspace_forwards_multi_select_use_cases() -> None:
+    repo = _FakeWorkspaceRepository()
+    service = WorkspaceService(repository=repo)
+
+    await service.create_workspace(
+        _request(
+            use_cases=["support", "eng", "other"],
+            use_case_other="Vendor security questionnaires",
+        ),
+        user_id="usr_1",
+        user_agent=None,
+        ip=None,
+    )
+
+    assert repo.created_use_cases == (
+        ["support", "eng", "other"],
+        "Vendor security questionnaires",
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_workspace_without_use_cases_forwards_none() -> None:
+    """A client that only sends `primaryUseCase` still creates a workspace — the
+    repository is what falls back to a one-element array."""
+    repo = _FakeWorkspaceRepository()
+    service = WorkspaceService(repository=repo)
+
+    await service.create_workspace(_request(), user_id="usr_1", user_agent=None, ip=None)
+
+    assert repo.created_use_cases == (None, None)
 
 
 @pytest.mark.asyncio
@@ -297,6 +338,64 @@ async def test_post_workspaces_returns_201_envelope(client: AsyncClient) -> None
     assert data["workspace"]["slug"] == "riverline"
     assert data["accessToken"] == "new.access.token"
     assert resp.json()["meta"]["requestId"]
+
+
+@pytest.mark.asyncio
+async def test_post_workspaces_accepts_multi_select_use_cases(client: AsyncClient) -> None:
+    _override(_StubWorkspaceService(result=_workspace_out()))
+
+    resp = await client.post(
+        "/api/v1/workspaces",
+        json={
+            "companyName": "Riverline",
+            "teamSize": "51-200",
+            "primaryUseCase": "support",
+            "useCases": ["support", "product", "other"],
+            "useCaseOther": "Vendor security questionnaires",
+        },
+        headers={"Authorization": "Bearer fake"},
+    )
+
+    assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_post_workspaces_rejects_unknown_use_case_in_list(client: AsyncClient) -> None:
+    _override(_StubWorkspaceService(result=_workspace_out()))
+
+    resp = await client.post(
+        "/api/v1/workspaces",
+        json={
+            "companyName": "Riverline",
+            "teamSize": "1-10",
+            "primaryUseCase": "support",
+            "useCases": ["support", "invalid"],
+        },
+        headers={"Authorization": "Bearer fake"},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "validation_error"
+
+
+@pytest.mark.asyncio
+async def test_post_workspaces_rejects_overlong_use_case_other(client: AsyncClient) -> None:
+    _override(_StubWorkspaceService(result=_workspace_out()))
+
+    resp = await client.post(
+        "/api/v1/workspaces",
+        json={
+            "companyName": "Riverline",
+            "teamSize": "1-10",
+            "primaryUseCase": "other",
+            "useCases": ["other"],
+            "useCaseOther": "x" * 201,
+        },
+        headers={"Authorization": "Bearer fake"},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "validation_error"
 
 
 @pytest.mark.asyncio

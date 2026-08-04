@@ -5,7 +5,7 @@ per the API contract.
 """
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,20 +13,65 @@ from app.shared.schemas import CamelModel as _CamelModel
 from app.shared.schemas import CamelRequestModel as _Request
 
 _TeamSize = Literal["1-10", "11-50", "51-200", "200+"]
-_UseCase = Literal["support", "ops", "eng", "agents"]
+_UseCase = Literal[
+    "support",
+    "ops",
+    "eng",
+    "agents",
+    "sales",
+    "product",
+    "people",
+    "finance",
+    "data",
+    "marketing",
+    # Free-form: the wizard's "Other" checkbox, whose typed text arrives in
+    # ``use_case_other``. Kept in the enum so it still round-trips as a selection.
+    "other",
+]
+_USE_CASE_VALUES = get_args(_UseCase)
 _OnboardingStep = Literal["company", "connect", "configure", "build", "done"]
 _TimeRange = Literal["30d", "90d", "6mo", "all"]
 
 
 # ── creation + onboarding requests ────────────────────────────────────────────
 
-class CreateWorkspaceRequest(_Request):
+class _UseCaseSelection(_Request):
+    """The wizard's multi-select use-case answer, shared by both requests.
+
+    `primary_use_case` predates multi-select and is what every read path (and the
+    `workspaces.primary_use_case` column) still reads, so it stays single and
+    carries the first selection; `use_cases` carries the whole set. A client that
+    sends only `primary_use_case` therefore keeps validating unchanged.
+    """
+
+    use_cases: list[_UseCase] | None = Field(
+        default=None, max_length=len(_USE_CASE_VALUES)
+    )
+    # Free text behind the "Other" checkbox. Only meaningful with "other" in
+    # `use_cases`; kept as its own field so the selection list stays enum-pure.
+    use_case_other: str | None = Field(default=None, max_length=200)
+
+    @field_validator("use_cases", mode="after")
+    @classmethod
+    def _dedupe_use_cases(cls, v: list[str] | None) -> list[str] | None:
+        """Drop duplicates, preserving the order the user picked them in."""
+        if v is None:
+            return None
+        return list(dict.fromkeys(v))
+
+    @field_validator("use_case_other", mode="after")
+    @classmethod
+    def _blank_other_is_null(cls, v: str | None) -> str | None:
+        return (v.strip() or None) if v is not None else None
+
+
+class CreateWorkspaceRequest(_UseCaseSelection):
     company_name: str = Field(..., min_length=1, max_length=100)
     team_size: _TeamSize
     primary_use_case: _UseCase
 
 
-class OnboardingPatchRequest(_Request):
+class OnboardingPatchRequest(_UseCaseSelection):
     step: _OnboardingStep
     company_name: str | None = Field(default=None, max_length=100)
     team_size: _TeamSize | None = None
