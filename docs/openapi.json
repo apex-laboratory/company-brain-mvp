@@ -499,6 +499,52 @@
         }
       }
     },
+    "/api/v1/sources/{source_id}/report": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Read Report",
+        "description": "What this source read, what became knowledge, and why the rest didn't.\n\nA successful import that yields no skills is indistinguishable from a broken one\nunless the discard reasons are visible \u2014 the pipeline records them per event, and\nthis is the surface that shows them.",
+        "operationId": "read_report_api_v1_sources__source_id__report_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Source Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/sources/{source_id}/backfill": {
       "post": {
         "tags": [
