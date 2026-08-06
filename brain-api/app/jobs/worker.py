@@ -18,6 +18,7 @@ from app.jobs.tasks.onboarding_sweep import onboarding_sweep
 from app.jobs.tasks.poll_sync import poll_pull_sources
 from app.jobs.tasks.query_extract import query_extract
 from app.jobs.tasks.reconcile_events import reenqueue_stale_events
+from app.jobs.tasks.reconcile_push_sync import reconcile_push_sources
 from app.jobs.tasks.reembed_skills import reembed_skills
 from app.jobs.tasks.source_sync import source_sync
 from app.jobs.tasks.sweep_extract import sweep_extract
@@ -73,6 +74,12 @@ class WorkerSettings:
         # Backstop: re-enqueue events stranded at outcome='queued' (swallowed
         # extract enqueue, chained-backfill chunks, sweep_extract timeout).
         cron(reenqueue_stale_events, minute={5, 20, 35, 50}),
+        # Backstop for push providers (GitHub, Slack): last_synced_at only
+        # advances on a successful sync, so a dropped webhook looks identical
+        # to a quiet source. Hourly re-sync closes the gap an outage or a
+        # lapsed provider-side redelivery window would otherwise leave open
+        # silently — push is still the primary path, this just catches misses.
+        cron(reconcile_push_sources, minute=10),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     on_startup = startup
