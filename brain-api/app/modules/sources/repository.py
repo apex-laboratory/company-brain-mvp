@@ -277,23 +277,17 @@ class SourcesRepository:
     async def discard_breakdown(self, session: AsyncSession, source_id: str) -> list[dict]:
         """Why this source's content was dropped, grouped by the stage that dropped it.
 
-        The per-event ``reason`` is a free-text LLM sentence, so it is near-unique —
-        56 discarded events produced 56 distinct sentences. Listing them raw is noise;
-        the *stage* is the signal, and a few verbatim samples give it texture. Hence
-        the count per stage plus at most three example reasons.
-
-        DISTINCT before the slice so three near-identical sentences don't crowd out
-        a genuinely different one.
+        Stage counts only — the per-event ``reason`` is a free-text LLM sentence that
+        can quote the source content verbatim (ticket titles, commit messages), so it
+        never leaves the pipeline's internal ``pipeline_meta``. The stage name (mapped
+        to a human label in the service layer) is the signal users need.
         """
         rows = (
             await session.execute(
                 text(
                     """
                     SELECT pipeline_meta->>'stage' AS stage,
-                           count(*)                AS count,
-                           (array_agg(
-                               DISTINCT pipeline_meta->>'reason'
-                            ))[1:3]                AS sample_reasons
+                           count(*)                AS count
                       FROM source_events
                      WHERE source_connection_id = :source_id
                        AND outcome = 'discarded'

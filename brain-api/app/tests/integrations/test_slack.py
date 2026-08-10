@@ -227,7 +227,7 @@ async def test_fetch_since_isolates_unreadable_channel() -> None:
         ChannelRef(external_id="C_OK", name="general"),
     ]
 
-    async def fake_history(token, channel_id, oldest, team):
+    async def fake_history(token, channel_id, oldest, team, channel_name=""):
         if channel_id == "C_BAD":
             raise SlackAPIError("not_in_channel")
         item = RawItem(external_id="1700000005.0001", payload={"channel": channel_id})
@@ -290,7 +290,7 @@ async def test_fetch_since_raises_connector_auth_error() -> None:
     integration = SlackIntegration()
     channels = [ChannelRef(external_id="C1", name="general")]
 
-    async def fake_history(token, channel_id, oldest, team):
+    async def fake_history(token, channel_id, oldest, team, channel_name=""):
         raise SlackAPIError("token_revoked", auth=True)
 
     with patch.object(integration, "list_channels", AsyncMock(return_value=channels)), patch.object(

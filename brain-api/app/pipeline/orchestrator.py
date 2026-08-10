@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 
 from app.config.database import get_tenant_session
-from app.integrations import get_integration
+from app.integrations import get_integration, is_threaded
 from app.integrations.base import RawEvent, RawItem
 from app.jobs.token_helper import token_for_connection, token_for_provider
 from app.pipeline import authority as authority_mod
@@ -291,19 +291,36 @@ async def run_pipeline(
         )
         return PipelineResult(outcome="discarded", cost_usd=ledger.total_usd)
 
-    relevant, reason, usage = await relevance_gate.is_relevant(raw.content, event.provider)
+    # Context expansion. Best-effort — a failure falls back to raw content and is
+    # recorded, never fatal (PRD Phase 3).
+    #
+    # Threaded providers expand BEFORE the gate. The ingested event is only the
+    # thread's parent message, and on a Q&A thread that parent is the question
+    # ("ok to catch this exception and continue?") while the policy lives in a
+    # reply. Gating on the parent alone discards the whole thread before its answer
+    # is ever fetched, so the gate must see the expanded thread to judge it. Single-
+    # document providers keep expanding after the gate, so an irrelevant page never
+    # costs a fetch.
+    expand_first = is_threaded(event.provider)
+    context, expander_error = (
+        await _expand(event, raw) if expand_first else (raw.content, None)
+    )
+
+    relevant, reason, usage = await relevance_gate.is_relevant(context, event.provider)
     ledger.add(usage)
     if not relevant:
         await _finalize(
             event, outcome="discarded", skill_id=None, ledger=ledger,
-            stage="relevance_gate", extra_meta={"reason": reason},
+            stage="relevance_gate",
+            extra_meta={
+                "reason": reason,
+                **({"expander_error": expander_error} if expander_error else {}),
+            },
         )
         return PipelineResult(outcome="discarded", cost_usd=ledger.total_usd)
 
-    # Context expansion (post-gate, pre-identifier): pull the full thread/ticket/
-    # page around the relevant item. Best-effort — a failure falls back to raw
-    # content and is recorded, never fatal (PRD Phase 3).
-    context, expander_error = await _expand(event, raw)
+    if not expand_first:
+        context, expander_error = await _expand(event, raw)
     expander_meta = {"expander_error": expander_error} if expander_error else None
 
     decisions, id_usage = await decision_identifier.identify_decisions(

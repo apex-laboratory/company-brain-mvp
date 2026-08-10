@@ -6,8 +6,8 @@ and a reason per event in ``source_events.pipeline_meta``; this is the surface
 that shows them.
 
 Service tests stub the repository; router tests drive the ASGI app with auth
-overridden. The SQL itself (FILTER rollup, orphaned-row exclusion, sample cap)
-is covered in ``app/tests/e2e/test_backfill_sql.py`` against a real database.
+overridden. The SQL itself (FILTER rollup, orphaned-row exclusion) is covered
+in ``app/tests/e2e/test_backfill_sql.py`` against a real database.
 """
 from __future__ import annotations
 
@@ -73,8 +73,8 @@ async def test_stages_are_translated_for_the_ui() -> None:
     # The pipeline's stage names are internal vocabulary; the UI must never render
     # "relevance_gate" at a user.
     groups = [
-        {"stage": "relevance_gate", "count": 55, "sample_reasons": ["one-off task"]},
-        {"stage": "skill_extractor", "count": 1, "sample_reasons": ["abstained"]},
+        {"stage": "relevance_gate", "count": 55},
+        {"stage": "skill_extractor", "count": 1},
     ]
     report = await _report(groups=groups)
     assert [(g.label, g.count) for g in report.discarded_by_stage] == [
@@ -87,17 +87,16 @@ async def test_stages_are_translated_for_the_ui() -> None:
 @pytest.mark.asyncio
 async def test_unknown_stage_degrades_to_its_raw_name() -> None:
     # A stage added to the pipeline later must render as *something*, not a blank row.
-    report = await _report(groups=[{"stage": "boundary_check", "count": 2, "sample_reasons": []}])
+    report = await _report(groups=[{"stage": "boundary_check", "count": 2}])
     assert report.discarded_by_stage[0].label == "boundary_check"
 
 
 @pytest.mark.asyncio
-async def test_null_stage_and_reasons_are_survivable() -> None:
-    # array_agg returns NULL (not []) for a group with no reasons, and pipeline_meta
-    # predating the stage key yields a NULL stage. Neither may 500 the report.
-    report = await _report(groups=[{"stage": None, "count": 3, "sample_reasons": None}])
+async def test_null_stage_is_survivable() -> None:
+    # pipeline_meta predating the stage key yields a NULL stage; must not 500 the report.
+    report = await _report(groups=[{"stage": None, "count": 3}])
     group = report.discarded_by_stage[0]
-    assert (group.stage, group.label, group.sample_reasons) == ("unknown", "Unknown", [])
+    assert (group.stage, group.label) == ("unknown", "Unknown")
 
 
 @pytest.mark.asyncio
@@ -129,7 +128,6 @@ class _StubService:
                     stage="relevance_gate",
                     label="Not durable knowledge",
                     count=55,
-                    sample_reasons=["a brief commit or PR title"],
                 )
             ],
         )
@@ -170,7 +168,7 @@ async def test_get_report_returns_camelcase_payload(client: AsyncClient) -> None
     assert data["itemsRead"] == 56 and data["skillsKept"] == 0
     group = data["discardedByStage"][0]
     assert group["label"] == "Not durable knowledge"
-    assert group["sampleReasons"] == ["a brief commit or PR title"]
+    assert "sampleReasons" not in group
 
 
 @pytest.mark.asyncio

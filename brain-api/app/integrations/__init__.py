@@ -40,6 +40,21 @@ def get_integration(provider: str) -> SourceIntegration:
     return REGISTRY[provider]
 
 
+def is_threaded(provider: str) -> bool:
+    """Whether ``provider``'s content is a discussion thread rather than a single
+    document.
+
+    Declared per-connector via ``threaded = True`` on the integration, alongside its
+    other capability flags (``push_delivery``, ``opaque_cursor``), so a new threaded
+    connector opts in where it's written instead of in a frozenset that's easy to
+    forget. Unknown providers are treated as non-threaded.
+    """
+    try:
+        return getattr(get_integration(provider), "threaded", False)
+    except KeyError:
+        return False
+
+
 __all__ = [
     "ChannelRef",
     "ConnectorAuthError",
@@ -56,4 +71,5 @@ __all__ = [
     "JiraIntegration",
     "REGISTRY",
     "get_integration",
+    "is_threaded",
 ]

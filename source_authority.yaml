@@ -23,6 +23,9 @@ tiers:
   medium:
     weight: 0.7
     sources:
+      # Generic defaults only — this file is process-global and shared by every
+      # workspace, so a tenant's own channel names must never be added here.
+      # Per-workspace authority belongs in the DB alongside source_channels.
       - type: slack
         signals: [channel=policy, channel=ops-decisions, channel=cs-escalations, channel=engineering-decisions]
       - type: zendesk

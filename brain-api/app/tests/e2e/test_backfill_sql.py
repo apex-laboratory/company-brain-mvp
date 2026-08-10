@@ -288,21 +288,6 @@ async def test_breakdown_groups_by_stage_ordered_by_count() -> None:
     ]
 
 
-async def test_breakdown_caps_sample_reasons_at_three() -> None:
-    # Reasons are free-text and near-unique; the report shows a few, not all of them.
-    await _reset()
-    await _connection("src_a")
-    for i in range(9):
-        await _event(
-            "src_a", "discarded", stage="relevance_gate", reason=f"distinct {i}", ext=f"s{i}"
-        )
-
-    async with get_session() as session:
-        groups = await _sources.discard_breakdown(session, "src_a")
-    assert groups[0]["count"] == 9
-    assert len(groups[0]["sample_reasons"]) == 3
-
-
 async def test_breakdown_ignores_non_discarded_outcomes() -> None:
     await _reset()
     await _connection("src_a")

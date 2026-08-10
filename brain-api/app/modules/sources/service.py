@@ -372,8 +372,6 @@ class SourcesService:
                     stage=g["stage"] or "unknown",
                     label=_stage_label(g["stage"]),
                     count=g["count"],
-                    # array_agg yields NULL, not [], for a group with no reasons.
-                    sample_reasons=[r for r in (g["sample_reasons"] or []) if r],
                 )
                 for g in groups
             ],

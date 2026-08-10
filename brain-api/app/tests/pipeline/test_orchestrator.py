@@ -168,6 +168,80 @@ async def test_empty_content_discarded_without_gate(wired, monkeypatch) -> None:
     gate.assert_not_awaited()
 
 
+async def test_threaded_provider_gates_on_expanded_thread(wired, monkeypatch) -> None:
+    """On a threaded provider the gate must judge the whole thread, not the parent.
+
+    A Q&A thread's parent is the question ("ok to skip the auth test?"); the policy
+    lives in a reply. Gating the parent alone discarded the thread before its answer
+    was ever fetched, so every Slack Q&A thread was dropped at the gate.
+    """
+    monkeypatch.setattr(orchestrator, "_normalize", lambda event: _raw(content="Ok to skip?"))
+    monkeypatch.setattr(
+        orchestrator, "_expand",
+        AsyncMock(return_value=("Ok to skip?\nLead: No — auth tests are required.", None)),
+    )
+    await _mock_stages(monkeypatch)
+    monkeypatch.setattr(
+        orchestrator.skill_writer, "write_new_skill",
+        AsyncMock(return_value=PipelineResult(outcome="review", skill_id="skl_1")),
+    )
+
+    await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    gated_text = orchestrator.relevance_gate.is_relevant.await_args.args[0]
+    assert "auth tests are required" in gated_text
+
+
+async def test_non_threaded_provider_skips_expansion_when_irrelevant(
+    wired, monkeypatch
+) -> None:
+    """Single-document providers still expand *after* the gate, so an irrelevant
+    page never costs a fetch."""
+    monkeypatch.setattr(
+        orchestrator, "_normalize",
+        lambda event: RawEvent(
+            provider="notion", source_id="p1", external_event_id="p1", event_type="page",
+            actor={"id": "u1"}, content="lunch menu",
+            created_at=datetime(2026, 7, 1, tzinfo=UTC), url="http://notion/x", raw={},
+        ),
+    )
+    wired.load_event = AsyncMock(
+        return_value=EventRow(
+            id="evt_1", workspace_id="wrk_1", provider="notion", event_type="page",
+            source_id="p1", external_event_id="p1", source_connection_id="src_1",
+            payload={}, processed=False, sweep_id=None, attempts=0,
+            created_at=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+    )
+    expand = AsyncMock(return_value=("expanded", None))
+    monkeypatch.setattr(orchestrator, "_expand", expand)
+    await _mock_stages(monkeypatch, relevant=False)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "discarded"
+    expand.assert_not_awaited()
+
+
+async def test_threaded_expander_failure_recorded_on_gate_discard(
+    wired, monkeypatch
+) -> None:
+    """Expansion runs first on threaded providers, so a failure there must still be
+    recorded when the gate then discards on the fallback content."""
+    monkeypatch.setattr(
+        orchestrator, "_expand",
+        AsyncMock(return_value=("Ok to skip?", "HTTPStatusError: 500")),
+    )
+    await _mock_stages(monkeypatch, relevant=False)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "discarded"
+    meta = wired.finalize_event.await_args.kwargs["pipeline_meta"]
+    assert meta["expander_error"] == "HTTPStatusError: 500"
+    assert meta["stage"] == "relevance_gate"
+
+
 async def test_already_processed_event_skipped(wired, monkeypatch) -> None:
     wired.load_event = AsyncMock(return_value=_event(processed=True))
     monkeypatch.setattr(orchestrator, "_repo", wired)

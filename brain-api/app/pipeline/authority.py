@@ -128,6 +128,15 @@ class AuthorityAnnotator:
             # `or []` guards an explicit `"tags": null` (fail-soft: fall through to
             # tier low, never TypeError → dead-letter the whole event).
             return value in (payload.get("tags") or [])
+        if key == "channel":
+            # Tiers name channels readably (`channel=engineering`), but a Slack
+            # payload's `channel` is the opaque id (`C0BP45QAPQC`) with the name
+            # alongside it. Accept either so a tier can be written against whichever
+            # the author has, and so an id-based rule keeps working.
+            return value.lower() in {
+                str(payload.get("channel", "")).lower(),
+                str(payload.get("channel_name", "")).lower(),
+            }
         return str(payload.get(key, "")).lower() == value.lower()
 
 

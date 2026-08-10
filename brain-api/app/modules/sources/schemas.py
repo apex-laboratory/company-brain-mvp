@@ -54,12 +54,16 @@ class SourceConnectionOut(_Response):
 
 
 class DiscardGroupOut(_Response):
-    """One reason-bucket in the read report, keyed by the pipeline stage."""
+    """One reason-bucket in the read report, keyed by the pipeline stage.
+
+    Stage + count only — no verbatim per-event reason text. Those are free-text LLM
+    sentences that can quote source content (ticket titles, commit messages) and expose
+    the pipeline's internal stage vocabulary; they stay in ``pipeline_meta``, not here.
+    """
 
     stage: str
     label: str
     count: int
-    sample_reasons: list[str] = []
 
 
 class SourceReportOut(_Response):

@@ -314,7 +314,12 @@ class SlackIntegration:
         return channels
 
     async def _history(
-        self, access_token: str, channel_id: str, oldest: str | None, team: str
+        self,
+        access_token: str,
+        channel_id: str,
+        oldest: str | None,
+        team: str,
+        channel_name: str = "",
     ) -> tuple[list[RawItem], str | None]:
         """Page through one channel's history after ``oldest`` (a Slack ``ts``).
 
@@ -324,6 +329,11 @@ class SlackIntegration:
         whole-connection auth, or transient rate limit. Injects the channel id **and the
         team id** into each message payload, which ``conversations.history`` omits but
         ``normalize`` needs (the team is required to build a working deep link).
+
+        The channel **name** rides along too: ``conversations.history`` omits it, and the
+        authority tiers in ``source_authority.yaml`` are written against readable names
+        (``channel=engineering``) rather than opaque ids, so without it every Slack item
+        falls through to tier ``low``.
         """
         items: list[RawItem] = []
         newest = oldest
@@ -345,6 +355,8 @@ class SlackIntegration:
                 if not ts:
                     continue
                 msg["channel"] = channel_id  # inject routing context normalize needs
+                if channel_name:
+                    msg["channel_name"] = channel_name  # authority tiers key off the name
                 if team:
                     msg["team"] = team  # conversations.history omits team; deep link needs it
                 items.append(RawItem(external_id=ts, payload=msg))
@@ -414,7 +426,7 @@ class SlackIntegration:
                 continue
             try:
                 ch_items, ch_newest = await self._history(
-                    access_token, ch.external_id, oldest, team
+                    access_token, ch.external_id, oldest, team, ch.name
                 )
             except SlackAPIError as exc:
                 if exc.auth:
