@@ -1,19 +1,15 @@
 """Skill writer: route a scored draft into skills/reviews (spec:
 ``services/skill_writer.py``, translated to the real schema).
 
-Routing (thresholds from ``source_authority.yaml`` ``routing:``):
+Routing (threshold from ``source_authority.yaml`` ``routing:``):
 
-* ``conf >= 0.90`` AND authority >= medium AND not sweep_sourced
-      → skill ``active`` + ``skill_versions`` (create, v1)
-      → event outcome ``published`` (the orchestrator invalidates cache post-commit)
-* ``0.70 <= conf`` (or low authority, or sweep_sourced)
-      → skill ``review`` + ``reviews`` row (``new_decision``)
-      → event outcome ``review``
+* ``conf >= 0.70`` → skill ``review`` + ``reviews`` row → event outcome ``review``
 * ``conf < 0.70`` → skill ``draft`` → event outcome ``draft``
 
-Status mapping (skill_status enum is unchanged): published→active,
-pending_review→review, draft→draft. The version row for review-routed skills is
-created at approve time (M5), not here.
+There is no auto-publish branch: the only path to an ``active`` skill is a
+reviewer approving the queued card (``reviews.service.approve``, which sets
+confidence to 1.0 and writes the ``skill_versions`` row). Confidence decides
+whether a human is *asked*, never whether one is *skipped*.
 """
 from __future__ import annotations
 
@@ -22,8 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.pipeline.authority import RoutingConfig
 from app.pipeline.repository import PipelineRepository, SimilarSkill
 from app.pipeline.types import DecisionMoment, PipelineResult, SkillDraft
-
-_AUTHORITY_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
 def to_review_confidence(confidence: float) -> int:
@@ -39,32 +33,10 @@ def next_version(current: str) -> str:
         return "v2"
 
 
-def route(
-    confidence: float,
-    authority: str,
-    sweep_sourced: bool,
-    routing: RoutingConfig,
-    *,
-    knowledge_type: str = "durable_policy",
-) -> str:
-    """Pure routing decision: 'published' | 'review' | 'draft'.
-
-    Anything short of ``durable_policy`` (i.e. ``project_decision`` — release-
-    scoped knowledge that expires) never auto-publishes: a human confirms it in
-    review, same as sweep-sourced content.
-    """
+def route(confidence: float, routing: RoutingConfig) -> str:
+    """Pure routing decision: 'review' | 'draft'."""
     if confidence < routing.review_queue_confidence_floor:
         return "draft"
-    meets_authority = _AUTHORITY_RANK.get(authority, 0) >= _AUTHORITY_RANK.get(
-        routing.auto_publish_authority_floor, 1
-    )
-    if (
-        confidence >= routing.auto_publish_confidence
-        and meets_authority
-        and not sweep_sourced
-        and knowledge_type == "durable_policy"
-    ):
-        return "published"
     return "review"
 
 
@@ -82,17 +54,17 @@ async def write_new_skill(
     embedding_model: str,
     confidence: float,
     authority: str,
-    sweep_sourced: bool,
     routing: RoutingConfig,
     evidence: DecisionMoment | None,
 ) -> PipelineResult:
     """Insert a NEW skill routed by confidence. Runs inside the caller's
-    tenant transaction; the caller commits and finalizes the event."""
-    outcome = route(
-        confidence, authority, sweep_sourced, routing,
-        knowledge_type=draft.knowledge_type,
-    )
-    status = {"published": "active", "review": "review", "draft": "draft"}[outcome]
+    tenant transaction; the caller commits and finalizes the event.
+
+    ``authority`` is still recorded on the row (``source_authority``) — it informs
+    a reviewer and ranks contradiction sources; it just no longer gates routing.
+    """
+    outcome = route(confidence, routing)
+    status = {"review": "review", "draft": "draft"}[outcome]
 
     name = await repo.resolve_skill_name(session, workspace_id, draft.name)
     skill_id = await repo.insert_skill(
@@ -114,18 +86,7 @@ async def write_new_skill(
     )
 
     review_id: str | None = None
-    if outcome == "published":
-        await repo.insert_skill_version(
-            session,
-            workspace_id=workspace_id,
-            skill_id=skill_id,
-            version="v1",
-            base_logic=draft.base_logic,
-            exceptions_block=draft.exceptions,
-            confidence=confidence,
-            change_type="create",
-        )
-    elif outcome == "review":
+    if outcome == "review":
         review_id = await repo.insert_review(
             session,
             workspace_id=workspace_id,
@@ -227,50 +188,17 @@ async def write_update(
     source_url: str,
     matched: SimilarSkill,
     draft: SkillDraft,
-    embedding: list[float],
-    embedding_model: str,
     confidence: float,
-    authority: str,
-    sweep_sourced: bool,
     sweep_id: str | None,
     routing: RoutingConfig,
     evidence: DecisionMoment | None,
 ) -> PipelineResult:
     """UPDATE: refine an existing skill's ``base_logic``.
 
-    Publish branch mutates the skill (snapshot old → ``skill_versions``, bump
-    version, re-embed, invalidate). Review branch writes a ``policy_change``
-    review WITHOUT mutating the live skill — the change is applied on approve (M5).
+    Never mutates the live skill — a ``policy_change`` review is queued and the
+    change is applied on approve (M5).
     """
-    outcome = route(
-        confidence, authority, sweep_sourced, routing,
-        knowledge_type=draft.knowledge_type,
-    )
-    new_version = next_version(matched.version)
-
-    if outcome == "published":
-        await repo.insert_skill_version(
-            session,
-            workspace_id=workspace_id,
-            skill_id=matched.id,
-            version=new_version,
-            base_logic=draft.base_logic,
-            exceptions_block=draft.exceptions or matched.exceptions_block,
-            confidence=confidence,
-            change_type="sweep_sourced" if sweep_sourced else "update",
-        )
-        await repo.update_skill_logic(
-            session,
-            matched.id,
-            base_logic=draft.base_logic,
-            exceptions_block=draft.exceptions or matched.exceptions_block,
-            version=new_version,
-            confidence=confidence,
-            embedding=embedding,
-            embedding_model=embedding_model,
-        )
-        return PipelineResult(outcome="published", skill_id=matched.id)
-
+    outcome = route(confidence, routing)
     if outcome == "draft":
         return PipelineResult(outcome="draft", skill_id=matched.id)
 
@@ -291,46 +219,16 @@ async def write_exception(
     matched: SimilarSkill,
     draft: SkillDraft,
     confidence: float,
-    authority: str,
-    sweep_sourced: bool,
     sweep_id: str | None,
     routing: RoutingConfig,
     evidence: DecisionMoment | None,
 ) -> PipelineResult:
     """EXCEPTION: add a carve-out to an existing skill (base_logic unchanged).
 
-    Publish branch appends to ``exceptions_block`` + version bump. Review branch
-    writes an ``exception`` review; the append happens on approve (M5).
+    Never mutates the live skill — an ``exception`` review is queued and the
+    carve-out is appended on approve (M5).
     """
-    outcome = route(
-        confidence, authority, sweep_sourced, routing,
-        knowledge_type=draft.knowledge_type,
-    )
-    new_exceptions = list(matched.exceptions_block) + (
-        draft.exceptions or [{"condition": draft.trigger, "action": draft.base_logic}]
-    )
-
-    if outcome == "published":
-        new_version = next_version(matched.version)
-        await repo.insert_skill_version(
-            session,
-            workspace_id=workspace_id,
-            skill_id=matched.id,
-            version=new_version,
-            base_logic=matched.base_logic,
-            exceptions_block=new_exceptions,
-            confidence=confidence,
-            change_type="sweep_sourced" if sweep_sourced else "update",
-        )
-        await repo.apply_exception(
-            session,
-            matched.id,
-            exceptions_block=new_exceptions,
-            version=new_version,
-            confidence=confidence,
-        )
-        return PipelineResult(outcome="published", skill_id=matched.id)
-
+    outcome = route(confidence, routing)
     if outcome == "draft":
         return PipelineResult(outcome="draft", skill_id=matched.id)
 

@@ -19,42 +19,30 @@ from app.pipeline.stages.skill_writer import (
 )
 from app.pipeline.types import DecisionMoment, SkillDraft
 
-_ROUTING = RoutingConfig(
-    auto_publish_confidence=0.90,
-    auto_publish_authority_floor="medium",
-    review_queue_confidence_floor=0.70,
-)
+_ROUTING = RoutingConfig(review_queue_confidence_floor=0.70)
 
 
 # ── route() truth table ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize(
-    ("confidence", "authority", "sweep", "expected"),
+    ("confidence", "expected"),
     [
-        (0.95, "high", False, "published"),
-        (0.95, "medium", False, "published"),
-        (0.95, "low", False, "review"),      # below authority floor
-        (0.95, "high", True, "review"),       # sweep never auto-publishes
-        (0.85, "high", False, "review"),      # below publish threshold
-        (0.70, "high", False, "review"),      # at review floor
-        (0.69, "high", False, "draft"),       # below review floor
-        (0.10, "low", False, "draft"),
+        (1.00, "review"),   # even a perfect score only earns a reviewer's attention
+        (0.95, "review"),
+        (0.70, "review"),   # at review floor
+        (0.69, "draft"),    # below review floor
+        (0.10, "draft"),
     ],
 )
-def test_route_table(confidence, authority, sweep, expected) -> None:
-    assert route(confidence, authority, sweep, _ROUTING) == expected
+def test_route_table(confidence, expected) -> None:
+    assert route(confidence, _ROUTING) == expected
 
 
-def test_route_project_decision_never_auto_publishes() -> None:
-    """Release-scoped knowledge always gets a human look, even at max confidence."""
-    assert (
-        route(0.95, "high", False, _ROUTING, knowledge_type="project_decision")
-        == "review"
-    )
-    # …but still drops to draft below the review floor, same as everything else.
-    assert (
-        route(0.60, "high", False, _ROUTING, knowledge_type="project_decision")
-        == "draft"
+def test_route_never_publishes_at_any_confidence() -> None:
+    """The registry is reachable only through human approval — no confidence,
+    authority tier, or provenance may bypass the queue."""
+    assert all(
+        route(c / 100, _ROUTING) != "published" for c in range(0, 101)
     )
 
 
@@ -93,21 +81,25 @@ def _repo() -> MagicMock:
     )
 
 
-async def test_published_path_writes_version() -> None:
+async def test_max_confidence_high_authority_still_queues_for_review() -> None:
+    """The old auto-publish case: top confidence from a high-authority source. It
+    must now land in the queue as ``review`` with no version row — the version is
+    written when a human approves."""
     repo = _repo()
     result = await write_new_skill(
         MagicMock(), repo,
         workspace_id="wrk_1", event_id="evt_1", sweep_id=None,
         provider="notion", source_url="http://x", draft=_draft(),
-        embedding=[0.0] * 1536, embedding_model="m", confidence=0.95, authority="high",
-        sweep_sourced=False, routing=_ROUTING, evidence=None,
+        embedding=[0.0] * 1536, embedding_model="m", confidence=1.0, authority="high",
+        routing=_ROUTING, evidence=None,
     )
-    assert result.outcome == "published"
+    assert result.outcome == "review"
     assert result.skill_id == "skl_1"
     repo.insert_skill.assert_awaited_once()
-    repo.insert_skill_version.assert_awaited_once()
-    repo.insert_review.assert_not_awaited()
-    # Cache invalidation now happens post-commit in the orchestrator, not here.
+    repo.insert_skill_version.assert_not_awaited()
+    repo.insert_review.assert_awaited_once()
+    # The skill row itself must not be born active.
+    assert repo.insert_skill.await_args.kwargs["status"] == "review"
 
 
 async def test_review_path_writes_review_row_and_bumps_sweep() -> None:
@@ -118,7 +110,7 @@ async def test_review_path_writes_review_row_and_bumps_sweep() -> None:
         workspace_id="wrk_1", event_id="evt_1", sweep_id="swp_1",
         provider="slack", source_url="http://x", draft=_draft(),
         embedding=[0.0] * 1536, embedding_model="m", confidence=0.80, authority="medium",
-        sweep_sourced=True, routing=_ROUTING, evidence=evidence,
+        routing=_ROUTING, evidence=evidence,
     )
     assert result.outcome == "review"
     assert result.review_id == "rev_1"
@@ -139,7 +131,7 @@ async def test_draft_path_writes_only_skill() -> None:
         workspace_id="wrk_1", event_id="evt_1", sweep_id=None,
         provider="slack", source_url="", draft=_draft(),
         embedding=[0.0] * 1536, embedding_model="m", confidence=0.5, authority="low",
-        sweep_sourced=False, routing=_ROUTING, evidence=None,
+        routing=_ROUTING, evidence=None,
     )
     assert result.outcome == "draft"
     repo.insert_review.assert_not_awaited()
@@ -167,22 +159,21 @@ async def test_duplicate_appends_source_and_stops() -> None:
     repo.insert_skill.assert_not_awaited()
 
 
-async def test_update_published_mutates_skill_and_versions() -> None:
+async def test_update_never_mutates_live_skill_even_at_max_confidence() -> None:
+    """A live skill agents already act on must never be rewritten without a human,
+    however confident the extraction or authoritative the source."""
     repo = _repo()
     repo.update_skill_logic = AsyncMock()
     result = await write_update(
         MagicMock(), repo,
         workspace_id="wrk_1", provider="notion", source_url="http://x",
-        matched=_match("v1"), draft=_draft(), embedding=[0.0] * 1536, embedding_model="m",
-        confidence=0.95, authority="high", sweep_sourced=False, sweep_id=None,
+        matched=_match("v1"), draft=_draft(), confidence=1.0, sweep_id=None,
         routing=_ROUTING, evidence=None,
     )
-    assert result.outcome == "published"
-    # New version row + logic mutation to v2; no review row on the publish branch.
-    assert repo.insert_skill_version.await_args.kwargs["version"] == "v2"
-    assert repo.insert_skill_version.await_args.kwargs["change_type"] == "update"
-    repo.update_skill_logic.assert_awaited_once()
-    repo.insert_review.assert_not_awaited()
+    assert result.outcome == "review"
+    repo.update_skill_logic.assert_not_awaited()
+    repo.insert_skill_version.assert_not_awaited()
+    assert repo.insert_review.await_args.kwargs["kind"] == "policy_change"
 
 
 async def test_update_review_branch_does_not_mutate_skill() -> None:
@@ -191,8 +182,7 @@ async def test_update_review_branch_does_not_mutate_skill() -> None:
     result = await write_update(
         MagicMock(), repo,
         workspace_id="wrk_1", provider="slack", source_url="http://x",
-        matched=_match(), draft=_draft(), embedding=[0.0] * 1536, embedding_model="m",
-        confidence=0.80, authority="medium", sweep_sourced=True, sweep_id="swp_1",
+        matched=_match(), draft=_draft(), confidence=0.80, sweep_id="swp_1",
         routing=_ROUTING, evidence=None,
     )
     assert result.outcome == "review"
@@ -201,20 +191,22 @@ async def test_update_review_branch_does_not_mutate_skill() -> None:
     assert repo.insert_review.await_args.kwargs["before_text"] == "refund within 30 days"
 
 
-async def test_exception_published_appends_and_keeps_base_logic() -> None:
+async def test_exception_never_applies_carve_out_without_approval() -> None:
+    """A carve-out narrows a live rule, so it needs the same human gate as any
+    other change — queued as an ``exception`` review, applied on approve."""
     repo = _repo()
     repo.apply_exception = AsyncMock()
     draft = SkillDraft("R", "t", "b", [{"condition": "gov", "action": "waive"}], [], 0.9)
     result = await write_exception(
         MagicMock(), repo,
         workspace_id="wrk_1", provider="notion", source_url="",
-        matched=_match(), draft=draft, confidence=0.95, authority="high",
-        sweep_sourced=False, sweep_id=None, routing=_ROUTING, evidence=None,
+        matched=_match(), draft=draft, confidence=1.0, sweep_id=None,
+        routing=_ROUTING, evidence=None,
     )
-    assert result.outcome == "published"
-    # Existing carve-out preserved + the new one appended (base_logic untouched).
-    applied = repo.apply_exception.await_args.kwargs["exceptions_block"]
-    assert {"condition": "vip"} in applied and {"condition": "gov", "action": "waive"} in applied
+    assert result.outcome == "review"
+    repo.apply_exception.assert_not_awaited()
+    repo.insert_skill_version.assert_not_awaited()
+    assert repo.insert_review.await_args.kwargs["kind"] == "exception"
 
 
 async def test_contradiction_opens_two_source_review_without_mutation() -> None:

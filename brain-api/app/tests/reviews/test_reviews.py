@@ -72,6 +72,7 @@ def _svc(review: dict | None, skill: dict | None = None):
         resolve=AsyncMock(),
         list=AsyncMock(return_value=[]),
         stats=AsyncMock(return_value={"pending": 2, "approved": 6, "rejected": 2}),
+        oldest_pending_at=AsyncMock(return_value=datetime(2026, 8, 1, tzinfo=UTC)),
     )
     skills = MagicMock(
         get_skill=AsyncMock(return_value=skill),
@@ -392,6 +393,20 @@ async def test_stats_computes_rejection_rate() -> None:
         _exit(patches)
     assert isinstance(stats, ReviewStats)
     assert stats.rejection_rate == 0.25  # 2 / (6 + 2)
+    assert stats.oldest_pending_at == datetime(2026, 8, 1, tzinfo=UTC)
+
+
+async def test_stats_oldest_pending_is_none_on_empty_queue() -> None:
+    svc, repo, _skills, patches = _svc(None)
+    repo.stats = AsyncMock(return_value={"pending": 0, "approved": 6, "rejected": 2})
+    repo.oldest_pending_at = AsyncMock(return_value=None)
+    _enter(patches)
+    try:
+        stats = await svc.stats(_auth())
+    finally:
+        _exit(patches)
+    assert stats.pending == 0
+    assert stats.oldest_pending_at is None  # nothing to nag about
 
 
 # ── router ─────────────────────────────────────────────────────────────────────

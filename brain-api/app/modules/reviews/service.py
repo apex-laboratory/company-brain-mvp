@@ -78,9 +78,12 @@ class ReviewsService:
             session, workspace_id, auth.user_id, role
         ):
             counts = await self._repo.stats(session)
+            oldest_pending_at = await self._repo.oldest_pending_at(session)
         resolved = counts["approved"] + counts["rejected"]
         rate = counts["rejected"] / resolved if resolved else 0.0
-        return ReviewStats(**counts, rejection_rate=round(rate, 4))
+        return ReviewStats(
+            **counts, rejection_rate=round(rate, 4), oldest_pending_at=oldest_pending_at
+        )
 
     async def get(self, auth: AuthContext, review_id: str) -> ReviewOut:
         """One review with its full source context (the card the UI renders).

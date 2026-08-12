@@ -119,11 +119,10 @@ def test_no_matching_signal_falls_back_to_low(annotator: AuthorityAnnotator) -> 
 # ── routing / sweep config ───────────────────────────────────────────────────
 
 def test_routing_config_from_yaml(annotator: AuthorityAnnotator) -> None:
-    assert annotator.routing_config() == RoutingConfig(
-        auto_publish_confidence=0.90,
-        auto_publish_authority_floor="medium",
-        review_queue_confidence_floor=0.70,
-    )
+    # The fixture YAML still carries the retired auto_publish_* keys on purpose:
+    # a deployment's config file will too, and stale keys must be ignored rather
+    # than crash the loader (or quietly resurrect auto-publishing).
+    assert annotator.routing_config() == RoutingConfig(review_queue_confidence_floor=0.70)
 
 
 def test_sweep_config_from_yaml(annotator: AuthorityAnnotator) -> None:

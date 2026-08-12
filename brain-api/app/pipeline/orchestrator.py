@@ -171,6 +171,9 @@ async def _commit(
     # transaction lets a concurrent reader miss the cache, read the still-committed
     # old skill, and repopulate it — serving the superseded rule until TTL. It also
     # keeps Redis I/O out of the pooled DB connection's transaction.
+    # Currently unreachable — skill_writer.route no longer returns 'published', so
+    # live invalidation happens on reviewer approve (reviews.service). Kept so
+    # invalidation isn't silently missing if a publish path is ever reintroduced.
     if result.outcome == "published":
         await cache.invalidate_skills(event.workspace_id)
         # Keep the brain chat index fresh: re-embed the new/updated skill version.
@@ -192,7 +195,6 @@ async def _route(
     *,
     boundary,
     matched: SimilarSkill | None,
-    sweep_sourced: bool,
     evidence,
     extra_meta: dict | None = None,
 ) -> PipelineResult:
@@ -214,9 +216,8 @@ async def _route(
             event, ledger,
             lambda s: skill_writer.write_exception(
                 s, _repo, workspace_id=ws, provider=event.provider, source_url=raw.url,
-                matched=matched, draft=draft, confidence=confidence, authority=annotation.tier,
-                sweep_sourced=sweep_sourced, sweep_id=event.sweep_id, routing=routing,
-                evidence=evidence,
+                matched=matched, draft=draft, confidence=confidence,
+                sweep_id=event.sweep_id, routing=routing, evidence=evidence,
             ),
             extra_meta=extra_meta,
         )
@@ -242,10 +243,8 @@ async def _route(
             event, ledger,
             lambda s: skill_writer.write_update(
                 s, _repo, workspace_id=ws, provider=event.provider, source_url=raw.url,
-                matched=matched, draft=draft, embedding=embedding,
-                embedding_model=embedding_model, confidence=confidence,
-                authority=annotation.tier, sweep_sourced=sweep_sourced, sweep_id=event.sweep_id,
-                routing=routing, evidence=evidence,
+                matched=matched, draft=draft, confidence=confidence,
+                sweep_id=event.sweep_id, routing=routing, evidence=evidence,
             ),
             extra_meta=extra_meta,
         )
@@ -257,7 +256,7 @@ async def _route(
             s, _repo, workspace_id=ws, event_id=event.id, sweep_id=event.sweep_id,
             provider=event.provider, source_url=raw.url, draft=draft, embedding=embedding,
             embedding_model=embedding_model,
-            confidence=confidence, authority=annotation.tier, sweep_sourced=sweep_sourced,
+            confidence=confidence, authority=annotation.tier,
             routing=routing, evidence=evidence,
         ),
         extra_meta=extra_meta,
@@ -375,7 +374,7 @@ async def run_pipeline(
     matched = similar[0] if (boundary.matched_skill_id and similar) else None
     result = await _route(
         event, raw, draft, embedding, embedding_model, annotation, routing, ledger,
-        boundary=boundary, matched=matched, sweep_sourced=sweep_sourced, evidence=evidence,
+        boundary=boundary, matched=matched, evidence=evidence,
         extra_meta=expander_meta,
     )
 

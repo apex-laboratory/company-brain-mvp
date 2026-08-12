@@ -99,3 +99,4 @@ class ReviewStats(_Camel):
     approved: int
     rejected: int
     rejection_rate: float  # rejected / (approved + rejected), 0.0 when none resolved
+    oldest_pending_at: datetime | None = None  # None when nothing is pending
