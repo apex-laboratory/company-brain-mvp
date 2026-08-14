@@ -115,3 +115,16 @@ class ReviewsRepository:
             "approved": by_status.get("approved", 0),
             "rejected": by_status.get("rejected", 0),
         }
+
+    async def oldest_pending_at(self, session: AsyncSession) -> datetime | None:
+        """When the longest-waiting pending review was queued (``None`` if none).
+
+        Backlog age, not just count, is what a reminder should escalate on — a
+        review queued a minute ago and one ignored for a fortnight look identical
+        to a bare count.
+        """
+        return (
+            await session.execute(
+                text("SELECT MIN(created_at) FROM reviews WHERE status = 'pending'")
+            )
+        ).scalar_one_or_none()

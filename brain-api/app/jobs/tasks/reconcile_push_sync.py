@@ -7,8 +7,7 @@ lapsed, the update is gone with nothing to notice: a connection's cursor
 (``last_synced_at``) only advances on a *successful* sync, so a dead webhook
 path is indistinguishable from a quiet source.
 
-This cron re-syncs every push-delivery connection hourly (vs. the pull cron's
-15 minutes — push is still the primary path, this is only a safety net).
+This cron re-syncs every push-delivery connection every 5 minutes.
 ``source_sync`` re-fetches "changed since cursor" per connection, so a quiet
 source costs one cheap API call and the cursor doesn't move.
 """
@@ -25,6 +24,13 @@ from app.jobs.repository import JobsRepository
 log = logging.getLogger(__name__)
 
 _repo = JobsRepository()
+
+# Must match the cron cadence in ``worker.py`` (every 5 minutes). The job id below
+# is bucketed by this window so repeated ticks dedupe *within* a window without
+# blocking the next one — arq holds a plain id until its result expires, so a
+# bucket coarser than the cadence would silently throttle the cron back down to
+# one run per bucket.
+_BUCKET_SECONDS = 300
 
 
 def _push_providers() -> list[str]:
@@ -44,10 +50,7 @@ async def reconcile_push_sources(ctx: dict) -> dict:
     async with get_session() as session:
         connections = await _repo.list_pollable_connections(session, providers)
 
-    # Hour bucket, mirroring poll_pull_sources: dedupes within the hour without
-    # blocking the *next* tick — arq holds a plain id until the previous
-    # result expires, which would throttle the cadence.
-    bucket = int(time.time() // 3600)
+    bucket = int(time.time() // _BUCKET_SECONDS)
     for source_id, workspace_id in connections:
         await enqueue(
             "source_sync", workspace_id, source_id,

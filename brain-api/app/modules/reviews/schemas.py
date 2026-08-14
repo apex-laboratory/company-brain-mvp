@@ -61,6 +61,9 @@ class WriteRequest(CamelRequestModel):
 
     base_logic: Annotated[str, Field(min_length=1, max_length=20_000)]
     exceptions: list[dict] | None = None  # replaces the block when provided
+    # Same tri-state as `exceptions`. Send `[]` when the correction invalidates the
+    # extracted steps — omitting it keeps steps written for the *previous* base_logic.
+    actions: list[dict] | None = None
     comment: str | None = None
 
 
@@ -99,3 +102,4 @@ class ReviewStats(_Camel):
     approved: int
     rejected: int
     rejection_rate: float  # rejected / (approved + rejected), 0.0 when none resolved
+    oldest_pending_at: datetime | None = None  # None when nothing is pending

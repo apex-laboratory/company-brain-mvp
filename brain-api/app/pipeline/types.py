@@ -107,7 +107,25 @@ class ExpandedContext:
 
 
 BOUNDARY_LABELS = ("UPDATE", "EXCEPTION", "DUPLICATE", "NEW")
+
+# Two thresholds, because "same skill" and "conflicting skill" are different
+# questions and a single gate cannot answer both.
+#
+# SIMILARITY_THRESHOLD gates the boundary classifier: above it, a draft is close
+# enough to an existing skill that it probably *is* that skill (update/exception/
+# duplicate), so mutating it is on the table. That warrants a high bar.
+#
+# CONTRADICTION_THRESHOLD gates the contradiction screen, and has to sit lower.
+# Two rules that contradict each other are about the same topic but assert
+# opposite things, and the opposing polarity pushes their vectors apart — a
+# contradiction is systematically *less* similar than a paraphrase. Measured on
+# production data: the two genuinely mutually-exclusive pairs in the registry
+# scored 0.751 and 0.648, while the closest unrelated pair reached only 0.431.
+# Both real conflicts sat under the 0.82 boundary gate, so the detector never ran
+# and both pairs published side by side. 0.60 clears the lower true positive with
+# margin and stays well above the observed noise ceiling.
 SIMILARITY_THRESHOLD = 0.82
+CONTRADICTION_THRESHOLD = 0.60
 
 
 @dataclass

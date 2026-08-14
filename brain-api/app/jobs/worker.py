@@ -76,10 +76,11 @@ class WorkerSettings:
         cron(reenqueue_stale_events, minute={5, 20, 35, 50}),
         # Backstop for push providers (GitHub, Slack): last_synced_at only
         # advances on a successful sync, so a dropped webhook looks identical
-        # to a quiet source. Hourly re-sync closes the gap an outage or a
-        # lapsed provider-side redelivery window would otherwise leave open
-        # silently — push is still the primary path, this just catches misses.
-        cron(reconcile_push_sources, minute=10),
+        # to a quiet source — push is still the primary path, this just catches
+        # misses. Cadence must stay in step with _BUCKET_SECONDS in
+        # reconcile_push_sync (its dedupe bucket), or arq collapses every tick
+        # inside one bucket into a single enqueue.
+        cron(reconcile_push_sources, minute=set(range(0, 60, 5))),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     on_startup = startup

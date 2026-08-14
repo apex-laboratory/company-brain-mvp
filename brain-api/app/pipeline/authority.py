@@ -34,8 +34,8 @@ class AuthorityAnnotation:
 
 @dataclass(frozen=True)
 class RoutingConfig:
-    auto_publish_confidence: float = 0.90
-    auto_publish_authority_floor: str = "medium"
+    # No auto-publish knobs: extraction never writes straight to the registry, so
+    # the only threshold left is "is this worth a reviewer's time or not".
     review_queue_confidence_floor: float = 0.70
 
 
@@ -81,12 +81,6 @@ class AuthorityAnnotator:
         routing = self._config.get("routing") or {}
         defaults = RoutingConfig()
         return RoutingConfig(
-            auto_publish_confidence=float(
-                routing.get("auto_publish_confidence", defaults.auto_publish_confidence)
-            ),
-            auto_publish_authority_floor=str(
-                routing.get("auto_publish_authority_floor", defaults.auto_publish_authority_floor)
-            ),
             review_queue_confidence_floor=float(
                 routing.get("review_queue_confidence_floor", defaults.review_queue_confidence_floor)
             ),

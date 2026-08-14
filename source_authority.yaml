@@ -44,8 +44,8 @@ tiers:
         signals: [content_type=comment]
 
 routing:
-  auto_publish_confidence: 0.90
-  auto_publish_authority_floor: medium
+  # No auto_publish_* setting — extraction always queues for human approval. This
+  # floor only decides whether it's confident enough to be worth a reviewer's look.
   review_queue_confidence_floor: 0.70
   # below 0.70 → draft, not surfaced to reviewers
 

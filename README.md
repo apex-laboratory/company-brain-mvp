@@ -16,13 +16,13 @@ Sources (Slack / Jira / GitHub / Notion / Zendesk)
 
 ## Stack
 
-| Layer            | Technology                              |
-| ---------------- | --------------------------------------- |
-| Database         | Supabase (Postgres 16 + pgvector + RLS) |
-| API              | FastAPI                                 |
-| Agent delivery   | FastMCP SSE                             |
-| Vector search    | HNSW index (1536-dim)                   |
-| Token encryption | pgcrypto (BYTEA)                        |
+| Layer            | Technology                                  |
+| ---------------- | ------------------------------------------- |
+| Database         | Supabase (Postgres 16 + pgvector + RLS)     |
+| API              | FastAPI                                     |
+| Agent delivery   | FastMCP SSE                                 |
+| Vector search    | HNSW index (1536-dim)                       |
+| Token encryption | pgcrypto (BYTEA)                            |
 | Auth             | Supabase Auth (JWT with workspace_id claim) |
 
 ## Database schema
@@ -56,7 +56,7 @@ owner > admin > editor > viewer
 cd brain-api
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 4000
+
 
 # Worker (ARQ) — processes source syncs, extraction jobs, embedding backfills, etc.
 # Requires Redis (REDIS_URL) and runs in its own process, separate from the API.
