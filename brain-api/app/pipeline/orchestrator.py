@@ -195,12 +195,33 @@ async def _route(
     *,
     boundary,
     matched: SimilarSkill | None,
+    conflict: SimilarSkill | None,
     evidence,
     extra_meta: dict | None = None,
 ) -> PipelineResult:
-    """Dispatch a scored draft by its boundary classification."""
+    """Dispatch a scored draft by its boundary classification.
+
+    ``conflict`` outranks every boundary label. The other four outcomes are
+    curation calls — where a piece of knowledge belongs — and a reviewer can undo
+    any of them. A contradiction is a correctness problem: two rules that cannot
+    both hold, which the brain would otherwise serve to agents with equal
+    confidence. That has to reach a human before anything is written or mutated.
+    """
     ws = event.workspace_id
     confidence = confidence_scorer.score(draft.extraction_confidence, annotation.tier)
+
+    # Contradiction: never write or mutate a skill — open a two-source review.
+    if conflict is not None:
+        source_a = await _existing_source_dict(ws, conflict)
+        source_b = _source_dict(raw, annotation.tier, draft.base_logic)
+        return await _commit(
+            event, ledger,
+            lambda s: skill_writer.write_contradiction(
+                s, _repo, workspace_id=ws, provider=event.provider, matched=conflict,
+                draft=draft, source_a=source_a, source_b=source_b,
+            ),
+            extra_meta=extra_meta,
+        )
 
     # DUPLICATE: record the event as another source of the matched skill, stop.
     if boundary.classification == "DUPLICATE" and matched is not None:
@@ -210,7 +231,7 @@ async def _route(
             extra_meta=extra_meta,
         )
 
-    # EXCEPTION: add a carve-out to the matched skill (no contradiction check).
+    # EXCEPTION: add a carve-out to the matched skill.
     if boundary.classification == "EXCEPTION" and matched is not None:
         return await _commit(
             event, ledger,
@@ -222,23 +243,9 @@ async def _route(
             extra_meta=extra_meta,
         )
 
-    # UPDATE: refine the matched skill — but first check for a real contradiction.
+    # UPDATE: refine the matched skill. The screen above already cleared it of any
+    # contradiction, so reaching here means the draft genuinely refines the rule.
     if boundary.classification == "UPDATE" and matched is not None:
-        has_contradiction, c_usage = await contradiction_detector.detect_contradiction(
-            draft, matched
-        )
-        ledger.add(c_usage)
-        if has_contradiction:
-            source_a = await _existing_source_dict(ws, matched)
-            source_b = _source_dict(raw, annotation.tier, draft.base_logic)
-            return await _commit(
-                event, ledger,
-                lambda s: skill_writer.write_contradiction(
-                    s, _repo, workspace_id=ws, provider=event.provider, matched=matched,
-                    draft=draft, source_a=source_a, source_b=source_b,
-                ),
-                extra_meta=extra_meta,
-            )
         return await _commit(
             event, ledger,
             lambda s: skill_writer.write_update(
@@ -372,9 +379,22 @@ async def run_pipeline(
         ledger.add(b_usage)
 
     matched = similar[0] if (boundary.matched_skill_id and similar) else None
+
+    # Contradiction screen — deliberately NOT gated on the boundary label. A draft
+    # the classifier calls NEW can still assert the opposite of a published rule;
+    # contradictions embed further apart than paraphrases, so they rarely clear the
+    # boundary threshold at all. DUPLICATE is the one skip: the draft restates a
+    # skill already in the registry, so it introduces no claim that could conflict.
+    if boundary.classification == "DUPLICATE":
+        conflict, c_usages = None, []
+    else:
+        conflict, c_usages = await contradiction_detector.screen(draft, similar)
+    for usage in c_usages:
+        ledger.add(usage)
+
     result = await _route(
         event, raw, draft, embedding, embedding_model, annotation, routing, ledger,
-        boundary=boundary, matched=matched, evidence=evidence,
+        boundary=boundary, matched=matched, conflict=conflict, evidence=evidence,
         extra_meta=expander_meta,
     )
 

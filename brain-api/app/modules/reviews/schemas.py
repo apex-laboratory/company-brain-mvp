@@ -61,6 +61,9 @@ class WriteRequest(CamelRequestModel):
 
     base_logic: Annotated[str, Field(min_length=1, max_length=20_000)]
     exceptions: list[dict] | None = None  # replaces the block when provided
+    # Same tri-state as `exceptions`. Send `[]` when the correction invalidates the
+    # extracted steps — omitting it keeps steps written for the *previous* base_logic.
+    actions: list[dict] | None = None
     comment: str | None = None
 
 

@@ -176,6 +176,61 @@ async def test_approve_contradiction_applies_new_source() -> None:
     assert skills.update_skill_logic.await_args.kwargs["base_logic"] == "never refund after 14 days"
 
 
+# ── clauses travel with the rule they qualify ───────────────────────────────────
+# exceptions_block/actions describe base_logic. When a review swaps base_logic out,
+# keeping the superseded clauses publishes a skill that contradicts itself — the
+# defect that shipped a live retry policy whose exceptions said "4xx → do not retry"
+# under a base_logic reading "retry on both 4xx and 5xx".
+
+_STALE = {
+    "exceptions_block": [{"condition": "4xx", "action": "do not retry"}],
+}
+_PROPOSED = {
+    "proposed_skill": {
+        "base_logic": "retry 5x flat 2s on 4xx and 5xx",
+        "exceptions": [{"condition": "auth failure", "action": "fail fast"}],
+        "actions": [{"description": "retry 5 times, flat 2s delay", "system": None}],
+    }
+}
+
+
+@pytest.mark.parametrize("kind", ["contradiction", "policy_change"])
+async def test_approve_replaces_clauses_of_superseded_rule(kind: str) -> None:
+    review = _review(kind=kind, after_text="retry 5x flat 2s on 4xx and 5xx", payload=_PROPOSED)
+    svc, _repo, skills, patches = _svc(review, _skill(status="active", **_STALE))
+    _enter(patches)
+    try:
+        await svc.approve(_auth(), "rev_1", None)
+    finally:
+        _exit(patches)
+    upd = skills.update_skill_logic.await_args.kwargs
+    assert upd["exceptions_block"] == _PROPOSED["proposed_skill"]["exceptions"]
+    assert upd["actions"] == _PROPOSED["proposed_skill"]["actions"]
+    # The superseded carve-out must not survive alongside logic that reverses it.
+    assert _STALE["exceptions_block"][0] not in upd["exceptions_block"]
+    # The version row records the new rule whole, not a hybrid of both.
+    assert skills.insert_skill_version.await_args.kwargs["exceptions_block"] == (
+        _PROPOSED["proposed_skill"]["exceptions"]
+    )
+
+
+async def test_approve_contradiction_without_proposed_skill_clears_clauses() -> None:
+    """Cards written before the payload carried ``proposed_skill``: nothing describes
+    the new rule, so stale clauses are dropped rather than left contradicting it."""
+    review = _review(
+        kind="contradiction", after_text="new logic",
+        payload={"source_a": {"author": "Sarah"}, "source_b": {"author": "Mike"}},
+    )
+    svc, _repo, skills, patches = _svc(review, _skill(status="active", **_STALE))
+    _enter(patches)
+    try:
+        await svc.approve(_auth(), "rev_1", None)
+    finally:
+        _exit(patches)
+    upd = skills.update_skill_logic.await_args.kwargs
+    assert upd["exceptions_block"] == [] and upd["actions"] == []
+
+
 # ── get ──────────────────────────────────────────────────────────────────────
 
 async def test_get_returns_review_with_payload() -> None:
@@ -262,6 +317,65 @@ async def test_resolve_contradiction_source_a_applies_before_text() -> None:
     finally:
         _exit(patches)
     assert skills.update_skill_logic.await_args.kwargs["base_logic"] == "A logic"
+
+
+async def test_resolve_contradiction_source_b_swaps_clauses_with_rule() -> None:
+    review = _review(
+        kind="contradiction", before_text="A logic", after_text="B logic", payload=_PROPOSED
+    )
+    svc, _repo, skills, patches = _svc(review, _skill(status="active", **_STALE))
+    _enter(patches)
+    try:
+        await svc.resolve_contradiction(
+            _auth(), "rev_1", ContradictionResolveRequest(choice="source_b")
+        )
+    finally:
+        _exit(patches)
+    upd = skills.update_skill_logic.await_args.kwargs
+    assert upd["exceptions_block"] == _PROPOSED["proposed_skill"]["exceptions"]
+    assert upd["actions"] == _PROPOSED["proposed_skill"]["actions"]
+
+
+async def test_resolve_contradiction_source_a_keeps_current_clauses() -> None:
+    """Picking source_a keeps the rule the skill already states, so its own
+    carve-outs still describe it — they must survive untouched."""
+    review = _review(
+        kind="contradiction", before_text="A logic", after_text="B logic", payload=_PROPOSED
+    )
+    svc, _repo, skills, patches = _svc(review, _skill(status="active", **_STALE))
+    _enter(patches)
+    try:
+        await svc.resolve_contradiction(
+            _auth(), "rev_1", ContradictionResolveRequest(choice="source_a")
+        )
+    finally:
+        _exit(patches)
+    upd = skills.update_skill_logic.await_args.kwargs
+    assert upd["exceptions_block"] == _STALE["exceptions_block"]
+    assert upd["actions"] is None  # tri-state: leave the column alone
+
+
+async def test_write_replaces_actions_when_provided() -> None:
+    svc, _repo, skills, patches = _svc(_review(kind="policy_change"), _skill(status="active"))
+    _enter(patches)
+    try:
+        await svc.write(
+            _auth(), "rev_1",
+            WriteRequest(base_logic="retry on 5xx only", actions=[{"description": "retry 3x"}]),
+        )
+    finally:
+        _exit(patches)
+    assert skills.update_skill_logic.await_args.kwargs["actions"] == [{"description": "retry 3x"}]
+
+
+async def test_write_without_actions_leaves_them_untouched() -> None:
+    svc, _repo, skills, patches = _svc(_review(kind="policy_change"), _skill(status="active"))
+    _enter(patches)
+    try:
+        await svc.write(_auth(), "rev_1", WriteRequest(base_logic="refund within 60 days"))
+    finally:
+        _exit(patches)
+    assert skills.update_skill_logic.await_args.kwargs["actions"] is None
 
 
 async def test_resolve_contradiction_write_uses_correction() -> None:

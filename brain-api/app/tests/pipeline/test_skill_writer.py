@@ -224,4 +224,10 @@ async def test_contradiction_opens_two_source_review_without_mutation() -> None:
     assert kwargs["confidence"] == 0
     assert kwargs["payload"]["source_a"] == source_a
     assert kwargs["payload"]["source_b"] == source_b
+    # The newer rule's clauses ride along so approve can swap them in with the logic;
+    # without them the resolved skill keeps carve-outs written for the rule it replaced.
+    proposed = kwargs["payload"]["proposed_skill"]
+    assert proposed["base_logic"] == _draft().base_logic
+    assert proposed["exceptions"] == _draft().exceptions
+    assert proposed["actions"] == _draft().actions
     repo.insert_skill.assert_not_awaited()

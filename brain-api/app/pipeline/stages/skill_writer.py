@@ -268,6 +268,10 @@ async def write_contradiction(
         payload={
             "source_a": source_a,
             "source_b": source_b,
+            # The newer rule's exceptions/actions, so approving (or picking source_b)
+            # can replace the matched skill's clauses instead of leaving the
+            # superseded ones attached to logic they no longer describe.
+            "proposed_skill": _proposed_skill(draft, matched.name),
             "matched_skill_id": matched.id,
             "boundary": "UPDATE",
         },

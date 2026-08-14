@@ -351,3 +351,70 @@ async def test_duplicate_short_circuits_without_contradiction(wired, monkeypatch
     assert result.outcome == "duplicate"
     contra.assert_not_awaited()  # duplicates never reach contradiction detection
     dup.assert_awaited_once()
+
+
+async def test_new_boundary_still_screened_for_contradiction(wired, monkeypatch) -> None:
+    """The regression: a draft below SIMILARITY_THRESHOLD is NEW to the boundary
+    classifier, which never even ran — but it can still assert the opposite of a
+    published rule. Two such pairs went live at 0.751 and 0.648 with empty
+    conflict_flags. Screening must be independent of the boundary label.
+    """
+    await _mock_stages(monkeypatch)
+    near = SimilarSkill(
+        id="skl_x", name="Exception handling", version="v1",
+        base_logic="never swallow exceptions — always log with context",
+        exceptions_block=[], source_authority="high", similarity=0.751,
+    )
+    wired.similar_skills = AsyncMock(return_value=[near])
+    wired.skill_provenance = AsyncMock(return_value=None)
+    monkeypatch.setattr(orchestrator, "_repo", wired)
+    monkeypatch.setattr(
+        orchestrator.boundary_classifier, "classify_boundary",
+        AsyncMock(return_value=(
+            orchestrator.boundary_classifier.BoundaryResult("NEW", None, 0.751), None,
+        )),
+    )
+    monkeypatch.setattr(
+        orchestrator.contradiction_detector, "detect_contradiction",
+        AsyncMock(return_value=(True, _USAGE)),
+    )
+    contra = AsyncMock(return_value=PipelineResult(outcome="contradiction", skill_id="skl_x"))
+    monkeypatch.setattr(orchestrator.skill_writer, "write_contradiction", contra)
+    new_skill = AsyncMock()
+    monkeypatch.setattr(orchestrator.skill_writer, "write_new_skill", new_skill)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "contradiction"
+    # The conflicting skill is the review's subject even though `matched` is None
+    # (the boundary classifier claimed no match).
+    assert contra.await_args.kwargs["matched"] is near
+    new_skill.assert_not_awaited()  # a competing rule must never publish alongside
+
+
+async def test_distant_neighbour_is_never_screened(wired, monkeypatch) -> None:
+    """Below CONTRADICTION_THRESHOLD nothing is close enough to conflict, so the
+    draft writes as NEW without spending an LLM call."""
+    await _mock_stages(monkeypatch)
+    far = SimilarSkill(
+        id="skl_y", name="Unrelated", version="v1", base_logic="something else",
+        exceptions_block=[], source_authority="low", similarity=0.431,
+    )
+    wired.similar_skills = AsyncMock(return_value=[far])
+    monkeypatch.setattr(orchestrator, "_repo", wired)
+    monkeypatch.setattr(
+        orchestrator.boundary_classifier, "classify_boundary",
+        AsyncMock(return_value=(
+            orchestrator.boundary_classifier.BoundaryResult("NEW", None, 0.431), None,
+        )),
+    )
+    contra = AsyncMock()
+    monkeypatch.setattr(orchestrator.contradiction_detector, "detect_contradiction", contra)
+    writer = AsyncMock(return_value=PipelineResult(outcome="review", skill_id="skl_1"))
+    monkeypatch.setattr(orchestrator.skill_writer, "write_new_skill", writer)
+
+    result = await orchestrator.run_pipeline("wrk_1", "evt_1")
+
+    assert result.outcome == "review"
+    contra.assert_not_awaited()
+    writer.assert_awaited_once()

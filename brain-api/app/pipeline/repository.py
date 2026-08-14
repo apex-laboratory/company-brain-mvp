@@ -222,15 +222,37 @@ class PipelineRepository:
         embedding: list[float],
         embedding_model: str,
         status: str = "active",
+        actions: list | None = None,
     ) -> None:
-        """Apply an UPDATE/EXCEPTION to a published skill (auto-publish branch)."""
+        """Apply an UPDATE/EXCEPTION to a published skill (auto-publish branch).
+
+        ``actions`` is tri-state: a list replaces the column, ``None`` leaves it
+        untouched. Callers that replace ``base_logic`` must pass the actions belonging
+        to the *new* rule — see ``reviews.service._superseded_clauses``.
+        """
+        params: dict = {
+            "skill_id": skill_id,
+            "base_logic": base_logic,
+            "exceptions": json.dumps(exceptions_block),
+            "version": version,
+            "confidence": confidence,
+            "embedding": _vector_literal(embedding),
+            "embedding_model": embedding_model,
+            "status": status,
+        }
+        # Fixed literal fragment chosen by a bool — no caller data reaches the SQL
+        # text; the value itself stays parameter-bound like every other column.
+        actions_set = ""
+        if actions is not None:
+            actions_set = "actions = CAST(:actions AS jsonb),\n                       "
+            params["actions"] = json.dumps(actions)
         await session.execute(
             text(
-                """
+                f"""
                 UPDATE skills
                    SET base_logic = :base_logic,
                        exceptions_block = CAST(:exceptions AS jsonb),
-                       version = :version,
+                       {actions_set}version = :version,
                        confidence = :confidence,
                        embedding = CAST(:embedding AS vector),
                        embedding_model = :embedding_model,
@@ -238,16 +260,7 @@ class PipelineRepository:
                        updated_at = now()
                  WHERE id = :skill_id
                 """
-            ).bindparams(
-                skill_id=skill_id,
-                base_logic=base_logic,
-                exceptions=json.dumps(exceptions_block),
-                version=version,
-                confidence=confidence,
-                embedding=_vector_literal(embedding),
-                embedding_model=embedding_model,
-                status=status,
-            )
+            ).bindparams(**params)
         )
 
     async def apply_exception(

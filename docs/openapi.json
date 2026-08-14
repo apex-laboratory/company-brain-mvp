@@ -3599,6 +3599,21 @@
             ],
             "title": "Exceptions"
           },
+          "actions": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actions"
+          },
           "comment": {
             "anyOf": [
               {

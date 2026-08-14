@@ -53,6 +53,25 @@ def _out(row: dict) -> ReviewOut:
     return ReviewOut(**{k: row.get(k) for k in ReviewOut.model_fields})
 
 
+def _superseded_clauses(review: dict) -> tuple[list, list]:
+    """``(exceptions, actions)`` belonging to the rule in a review's ``after_text``.
+
+    ``exceptions_block`` and ``actions`` qualify the rule stated in ``base_logic``:
+    they name carve-outs from it and the steps that carry it out. So when a review
+    replaces base_logic wholesale, the clauses attached to the *superseded* rule stop
+    describing anything true — carrying them forward is what produced live skills whose
+    actions instructed the opposite of their own logic (a retry policy whose base_logic
+    said "retry on 4xx" while its exceptions still said "4xx → do not retry").
+
+    ``payload.proposed_skill`` is the pipeline's extraction of the new rule and supplies
+    both. A contradiction card written before that payload key existed supplies neither,
+    so both are cleared rather than left stale — the preceding ``skill_versions`` row
+    still records the old ``exceptions_block``.
+    """
+    proposed = (review.get("payload") or {}).get("proposed_skill") or {}
+    return list(proposed.get("exceptions") or []), list(proposed.get("actions") or [])
+
+
 class ReviewsService:
     def __init__(
         self,
@@ -209,7 +228,7 @@ class ReviewsService:
         logic so semantic search reflects the human's version."""
         return await self._apply_write(
             auth, review_id, base_logic=body.base_logic,
-            exceptions=body.exceptions, comment=body.comment,
+            exceptions=body.exceptions, actions=body.actions, comment=body.comment,
         )
 
     async def resolve_contradiction(
@@ -236,15 +255,22 @@ class ReviewsService:
                 raise ValidationError("A correction is required when choice is 'write'.")
             return await self._apply_write(
                 auth, review_id, base_logic=body.correction.base_logic,
-                exceptions=body.correction.exceptions, comment=body.comment,
+                exceptions=body.correction.exceptions, actions=body.correction.actions,
+                comment=body.comment,
             )
 
         # source_a → current logic (before_text); source_b → proposed (after_text).
         chosen = review["before_text"] if body.choice == "source_a" else review["after_text"]
         if not chosen:
             raise ValidationError(f"Contradiction has no text for {body.choice}.")
+        # source_a keeps the rule the skill already states, so its clauses still apply
+        # (None = leave them). source_b swaps the rule out, so they must swap with it.
+        exceptions, actions = (
+            (None, None) if body.choice == "source_a" else _superseded_clauses(review)
+        )
         return await self._apply_write(
-            auth, review_id, base_logic=chosen, exceptions=None, comment=body.comment,
+            auth, review_id, base_logic=chosen, exceptions=exceptions,
+            actions=actions, comment=body.comment,
         )
 
     async def bulk_approve(
@@ -334,11 +360,17 @@ class ReviewsService:
         base_logic: str,
         exceptions: list[dict] | None,
         comment: str | None,
+        actions: list[dict] | None = None,
     ) -> ResolveResult:
         """Shared human-authored publish path for ``write`` and contradiction picks.
 
         Two-phase like ``approve``: re-embed outside any transaction (network I/O
-        must never pin a pooled connection), then apply + resolve under a row lock."""
+        must never pin a pooled connection), then apply + resolve under a row lock.
+
+        ``exceptions``/``actions`` are tri-state: a list replaces that block, ``None``
+        keeps the skill's current one. ``None`` is only correct when ``base_logic`` is
+        unchanged (the ``source_a`` pick) — a caller replacing the rule must pass the
+        clauses that go with it, per ``_superseded_clauses``."""
         workspace_id, role = _require_workspace(auth)
 
         # Phase 1: read the pending review + skill; embed the corrected logic.
@@ -375,7 +407,8 @@ class ReviewsService:
             )
             await self._skills.update_skill_logic(
                 session, skill_id, base_logic=base_logic, exceptions_block=new_exceptions,
-                version=new_version, confidence=_HUMAN_CONFIDENCE, embedding=embedding,
+                actions=actions, version=new_version,
+                confidence=_HUMAN_CONFIDENCE, embedding=embedding,
                 embedding_model=usage.model, status="active",
             )
             resolved = await self._repo.resolve(
@@ -435,16 +468,18 @@ class ReviewsService:
 
         elif kind in ("policy_change", "contradiction"):
             # Apply the proposed base_logic (after_text) as a new version + re-embed.
+            # The proposed exceptions/actions travel with it — see _superseded_clauses.
             new_logic = review["after_text"] or skill["base_logic"]
+            new_exceptions, new_actions = _superseded_clauses(review)
             new_version = next_version(skill["version"])
             await self._skills.insert_skill_version(
                 session, workspace_id=ws, skill_id=skill_id, version=new_version,
-                base_logic=new_logic, exceptions_block=skill["exceptions_block"] or [],
+                base_logic=new_logic, exceptions_block=new_exceptions,
                 confidence=_HUMAN_CONFIDENCE, change_type="human_edit",
             )
             await self._skills.update_skill_logic(
                 session, skill_id, base_logic=new_logic,
-                exceptions_block=skill["exceptions_block"] or [], version=new_version,
+                exceptions_block=new_exceptions, actions=new_actions, version=new_version,
                 confidence=_HUMAN_CONFIDENCE, embedding=embedding,
                 embedding_model=embedding_model, status="active",
             )
