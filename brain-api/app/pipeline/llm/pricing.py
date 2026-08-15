@@ -28,7 +28,14 @@ _warned: set[str] = set()
 
 
 def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Dollar cost of one call. Unknown model → 0.0 (warn once per process)."""
+    """Dollar cost of one call. Unknown model → 0.0 (warn once per process).
+
+    OpenRouter's ``:free`` suffix is an actual price guarantee, not an unknown
+    model — treated as $0 with no warning so any free model works via
+    ``OPENROUTER_MODEL`` without a matching ``_PRICES`` entry.
+    """
+    if model.endswith(":free"):
+        return 0.0
     prices = _PRICES.get(model)
     if prices is None:
         if model not in _warned:
@@ -44,10 +51,12 @@ def ensure_priced(*models: str) -> None:
 
     The price table is keyed by hardcoded model names while the model names are
     env-configurable (``settings.gemini_model`` / ``anthropic_model`` /
-    ``embedding_model``). Without this check, rotating a model via env silently
-    makes every cost rollup read $0 while real spend continues. Call it at worker
-    startup so a model bump fails loudly at boot instead of corrupting telemetry."""
-    missing = sorted({m for m in models if m not in _PRICES})
+    ``openrouter_model`` / ``embedding_model``). Without this check, rotating a
+    model via env silently makes every cost rollup read $0 while real spend
+    continues. Call it at worker startup so a model bump fails loudly at boot
+    instead of corrupting telemetry. ``:free`` models are exempt — see
+    :func:`cost_usd`."""
+    missing = sorted({m for m in models if not m.endswith(":free") and m not in _PRICES})
     if missing:
         raise RuntimeError(
             f"pricing: no price entry for configured model(s) {missing}. "

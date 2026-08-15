@@ -3,23 +3,24 @@
 Unlike the rest of the suite (mocked at the ``app.pipeline.llm.clients``
 boundary — see ``test_stages.py``), this hits the network for real. It exists
 to answer one question fast: "is the configured key actually valid?" Skips
-itself when no key is present, so the normal unit-test run never needs one.
+itself when no key is present or when ``LLM_PROVIDER`` isn't ``gemini``, so
+the normal unit-test run never needs one.
 """
 from __future__ import annotations
 
 import pytest
 
 from app.config.settings import settings
-from app.pipeline.llm.clients import gemini_json
+from app.pipeline.llm.clients import llm_json
 
 pytestmark = pytest.mark.skipif(
-    not settings.gemini_api_key,
-    reason="GEMINI_API_KEY not set — skipping live Gemini call",
+    settings.llm_provider != "gemini" or not settings.gemini_api_key,
+    reason="LLM_PROVIDER != gemini or GEMINI_API_KEY not set — skipping live Gemini call",
 )
 
 
 async def test_gemini_json_live_call() -> None:
-    parsed, usage = await gemini_json(
+    parsed, usage = await llm_json(
         "Respond with a single JSON object only, no prose.",
         'Return exactly this JSON object: {"ok": true}',
         stage="live_smoke_test",

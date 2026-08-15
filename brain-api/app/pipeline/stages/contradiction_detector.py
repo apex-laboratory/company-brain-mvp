@@ -1,4 +1,4 @@
-"""Contradiction detector (Gemini): does a proposed change conflict with the
+"""Contradiction detector (LLM): does a proposed change conflict with the
 current published rule, or merely refine it?
 
 A true contradiction blocks the skill write: the caller routes it to a
@@ -11,13 +11,10 @@ NEW skill by the boundary's reckoning and still assert the opposite of a rule th
 registry already publishes. Gating the check on ``UPDATE`` — which required
 clearing :data:`SIMILARITY_THRESHOLD` — is what let two mutually-exclusive pairs
 go live with empty ``conflict_flags``.
-
-Temporarily on Gemini instead of Sonnet (ANTHROPIC_API_KEY unavailable) — swap
-back to ``sonnet_json`` once the Anthropic key is restored.
 """
 from __future__ import annotations
 
-from app.pipeline.llm.clients import gemini_json
+from app.pipeline.llm.clients import llm_json
 from app.pipeline.prompts import contradiction_detector as prompts
 from app.pipeline.repository import SimilarSkill
 from app.pipeline.types import CONTRADICTION_THRESHOLD, SkillDraft, StageUsage
@@ -27,7 +24,7 @@ async def detect_contradiction(
     proposed: SkillDraft, existing: SimilarSkill
 ) -> tuple[bool, StageUsage]:
     """Return ``(has_contradiction, usage)``."""
-    parsed, usage = await gemini_json(
+    parsed, usage = await llm_json(
         prompts.SYSTEM,
         prompts.user_prompt(proposed.base_logic, existing.base_logic),
         stage="contradiction_detector",

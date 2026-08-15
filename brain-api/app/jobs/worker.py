@@ -27,10 +27,18 @@ from app.jobs.tasks.webhook_ingest import webhook_ingest
 
 async def startup(ctx: dict) -> None:
     """Fail loudly at boot if a configured LLM model has no price entry, so a
-    model rotation can't silently zero the pipeline's cost telemetry."""
+    model rotation can't silently zero the pipeline's cost telemetry.
+
+    Only the model behind the active ``LLM_PROVIDER`` is checked — switching to
+    OpenRouter for a demo shouldn't require Gemini/Anthropic to stay priced."""
     from app.pipeline.llm.pricing import ensure_priced
 
-    ensure_priced(settings.gemini_model, settings.anthropic_model, settings.embedding_model)
+    active_model = {
+        "gemini": settings.gemini_model,
+        "anthropic": settings.anthropic_model,
+        "openrouter": settings.openrouter_model,
+    }[settings.llm_provider]
+    ensure_priced(active_model, settings.embedding_model)
 
 
 async def shutdown(ctx: dict) -> None:

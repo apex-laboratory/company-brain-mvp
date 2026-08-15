@@ -88,15 +88,15 @@ def _fake_gemini(monkeypatch: pytest.MonkeyPatch) -> None:
             return {"relevant": "REL" in user, "reason": "fake"}, _USAGE
         return {"classification": "UPDATE"}, _USAGE
 
-    monkeypatch.setattr(rg, "gemini_json", fake)
-    monkeypatch.setattr(bc, "gemini_json", fake)
+    monkeypatch.setattr(rg, "llm_json", fake)
+    monkeypatch.setattr(bc, "llm_json", fake)
 
 
 def _fake_gemini_contradiction(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake(system: str, user: str, *, stage: str, max_tokens: int = 0):
         return {"has_contradiction": "CONTRA" in user}, _USAGE
 
-    monkeypatch.setattr(cd, "gemini_json", fake)
+    monkeypatch.setattr(cd, "llm_json", fake)
 
 
 async def test_relevance_precision_recall_math(
@@ -121,7 +121,7 @@ async def test_boundary_below_threshold_never_calls_llm(
         calls.append(stage)
         return {"classification": "UPDATE"}, _USAGE
 
-    monkeypatch.setattr(bc, "gemini_json", counting)
+    monkeypatch.setattr(bc, "llm_json", counting)
     report = await run_boundary(dataset_dir)
     # b1 (0.3) and b2 (no match) resolve NEW with zero LLM calls; only b3 calls.
     assert calls == ["boundary_classifier"]
@@ -147,7 +147,7 @@ async def test_stage_error_counts_as_miss_not_crash(
     async def exploding(system: str, user: str, *, stage: str, max_tokens: int = 0):
         raise RuntimeError("model emitted garbage")
 
-    monkeypatch.setattr(cd, "gemini_json", exploding)
+    monkeypatch.setattr(cd, "llm_json", exploding)
     report = await run_contradiction(dataset_dir)
     assert all(r.error for r in report.items)
     assert report.metrics["recall"] == 0.0

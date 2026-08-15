@@ -3,9 +3,9 @@
 These tests exercise the Phase 3 acceptance criteria end-to-end — real
 migrations, real repositories, real orchestrator/stage/retry/JSON-parse code,
 real pgvector similarity search, real reviews API. Only the outermost provider
-transports are faked (the SDK call in ``clients._gemini_call`` and the OpenAI
-client inside the embedder), so every line of pipeline code above the network
-runs for real.
+transports are faked (``clients.get_provider().call`` and the OpenAI client
+inside the embedder), so every line of pipeline code above the network runs
+for real.
 
 Run explicitly against a throwaway database (never production!):
 
@@ -121,9 +121,10 @@ class TransientBlip(Exception):
 
 
 def _fake_gemini_call(state: dict):
-    """All five pipeline stages route through Gemini now, so one fake transport
-    dispatches on system prompt across relevance/decision/boundary/extractor/
-    contradiction — mirroring ``clients._gemini_call``'s single call site."""
+    """All five pipeline stages route through the same configured provider, so
+    one fake transport dispatches on system prompt across relevance/decision/
+    boundary/extractor/contradiction — mirroring the provider's single
+    ``call`` method."""
     from app.pipeline.prompts import boundary_classifier as bc_p
     from app.pipeline.prompts import contradiction_detector as cd_p
     from app.pipeline.prompts import decision_identifier as di_p
@@ -223,7 +224,8 @@ def e2e_stubs(monkeypatch: pytest.MonkeyPatch, tmp_path, llm_state: dict):
     from app.pipeline import embedder
     from app.pipeline.llm import clients
 
-    monkeypatch.setattr(clients, "_gemini_call", _fake_gemini_call(llm_state))
+    fake_provider = SimpleNamespace(model="fake-gemini", call=_fake_gemini_call(llm_state))
+    monkeypatch.setattr(clients, "get_provider", lambda: fake_provider)
     monkeypatch.setattr(embedder, "openai_client", lambda: _FakeOpenAI())
 
     async def _no_redis():

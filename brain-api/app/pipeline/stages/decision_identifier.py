@@ -1,4 +1,4 @@
-"""Decision identifier (Gemini, Pass 1): structure threaded content into
+"""Decision identifier (LLM, Pass 1): structure threaded content into
 authoritative decision moments.
 
 Per the spec stub: threaded providers (Slack threads, Zendesk ticket comment
@@ -10,7 +10,7 @@ analyze, and the extractor sees the full content anyway.
 from __future__ import annotations
 
 from app.integrations import is_threaded as _is_threaded
-from app.pipeline.llm.clients import gemini_json
+from app.pipeline.llm.clients import llm_json
 from app.pipeline.prompts import decision_identifier as prompts
 from app.pipeline.types import DecisionMoment, StageUsage
 
@@ -53,7 +53,7 @@ async def identify_decisions(
             None,
         )
 
-    parsed, usage = await gemini_json(
+    parsed, usage = await llm_json(
         prompts.SYSTEM,
         prompts.user_prompt(content, provider),
         stage="decision_identifier",
