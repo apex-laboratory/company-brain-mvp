@@ -56,12 +56,19 @@ owner > admin > editor > viewer
 cd brain-api
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
+uvicorn app.main:app --reload   # http://localhost:4000
 
 # Worker (ARQ) — processes source syncs, extraction jobs, embedding backfills, etc.
 # Requires Redis (REDIS_URL) and runs in its own process, separate from the API.
 cd brain-api
 arq app.jobs.worker.WorkerSettings
+
+# MCP server (query_brain) — its own process, separate from the API.
+cd brain-api
+python -m app.mcp.server   # http://localhost:8001
+
+# Full stack (postgres, redis, api:8000, mcp:8001, worker)
+docker compose up
 ```
 
 ## Environment variables
