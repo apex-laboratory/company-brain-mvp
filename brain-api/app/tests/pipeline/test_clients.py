@@ -28,6 +28,33 @@ def test_parse_rejects_non_object() -> None:
         _parse_json("[1, 2]")
 
 
+def test_parse_extracts_trailing_json_after_reasoning_prose() -> None:
+    # Reasoning-tier models (common on OpenRouter's free tier) narrate
+    # chain-of-thought ahead of the answer even when told not to.
+    text = (
+        'Here\'s a thinking process:\n1. The user wants {"ok": true}.\n'
+        '2. I should just output it.\n\nOutput: {"relevant": true, "reason": "policy"}'
+    )
+    assert _parse_json(text) == {"relevant": True, "reason": "policy"}
+
+
+def test_parse_extracts_nested_object_over_inner_fragment() -> None:
+    # The real answer can itself contain nested objects (decision_identifier's
+    # {"decisions": [...]}) — must return the full outer object, not a
+    # sub-object reachable from a later '{'.
+    text = '{"decisions": [{"message_id": "m1"}, {"message_id": "m2"}]}'
+    assert _parse_json(text) == {
+        "decisions": [{"message_id": "m1"}, {"message_id": "m2"}]
+    }
+
+
+def test_parse_still_rejects_pure_prose_with_no_json() -> None:
+    import json
+
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json("I cannot comply with that request.")
+
+
 # ── llm_json ─────────────────────────────────────────────────────────────────
 
 def _fake_provider(call: AsyncMock) -> MagicMock:

@@ -133,8 +133,12 @@ class Settings(BaseSettings):
     # OpenRouter's free-tier catalog rotates as vendors add/withdraw free
     # capacity — a pinned slug can 404 ("model unavailable for free") without
     # warning. If that happens, set OPENROUTER_MODEL to a currently-free slug
-    # from https://openrouter.ai/models?max_price=0.
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    # from https://openrouter.ai/models?max_price=0. This one is a reasoning
+    # model — it narrates chain-of-thought in ``content`` before the answer,
+    # which is why ``clients._parse_json`` tolerates leading prose and the
+    # tightest-budget stages (relevance_gate, boundary_classifier) use a
+    # larger max_tokens than the answer alone needs.
+    openrouter_model: str = "nvidia/nemotron-3.5-lightning:free"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     embedding_model: str = "text-embedding-3-small"
     llm_max_attempts: int = 5  # per-call attempts inside the pipeline retry wrapper

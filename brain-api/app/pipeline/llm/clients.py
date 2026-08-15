@@ -31,15 +31,39 @@ class LLMParseError(Exception):
 
 
 def _parse_json(text: str) -> dict:
-    """Parse a JSON object, tolerating markdown code fences around it."""
+    """Parse a JSON object, tolerating markdown fences and leading prose.
+
+    Reasoning models (common among OpenRouter's free tier) narrate
+    chain-of-thought in the same ``content`` field ahead of the actual answer,
+    even when told not to — so the whole response often isn't valid JSON on
+    its own, just some suffix of it. Scans ``{`` positions from the end (the
+    answer is normally last) and accepts the first one whose decoded object
+    reaches the true end of the text (only trailing whitespace/fences after
+    it) — that's the strongest signal it's the real answer, not JSON quoted
+    inside the reasoning. Falls back to the last successfully-parsed object
+    if nothing satisfies that.
+    """
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
         cleaned = cleaned.rsplit("```", 1)[0].strip()
-    parsed = json.loads(cleaned)
-    if not isinstance(parsed, dict):
-        raise json.JSONDecodeError("expected a JSON object", cleaned, 0)
-    return parsed
+
+    decoder = json.JSONDecoder()
+    fallback: dict | None = None
+    for start in (i for i, ch in reversed(list(enumerate(cleaned))) if ch == "{"):
+        try:
+            parsed, end = decoder.raw_decode(cleaned, start)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if fallback is None:
+            fallback = parsed
+        if cleaned[end:].strip(" `\n") == "":
+            return parsed
+    if fallback is not None:
+        return fallback
+    raise json.JSONDecodeError("expected a JSON object", cleaned, 0)
 
 
 async def _json_call(
