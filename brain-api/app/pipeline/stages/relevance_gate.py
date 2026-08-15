@@ -13,6 +13,9 @@ async def is_relevant(content: str, provider: str) -> tuple[bool, str, StageUsag
         prompts.SYSTEM,
         prompts.user_prompt(content, provider),
         stage="relevance_gate",
-        max_tokens=256,
+        # 768, not the ~150-token answer alone needs — reasoning-tier free
+        # models (common on OpenRouter) narrate chain-of-thought in the same
+        # completion before the answer, so the budget has to cover both.
+        max_tokens=768,
     )
     return bool(parsed.get("relevant")), str(parsed.get("reason", "")), usage

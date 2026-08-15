@@ -37,7 +37,10 @@ async def classify_boundary(
         prompts.SYSTEM,
         prompts.user_prompt(draft.trigger, draft.base_logic, top.name, top.base_logic),
         stage="boundary_classifier",
-        max_tokens=256,
+        # 768, not the ~150-token answer alone needs — reasoning-tier free
+        # models (common on OpenRouter) narrate chain-of-thought in the same
+        # completion before the answer, so the budget has to cover both.
+        max_tokens=768,
     )
     classification = str(parsed.get("classification", "")).upper()
     if classification not in BOUNDARY_LABELS:
