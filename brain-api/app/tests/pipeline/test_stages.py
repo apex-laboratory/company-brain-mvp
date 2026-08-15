@@ -16,7 +16,7 @@ _USAGE = StageUsage(stage="s", model="m", input_tokens=1, output_tokens=1, cost_
 
 async def test_relevance_gate_true() -> None:
     with patch.object(
-        relevance_gate, "gemini_json",
+        relevance_gate, "llm_json",
         AsyncMock(return_value=({"relevant": True, "reason": "policy"}, _USAGE)),
     ):
         relevant, reason, usage = await relevance_gate.is_relevant("text", "slack")
@@ -27,7 +27,7 @@ async def test_relevance_gate_true() -> None:
 
 async def test_relevance_gate_false() -> None:
     with patch.object(
-        relevance_gate, "gemini_json",
+        relevance_gate, "llm_json",
         AsyncMock(return_value=({"relevant": False, "reason": "chit-chat"}, _USAGE)),
     ):
         relevant, _, _ = await relevance_gate.is_relevant("hi", "slack")
@@ -38,7 +38,7 @@ async def test_relevance_gate_false() -> None:
 
 async def test_non_threaded_provider_wraps_content_without_llm() -> None:
     gemini = AsyncMock()
-    with patch.object(decision_identifier, "gemini_json", gemini):
+    with patch.object(decision_identifier, "llm_json", gemini):
         moments, usage = await decision_identifier.identify_decisions(
             "full page text", "notion", source_id="pg1", author="Ada", timestamp="t0"
         )
@@ -58,7 +58,7 @@ async def test_threaded_provider_parses_decision_moments() -> None:
             {"message_id": "m2", "author": "x", "timestamp": "t2", "decision_text": "  "},
         ]
     }
-    with patch.object(decision_identifier, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(decision_identifier, "llm_json", AsyncMock(return_value=(payload, _USAGE))):
         moments, usage = await decision_identifier.identify_decisions(
             "thread", "slack", source_id="c1", author="", timestamp=""
         )
@@ -69,7 +69,7 @@ async def test_threaded_provider_parses_decision_moments() -> None:
 
 async def test_threaded_provider_empty_decisions() -> None:
     with patch.object(
-        decision_identifier, "gemini_json", AsyncMock(return_value=({"decisions": []}, _USAGE))
+        decision_identifier, "llm_json", AsyncMock(return_value=({"decisions": []}, _USAGE))
     ):
         moments, _ = await decision_identifier.identify_decisions(
             "thread", "slack", source_id="c1", author="", timestamp=""
@@ -93,7 +93,7 @@ async def test_skill_extractor_builds_draft() -> None:
         "extraction_confidence": 0.8,
         "uncertainty_notes": "",
     }
-    with patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(skill_extractor, "llm_json", AsyncMock(return_value=(payload, _USAGE))):
         draft, usage = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
     assert draft.name == "Refund window"
     assert draft.extraction_confidence == 0.8
@@ -103,7 +103,7 @@ async def test_skill_extractor_builds_draft() -> None:
 
 async def test_skill_extractor_clamps_confidence() -> None:
     payload = {"trigger": "t", "base_logic": "b", "extraction_confidence": 5.0}
-    with patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(skill_extractor, "llm_json", AsyncMock(return_value=(payload, _USAGE))):
         draft, _ = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
     assert draft.extraction_confidence == 1.0
     assert draft.name == "t"  # falls back to trigger prefix when name missing
@@ -112,7 +112,7 @@ async def test_skill_extractor_clamps_confidence() -> None:
 async def test_skill_extractor_rejects_empty_skill() -> None:
     payload = {"trigger": "", "base_logic": "", "extraction_confidence": 0.9}
     with (
-        patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))),
+        patch.object(skill_extractor, "llm_json", AsyncMock(return_value=(payload, _USAGE))),
         pytest.raises(ValueError, match="no trigger/base_logic"),
     ):
         await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
@@ -122,7 +122,7 @@ async def test_skill_extractor_abstains_on_null_skill() -> None:
     """Completed-work content: the model abstains and the event is discarded."""
     payload = {"skill": None, "reason": "PR changelog of implemented code"}
     with (
-        patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))),
+        patch.object(skill_extractor, "llm_json", AsyncMock(return_value=(payload, _USAGE))),
         pytest.raises(ValueError, match="abstained — PR changelog"),
     ):
         await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
@@ -135,7 +135,7 @@ async def test_skill_extractor_rejects_one_off_task_backstop() -> None:
         "knowledge_type": "one_off_task", "extraction_confidence": 0.9,
     }
     with (
-        patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))),
+        patch.object(skill_extractor, "llm_json", AsyncMock(return_value=(payload, _USAGE))),
         pytest.raises(ValueError, match="one_off_task"),
     ):
         await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
@@ -143,11 +143,11 @@ async def test_skill_extractor_rejects_one_off_task_backstop() -> None:
 
 async def test_skill_extractor_parses_knowledge_type_with_safe_default() -> None:
     payload = {"trigger": "t", "base_logic": "b", "knowledge_type": "project_decision"}
-    with patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(skill_extractor, "llm_json", AsyncMock(return_value=(payload, _USAGE))):
         draft, _ = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
     assert draft.knowledge_type == "project_decision"
 
     payload = {"trigger": "t", "base_logic": "b", "knowledge_type": "garbage"}
-    with patch.object(skill_extractor, "gemini_json", AsyncMock(return_value=(payload, _USAGE))):
+    with patch.object(skill_extractor, "llm_json", AsyncMock(return_value=(payload, _USAGE))):
         draft, _ = await skill_extractor.extract_skill(_DECISIONS, "ctx", _ANNOT)
     assert draft.knowledge_type == "durable_policy"  # unknown → extractable default

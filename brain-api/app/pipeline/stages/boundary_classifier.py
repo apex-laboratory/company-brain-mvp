@@ -1,8 +1,8 @@
-"""Boundary classifier (Gemini): how does a draft relate to existing skills?
+"""Boundary classifier (LLM): how does a draft relate to existing skills?
 
 First a pgvector similarity search (done by the caller via the repository); if
 the closest match is at/below :data:`SIMILARITY_THRESHOLD` the draft is ``NEW``
-with **no LLM call**. Above the threshold, Gemini picks one of
+with **no LLM call**. Above the threshold, the configured LLM picks one of
 UPDATE / EXCEPTION / DUPLICATE / NEW against the top match.
 
 Search scope is the caller's concern (published-only normally; published +
@@ -11,7 +11,7 @@ other — PRD sweep-scope rule).
 """
 from __future__ import annotations
 
-from app.pipeline.llm.clients import gemini_json
+from app.pipeline.llm.clients import llm_json
 from app.pipeline.prompts import boundary_classifier as prompts
 from app.pipeline.repository import SimilarSkill
 from app.pipeline.types import (
@@ -33,7 +33,7 @@ async def classify_boundary(
         result = BoundaryResult(classification="NEW", matched_skill_id=None, similarity=similarity)
         return result, None
 
-    parsed, usage = await gemini_json(
+    parsed, usage = await llm_json(
         prompts.SYSTEM,
         prompts.user_prompt(draft.trigger, draft.base_logic, top.name, top.base_logic),
         stage="boundary_classifier",

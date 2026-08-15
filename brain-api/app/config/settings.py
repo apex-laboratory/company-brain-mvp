@@ -119,6 +119,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    openrouter_api_key: str = ""
     # "-latest" alias always resolves to Google's current cheapest flash-lite
     # model, so a future model retirement (like gemini-2.5-flash-lite's, which
     # this pinned) doesn't silently 404 the whole pipeline again. Fine for the
@@ -126,8 +127,16 @@ class Settings(BaseSettings):
     # extraction stages too.
     gemini_model: str = "gemini-flash-lite-latest"
     anthropic_model: str = "claude-sonnet-5"
+    # OpenRouter is OpenAI-API-compatible; ":free"-suffixed models cost nothing
+    # (see pipeline/llm/pricing.py) and need no billing setup — the default
+    # picks a testing/demo model without requiring OPENROUTER_MODEL to be set.
+    openrouter_model: str = "deepseek/deepseek-chat-v3-0324:free"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
     embedding_model: str = "text-embedding-3-small"
     llm_max_attempts: int = 5  # per-call attempts inside the pipeline retry wrapper
+    # Single knob that swaps every pipeline stage + brain chat call between
+    # providers — no code changes needed, see app/pipeline/llm/providers.py.
+    llm_provider: Literal["gemini", "anthropic", "openrouter"] = "gemini"
 
     # ── brain chat (delivery — BACKEND_ASKS §7) ───────────────────────────────
     # Global kill-switch for the "Ask the brain" chat surface. Ops can hard-disable
