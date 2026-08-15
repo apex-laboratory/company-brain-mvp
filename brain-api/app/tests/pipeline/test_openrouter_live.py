@@ -1,0 +1,34 @@
+"""Live smoke test: a real call to OpenRouter using OPENROUTER_API_KEY from the env.
+
+Unlike the rest of the suite (mocked at the ``app.pipeline.llm.clients``
+boundary — see ``test_stages.py``), this hits the network for real. It exists
+to answer one question fast: "does the configured free model actually return
+parseable JSON?" — free models vary in how reliably they follow
+JSON-only instructions, and this exercises the real reprompt-on-parse-failure
+path, not a mock of it. Skips itself when no key is present or when
+``LLM_PROVIDER`` isn't ``openrouter``, so the normal unit-test run never needs one.
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.config.settings import settings
+from app.pipeline.llm.clients import llm_json
+
+pytestmark = pytest.mark.skipif(
+    settings.llm_provider != "openrouter" or not settings.openrouter_api_key,
+    reason="LLM_PROVIDER != openrouter or OPENROUTER_API_KEY not set — skipping live OpenRouter call",
+)
+
+
+async def test_openrouter_json_live_call() -> None:
+    parsed, usage = await llm_json(
+        "Respond with a single JSON object only, no prose.",
+        'Return exactly this JSON object: {"ok": true}',
+        stage="live_smoke_test",
+        max_tokens=64,
+    )
+    assert parsed.get("ok") is True
+    assert usage.model == settings.openrouter_model
+    if settings.openrouter_model.endswith(":free"):
+        assert usage.cost_usd == 0.0

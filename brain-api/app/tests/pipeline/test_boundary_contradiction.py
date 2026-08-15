@@ -25,7 +25,7 @@ def _skill(sim: float, name: str = "Refund policy") -> SimilarSkill:
 
 async def test_no_similar_skills_is_new_without_llm() -> None:
     gemini = AsyncMock()
-    with patch.object(boundary_classifier, "gemini_json", gemini):
+    with patch.object(boundary_classifier, "llm_json", gemini):
         result, usage = await boundary_classifier.classify_boundary(_draft(), [])
     gemini.assert_not_awaited()
     assert result.classification == "NEW"
@@ -35,7 +35,7 @@ async def test_no_similar_skills_is_new_without_llm() -> None:
 
 async def test_similarity_at_or_below_threshold_is_new_without_llm() -> None:
     gemini = AsyncMock()
-    with patch.object(boundary_classifier, "gemini_json", gemini):
+    with patch.object(boundary_classifier, "llm_json", gemini):
         result, usage = await boundary_classifier.classify_boundary(
             _draft(), [_skill(SIMILARITY_THRESHOLD)]
         )
@@ -48,7 +48,7 @@ async def test_similarity_at_or_below_threshold_is_new_without_llm() -> None:
 
 async def test_above_threshold_calls_gemini_and_returns_label() -> None:
     with patch.object(
-        boundary_classifier, "gemini_json",
+        boundary_classifier, "llm_json",
         AsyncMock(return_value=({"classification": "UPDATE", "reason": "newer"}, _USAGE)),
     ):
         result, usage = await boundary_classifier.classify_boundary(
@@ -62,7 +62,7 @@ async def test_above_threshold_calls_gemini_and_returns_label() -> None:
 
 async def test_unparseable_label_falls_back_to_new() -> None:
     with patch.object(
-        boundary_classifier, "gemini_json",
+        boundary_classifier, "llm_json",
         AsyncMock(return_value=({"classification": "???"}, _USAGE)),
     ):
         result, _ = await boundary_classifier.classify_boundary(_draft(), [_skill(0.95)])
@@ -74,7 +74,7 @@ async def test_unparseable_label_falls_back_to_new() -> None:
 
 async def test_contradiction_true() -> None:
     with patch.object(
-        contradiction_detector, "gemini_json",
+        contradiction_detector, "llm_json",
         AsyncMock(return_value=({"has_contradiction": True, "reason": "conflict"}, _USAGE)),
     ):
         has, usage = await contradiction_detector.detect_contradiction(_draft(), _skill(0.9))
@@ -84,7 +84,7 @@ async def test_contradiction_true() -> None:
 
 async def test_contradiction_false() -> None:
     with patch.object(
-        contradiction_detector, "gemini_json",
+        contradiction_detector, "llm_json",
         AsyncMock(return_value=({"has_contradiction": False}, _USAGE)),
     ):
         has, _ = await contradiction_detector.detect_contradiction(_draft(), _skill(0.9))
@@ -108,7 +108,7 @@ async def test_screen_finds_conflict_below_boundary_threshold() -> None:
     candidates = _skills(0.751)
     assert candidates[0].similarity < SIMILARITY_THRESHOLD
     with patch.object(
-        contradiction_detector, "gemini_json",
+        contradiction_detector, "llm_json",
         AsyncMock(return_value=({"has_contradiction": True}, _USAGE)),
     ):
         conflict, usages = await contradiction_detector.screen(_draft(), candidates)
@@ -120,7 +120,7 @@ async def test_screen_stops_at_first_out_of_band_candidate() -> None:
     """Candidates arrive ordered by distance, so the first one below the threshold
     ends the scan — no LLM call is spent on anything further away."""
     gemini = AsyncMock(return_value=({"has_contradiction": False}, _USAGE))
-    with patch.object(contradiction_detector, "gemini_json", gemini):
+    with patch.object(contradiction_detector, "llm_json", gemini):
         conflict, usages = await contradiction_detector.screen(
             _draft(), _skills(0.70, 0.431, 0.30)
         )
@@ -137,7 +137,7 @@ async def test_screen_short_circuits_on_first_conflict() -> None:
         ]
     )
     candidates = _skills(0.80, 0.72, 0.65)
-    with patch.object(contradiction_detector, "gemini_json", gemini):
+    with patch.object(contradiction_detector, "llm_json", gemini):
         conflict, usages = await contradiction_detector.screen(_draft(), candidates)
     assert conflict is candidates[1]
     assert gemini.await_count == 2  # the 0.65 candidate is never reached
@@ -146,7 +146,7 @@ async def test_screen_short_circuits_on_first_conflict() -> None:
 
 async def test_screen_with_no_candidates_costs_nothing() -> None:
     gemini = AsyncMock()
-    with patch.object(contradiction_detector, "gemini_json", gemini):
+    with patch.object(contradiction_detector, "llm_json", gemini):
         conflict, usages = await contradiction_detector.screen(_draft(), [])
     assert conflict is None and usages == []
     gemini.assert_not_awaited()

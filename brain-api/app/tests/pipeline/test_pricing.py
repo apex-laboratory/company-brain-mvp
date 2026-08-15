@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.pipeline.llm.pricing import cost_usd
+from app.pipeline.llm.pricing import cost_usd, ensure_priced
 
 
 def test_gemini_pricing_math() -> None:
@@ -26,3 +26,18 @@ def test_unknown_model_costs_zero() -> None:
 
 def test_zero_tokens_zero_cost() -> None:
     assert cost_usd("claude-sonnet-5", 0, 0) == 0.0
+
+
+def test_openrouter_free_model_costs_zero_without_warning() -> None:
+    # Any ":free"-suffixed model is treated as an actual price guarantee, not
+    # an unknown model — no _PRICES entry needed for it to work.
+    assert cost_usd("deepseek/deepseek-chat-v3-0324:free", 1_000_000, 1_000_000) == 0.0
+
+
+def test_ensure_priced_exempts_free_models() -> None:
+    ensure_priced("claude-sonnet-5", "meta-llama/llama-3.3-70b-instruct:free")
+
+
+def test_ensure_priced_raises_on_unpriced_non_free_model() -> None:
+    with pytest.raises(RuntimeError, match="no price entry"):
+        ensure_priced("some-future-paid-model")

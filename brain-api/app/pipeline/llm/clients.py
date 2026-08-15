@@ -1,23 +1,21 @@
-"""Gemini + Anthropic chat wrappers: JSON-mode calls with retry and cost capture.
-
-One lazy SDK singleton per provider (mirrors ``http_client()`` in
-``app/integrations/base.py``). Keys are validated at first use, not import, so
-the API/worker boot without pipeline keys and only extraction fails when they
-are missing.
+"""Provider-agnostic chat wrappers: JSON-mode calls with retry and cost capture.
 
 Every public call returns ``(parsed_json, StageUsage)``. A malformed JSON reply
 gets exactly one reprompt (with the parse error appended) before raising
 :class:`LLMParseError` — a permanent error, not retried by ``with_retries``.
+
+The actual SDK call is dispatched through :func:`app.pipeline.llm.providers.get_provider`,
+selected at runtime by ``settings.llm_provider`` — callers never import a
+provider SDK or know which one is active.
 """
 from __future__ import annotations
 
 import json
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
 
-from app.config.settings import settings
 from app.pipeline.llm.pricing import cost_usd
+from app.pipeline.llm.providers import get_provider
 from app.pipeline.llm.retry import (
     INTERACTIVE_ATTEMPTS,
     INTERACTIVE_RETRY_AFTER_CAP,
@@ -27,50 +25,9 @@ from app.pipeline.types import StageUsage
 
 log = logging.getLogger(__name__)
 
-_gemini_client: Any = None
-_anthropic_client: Any = None
-
 
 class LLMParseError(Exception):
     """The model returned non-JSON output twice in a row."""
-
-
-def _require_key(name: str, value: str) -> str:
-    if not value:
-        raise RuntimeError(
-            f"{name} is not configured — the extraction pipeline needs it. "
-            f"Set it in brain-api/.env."
-        )
-    return value
-
-
-def gemini_client() -> Any:
-    """Lazy ``genai.Client`` singleton (used via its ``.aio`` async surface)."""
-    global _gemini_client
-    if _gemini_client is None:
-        from google import genai
-
-        _gemini_client = genai.Client(
-            api_key=_require_key("GEMINI_API_KEY", settings.gemini_api_key)
-        )
-    return _gemini_client
-
-
-def anthropic_client() -> Any:
-    """Lazy ``AsyncAnthropic`` singleton."""
-    global _anthropic_client
-    if _anthropic_client is None:
-        import httpx
-        from anthropic import AsyncAnthropic
-
-        # SDK default is 600s + 2 internal retries; synthesis (2048 max_tokens)
-        # finishes well inside 120s. Fail fast — with_retries owns retrying.
-        _anthropic_client = AsyncAnthropic(
-            api_key=_require_key("ANTHROPIC_API_KEY", settings.anthropic_api_key),
-            timeout=httpx.Timeout(120.0, connect=5.0),
-            max_retries=1,
-        )
-    return _anthropic_client
 
 
 def _parse_json(text: str) -> dict:
@@ -85,56 +42,22 @@ def _parse_json(text: str) -> dict:
     return parsed
 
 
-async def _gemini_call(system: str, user: str, *, max_tokens: int) -> tuple[str, int, int]:
-    from google.genai import types
-
-    resp = await gemini_client().aio.models.generate_content(
-        model=settings.gemini_model,
-        contents=user,
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            temperature=0.0,
-            max_output_tokens=max_tokens,
-            response_mime_type="application/json",
-        ),
-    )
-    usage = resp.usage_metadata
-    return (
-        resp.text or "",
-        usage.prompt_token_count if usage and usage.prompt_token_count else 0,
-        usage.candidates_token_count if usage and usage.candidates_token_count else 0,
-    )
-
-
-async def _sonnet_call(system: str, user: str, *, max_tokens: int) -> tuple[str, int, int]:
-    resp = await anthropic_client().messages.create(
-        model=settings.anthropic_model,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        temperature=0.0,
-        max_tokens=max_tokens,
-    )
-    text = "".join(block.text for block in resp.content if getattr(block, "text", None))
-    return text, resp.usage.input_tokens, resp.usage.output_tokens
-
-
 async def _json_call(
-    call,
     system: str,
     user: str,
     *,
     stage: str,
-    model: str,
     max_tokens: int,
     attempts: int | None = None,
     max_retry_after: float | None = None,
 ) -> tuple[dict, StageUsage]:
-    """Retry-wrapped call + JSON parse with a single reprompt on parse failure."""
+    """Retry-wrapped provider call + JSON parse with a single reprompt on parse failure."""
+    provider = get_provider()
     in_tok = out_tok = 0
 
     async def _attempt(prompt_user: str) -> tuple[str, int, int]:
         return await with_retries(
-            lambda: call(system, prompt_user, max_tokens=max_tokens),
+            lambda: provider.call(system, prompt_user, max_tokens=max_tokens),
             stage=stage,
             attempts=attempts,
             max_retry_after=max_retry_after,
@@ -159,15 +82,15 @@ async def _json_call(
 
     usage = StageUsage(
         stage=stage,
-        model=model,
+        model=provider.model,
         input_tokens=in_tok,
         output_tokens=out_tok,
-        cost_usd=cost_usd(model, in_tok, out_tok),
+        cost_usd=cost_usd(provider.model, in_tok, out_tok),
     )
     return parsed, usage
 
 
-async def gemini_json(
+async def llm_json(
     system: str,
     user: str,
     *,
@@ -175,110 +98,45 @@ async def gemini_json(
     max_tokens: int = 1024,
     interactive: bool = False,
 ) -> tuple[dict, StageUsage]:
-    """Gemini JSON-mode chat call for the fast classifier + extraction stages.
+    """JSON-mode chat call, routed to the provider configured by ``LLM_PROVIDER``.
 
     ``interactive=True`` uses the request-path budget (2 attempts, 5s
     retry-after cap) — the brain synthesizer runs while a user waits."""
     return await _json_call(
-        _gemini_call, system, user, stage=stage, model=settings.gemini_model,
-        max_tokens=max_tokens,
-        attempts=INTERACTIVE_ATTEMPTS if interactive else None,
-        max_retry_after=INTERACTIVE_RETRY_AFTER_CAP if interactive else None,
-    )
-
-
-async def gemini_stream(
-    system: str, user: str, *, stage: str, max_tokens: int = 2048
-) -> AsyncIterator[str | StageUsage]:
-    """Stream a Gemini reply, yielding text deltas then a final :class:`StageUsage`.
-
-    Deliberately **not** retry-wrapped, for the same reason as ``sonnet_stream``:
-    a retry mid-stream would replay text the caller has already forwarded to the
-    client.
-
-    ``response_mime_type="application/json"`` matches the non-streaming call, so
-    the brain synthesizer's incremental JSON parser sees the same shape — and the
-    ``grounded``-before-``answer`` key order the SSE path depends on holds.
-    """
-    from google.genai import types
-
-    in_tok = out_tok = 0
-    stream = await gemini_client().aio.models.generate_content_stream(
-        model=settings.gemini_model,
-        contents=user,
-        config=types.GenerateContentConfig(
-            system_instruction=system,
-            temperature=0.0,
-            max_output_tokens=max_tokens,
-            response_mime_type="application/json",
-        ),
-    )
-    async for chunk in stream:
-        if chunk.text:
-            yield chunk.text
-        # Usage rides on the chunks; the last one carries the final totals.
-        usage = chunk.usage_metadata
-        if usage:
-            in_tok = usage.prompt_token_count or in_tok
-            out_tok = usage.candidates_token_count or out_tok
-    yield StageUsage(
-        stage=stage,
-        model=settings.gemini_model,
-        input_tokens=in_tok,
-        output_tokens=out_tok,
-        cost_usd=cost_usd(settings.gemini_model, in_tok, out_tok),
-    )
-
-
-async def sonnet_json(
-    system: str,
-    user: str,
-    *,
-    stage: str,
-    max_tokens: int = 2048,
-    interactive: bool = False,
-) -> tuple[dict, StageUsage]:
-    """Sonnet chat call (JSON instructed via prompt).
-
-    ``interactive=True`` uses the request-path budget (2 attempts, 5s
-    retry-after cap) — the brain synthesizer runs while a user waits."""
-    return await _json_call(
-        _sonnet_call,
         system,
         user,
         stage=stage,
-        model=settings.anthropic_model,
         max_tokens=max_tokens,
         attempts=INTERACTIVE_ATTEMPTS if interactive else None,
         max_retry_after=INTERACTIVE_RETRY_AFTER_CAP if interactive else None,
     )
 
 
-async def sonnet_stream(
+async def llm_stream(
     system: str, user: str, *, stage: str, max_tokens: int = 2048
 ) -> AsyncIterator[str | StageUsage]:
-    """Stream a Sonnet reply, yielding text deltas then a final :class:`StageUsage`.
+    """Stream a reply, yielding text deltas then a final :class:`StageUsage`.
 
     Deliberately **not** retry-wrapped: a retry mid-stream would replay text the
     caller has already forwarded to the client. A failure here surfaces to the
     caller, which falls back or reports it on the stream.
+
+    Response is requested in JSON mode where the provider supports it, matching
+    the non-streaming call, so the brain synthesizer's incremental JSON parser
+    sees the same shape — the ``grounded``-before-``answer`` key order the SSE
+    path depends on holds regardless of provider.
     """
-    client = anthropic_client()
-    async with client.messages.stream(
-        model=settings.anthropic_model,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        temperature=0.0,
-        max_tokens=max_tokens,
-    ) as stream:
-        async for text in stream.text_stream:
-            yield text
-        final = await stream.get_final_message()
-    in_tok, out_tok = final.usage.input_tokens, final.usage.output_tokens
+    provider = get_provider()
+    in_tok = out_tok = 0
+    async for piece in provider.stream(system, user, max_tokens=max_tokens):
+        if isinstance(piece, tuple):
+            in_tok, out_tok = piece
+        else:
+            yield piece
     yield StageUsage(
         stage=stage,
-        model=settings.anthropic_model,
+        model=provider.model,
         input_tokens=in_tok,
         output_tokens=out_tok,
-        cost_usd=cost_usd(settings.anthropic_model, in_tok, out_tok),
+        cost_usd=cost_usd(provider.model, in_tok, out_tok),
     )
