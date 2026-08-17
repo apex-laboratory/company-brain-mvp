@@ -21,6 +21,7 @@ from app.modules.skills.schemas import (
     CreateSkillRequest,
     OverrideRequest,
     SubmitForReviewRequest,
+    UpdateSkillRequest,
 )
 from app.modules.skills.service import SkillsService
 from app.shared.http.respond import created, ok
@@ -123,6 +124,31 @@ async def get_skill(
     """Full skill body."""
     skill = await _service.get(auth, skill_id)
     return ok(request, skill.model_dump(by_alias=True))
+
+
+@router.patch("/{skill_id}", dependencies=[Depends(require_role("editor"))])
+@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
+async def update_skill(
+    skill_id: str,
+    request: Request,
+    body: UpdateSkillRequest,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Edit a skill (editor or admin): partial update of name/trigger/logic/description."""
+    skill = await _service.update(auth, skill_id, body)
+    return ok(request, skill.model_dump(by_alias=True))
+
+
+@router.delete("/{skill_id}", dependencies=[Depends(require_role("admin"))])
+@limiter.limit(DASHBOARD_LIMIT, key_func=user_key)
+async def delete_skill(
+    skill_id: str,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Soft-delete a skill (admin only)."""
+    await _service.delete(auth, skill_id)
+    return ok(request, {"id": skill_id, "deleted": True})
 
 
 @router.post("/{skill_id}/submit", dependencies=[Depends(require_role("admin"))])

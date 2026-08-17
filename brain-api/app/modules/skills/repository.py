@@ -20,8 +20,8 @@ from app.shared.helpers.ids import generate_id
 PUBLISHED_STATUSES: tuple[str, ...] = ("active", "stable")
 
 _SKILL_COLUMNS = (
-    "id, name, version, status, trigger, base_logic, exceptions_block, actions, "
-    "source_authority, confidence, created_at, updated_at"
+    "id, name, version, status, description, trigger, base_logic, exceptions_block, "
+    "actions, source_authority, confidence, created_at, updated_at"
 )
 
 # Columns for the browse-the-registry list (no embedding, no full actions body).
@@ -29,6 +29,16 @@ _LIST_COLUMNS = (
     "id, name, version, status, base_logic, exceptions_block, source_authority, "
     "source_providers, description, calls_30d, updated_at"
 )
+
+# Request-field → column allowlist for a dashboard edit (``PATCH /skills/{id}``).
+# Only these are writable; the SET clause is built from this map, never the raw
+# request keys, so an unexpected field can never reach the UPDATE.
+_EDITABLE_COLUMNS: dict[str, str] = {
+    "name": "name",
+    "trigger": "trigger",
+    "base_logic": "base_logic",
+    "description": "description",
+}
 
 
 def _vector_literal(embedding: list[float]) -> str:
@@ -272,6 +282,67 @@ class SkillsRepository:
             )
         )
         return skill_id
+
+    async def update(
+        self,
+        session: AsyncSession,
+        skill_id: str,
+        *,
+        fields: dict,
+        changed_by: str | None,
+        embedding: list[float] | None = None,
+        embedding_model: str | None = None,
+    ) -> dict | None:
+        """Apply a partial edit to a live skill; return the full updated body.
+
+        ``fields`` is the caller-supplied subset of editable columns — only keys
+        in ``_EDITABLE_COLUMNS`` are honoured, so an unexpected key can't reach the
+        SQL. A recomputed ``embedding`` (with its ``embedding_model``) is written
+        atomically with the edit. ``None`` when the row is missing or already
+        soft-deleted (raced with a delete). Raises on the ``(workspace_id, name)``
+        unique constraint — the service maps that to a ``ConflictError``."""
+        set_parts: list[str] = []
+        params: dict = {"id": skill_id, "changed_by": changed_by}
+        for key, value in fields.items():
+            column = _EDITABLE_COLUMNS.get(key)
+            if column is None:
+                continue  # ignore anything outside the allowlist (defense in depth)
+            set_parts.append(f"{column} = :{column}")
+            params[column] = value
+        if embedding is not None:
+            set_parts.append("embedding = CAST(:embedding AS vector)")
+            set_parts.append("embedding_model = :embedding_model")
+            params["embedding"] = _vector_literal(embedding)
+            params["embedding_model"] = embedding_model
+        set_parts.append("changed_by = :changed_by")
+        set_parts.append("updated_at = now()")
+        set_sql = ", ".join(set_parts)
+        row = (
+            await session.execute(
+                text(
+                    f"UPDATE skills SET {set_sql} "
+                    f"WHERE id = :id AND deleted_at IS NULL "
+                    f"RETURNING {_SKILL_COLUMNS}"
+                ).bindparams(**params)
+            )
+        ).mappings().first()
+        return dict(row) if row else None
+
+    async def soft_delete(self, session: AsyncSession, skill_id: str) -> bool:
+        """Soft-delete a skill (stamp ``deleted_at``). Returns ``False`` when the
+        row is unknown or was already deleted — the ``deleted_at IS NULL`` predicate
+        makes a repeat delete a no-op rather than resurrecting a timestamp.
+
+        The row stays in the table so version history and past interactions keep
+        their foreign keys; every read already filters ``deleted_at IS NULL``, and
+        ``similar_skills`` excludes it from vector search, so nothing serves it."""
+        result = await session.execute(
+            text(
+                "UPDATE skills SET deleted_at = now(), updated_at = now() "
+                "WHERE id = :id AND deleted_at IS NULL"
+            ).bindparams(id=skill_id)
+        )
+        return result.rowcount == 1
 
     async def promote_draft_to_review(self, session: AsyncSession, skill_id: str) -> bool:
         """Move a ``draft`` skill into the review queue's ``review`` state.
