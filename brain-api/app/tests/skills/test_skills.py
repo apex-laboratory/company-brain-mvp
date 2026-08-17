@@ -207,6 +207,30 @@ async def test_get_missing_is_not_found() -> None:
         _exit(patches)
 
 
+async def test_get_agent_is_published_only() -> None:
+    # An API key (agent) may only read published skills — draft/review stay off
+    # the brain surface.
+    svc, repo, _pipe, patches = _svc(skill=_skill())
+    _enter(patches)
+    try:
+        await svc.get(_auth(kind="api_key", scopes=["brain:query"]), "skl_1")
+    finally:
+        _exit(patches)
+    assert repo.get.await_args.kwargs["statuses"] == service_module.PUBLISHED_STATUSES
+
+
+async def test_get_dashboard_reads_any_status() -> None:
+    # A dashboard JWT can read any status so the edit flow can prefill a draft row.
+    svc, repo, _pipe, patches = _svc(skill=_skill(status="draft"))
+    _enter(patches)
+    try:
+        out = await svc.get(_auth(role="editor"), "skl_1")
+    finally:
+        _exit(patches)
+    assert out.status == "draft"
+    assert repo.get.await_args.kwargs["statuses"] is None
+
+
 async def test_versions_missing_skill_is_not_found() -> None:
     svc, _repo, _pipe, patches = _svc(skill=None)
     _enter(patches)
@@ -324,6 +348,13 @@ class _StubService:
 
     async def create(self, auth, req):
         return SkillOut(id="skl_new", name=req.name, version="v1", status="draft")
+
+    async def update(self, auth, skill_id, req):
+        return SkillOut(id=skill_id, name=req.name or "Refund", version="v2",
+                        status="active")
+
+    async def delete(self, auth, skill_id):
+        return None
 
     async def get(self, auth, skill_id):
         return SkillOut(id=skill_id, name="Refund", version="v1", status="active")
@@ -459,6 +490,38 @@ async def test_create_route_admin_ok(client: AsyncClient) -> None:
     assert resp.json()["data"]["status"] == "draft"
 
 
+async def test_update_route_editor_ok(client: AsyncClient) -> None:
+    _set_auth(role="editor")
+    resp = await client.patch("/api/v1/skills/skl_1", json={"name": "Renamed"})
+    assert resp.status_code == 200
+    assert resp.json()["data"]["name"] == "Renamed"
+
+
+async def test_update_route_requires_editor(client: AsyncClient) -> None:
+    _set_auth(role="viewer")  # editor required
+    resp = await client.patch("/api/v1/skills/skl_1", json={"name": "X"})
+    assert resp.status_code == 403
+
+
+async def test_update_route_rejects_unknown_key(client: AsyncClient) -> None:
+    _set_auth(role="editor")
+    resp = await client.patch("/api/v1/skills/skl_1", json={"bogus": 1})
+    assert resp.status_code == 422
+
+
+async def test_delete_route_admin_ok(client: AsyncClient) -> None:
+    _set_auth(role="admin")
+    resp = await client.delete("/api/v1/skills/skl_1")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["deleted"] is True
+
+
+async def test_delete_route_requires_admin(client: AsyncClient) -> None:
+    _set_auth(role="editor")  # admin required
+    resp = await client.delete("/api/v1/skills/skl_1")
+    assert resp.status_code == 403
+
+
 async def test_submit_route_admin_ok(client: AsyncClient) -> None:
     _set_auth(role="admin")
     resp = await client.post("/api/v1/skills/skl_1/submit", json={"note": "ready"})
@@ -570,6 +633,107 @@ async def test_create_conflict_on_duplicate_name() -> None:
                 _auth(role="admin"),
                 CreateSkillRequest(name="Dup", base_logic="x"),
             )
+    finally:
+        _exit(patches)
+
+
+# ── update / delete ──────────────────────────────────────────────────────────
+
+async def test_update_metadata_only_skips_reembed() -> None:
+    from app.modules.skills.schemas import UpdateSkillRequest
+
+    svc, repo, _pipe, patches = _svc(skill=_skill())
+    repo.update = AsyncMock(return_value=_skill(name="Renamed"))
+    _enter(patches)
+    try:
+        out = await svc.update(
+            _auth(role="editor"), "skl_1", UpdateSkillRequest(name="Renamed")
+        )
+    finally:
+        _exit(patches)
+    assert out.name == "Renamed"
+    assert repo.update.await_args.kwargs["embedding"] is None  # name edit → no re-embed
+
+
+async def test_update_logic_reembeds() -> None:
+    from app.modules.skills.schemas import UpdateSkillRequest
+
+    svc, repo, _pipe, patches = _svc(skill=_skill())
+    repo.update = AsyncMock(return_value=_skill(base_logic="refund within 60 days"))
+    _enter(patches)
+    try:
+        out = await svc.update(
+            _auth(role="editor"), "skl_1",
+            UpdateSkillRequest(base_logic="refund within 60 days"),
+        )
+    finally:
+        _exit(patches)
+    assert out.base_logic == "refund within 60 days"
+    assert repo.update.await_args.kwargs["embedding"] is not None  # logic edit → re-embed
+
+
+async def test_update_empty_body_returns_current_without_write() -> None:
+    from app.modules.skills.schemas import UpdateSkillRequest
+
+    svc, repo, _pipe, patches = _svc(skill=_skill())
+    repo.update = AsyncMock()
+    _enter(patches)
+    try:
+        out = await svc.update(_auth(role="editor"), "skl_1", UpdateSkillRequest())
+    finally:
+        _exit(patches)
+    assert out.id == "skl_1"
+    repo.update.assert_not_awaited()  # empty edit is a no-op
+
+
+async def test_update_missing_is_not_found() -> None:
+    from app.modules.skills.schemas import UpdateSkillRequest
+
+    svc, _repo, _pipe, patches = _svc(skill=None)  # get_any 404s
+    _enter(patches)
+    try:
+        with pytest.raises(NotFoundError):
+            await svc.update(_auth(role="editor"), "skl_x", UpdateSkillRequest(name="X"))
+    finally:
+        _exit(patches)
+
+
+async def test_update_conflict_on_duplicate_name() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from app.modules.skills.schemas import UpdateSkillRequest
+    from app.shared.errors.app_error import ConflictError
+
+    svc, repo, _pipe, patches = _svc(skill=_skill())
+    repo.update = AsyncMock(side_effect=IntegrityError("dup", {}, Exception()))
+    _enter(patches)
+    try:
+        with pytest.raises(ConflictError):
+            await svc.update(
+                _auth(role="editor"), "skl_1", UpdateSkillRequest(name="Taken")
+            )
+    finally:
+        _exit(patches)
+
+
+async def test_delete_soft_deletes() -> None:
+    svc, repo, _pipe, patches = _svc()
+    repo.soft_delete = AsyncMock(return_value=True)
+    _enter(patches)
+    try:
+        await svc.delete(_auth(role="admin"), "skl_1")
+    finally:
+        _exit(patches)
+    repo.soft_delete.assert_awaited_once()
+
+
+async def test_delete_missing_is_not_found() -> None:
+    svc, repo, _pipe, patches = _svc()
+    repo.soft_delete = AsyncMock(return_value=False)
+    _enter(patches)
+    try:
+        with pytest.raises(NotFoundError):
+            await svc.delete(_auth(role="admin"), "skl_x")
     finally:
         _exit(patches)
 
