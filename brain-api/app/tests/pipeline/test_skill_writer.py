@@ -151,11 +151,14 @@ def _match(version: str = "v1") -> SimilarSkill:
 async def test_duplicate_appends_source_and_stops() -> None:
     repo = _repo()
     repo.append_source_id = AsyncMock()
-    result = await write_duplicate(MagicMock(), repo, matched=_match(), event_id="evt_1")
+    result = await write_duplicate(
+        MagicMock(), repo, provider="slack", matched=_match(), event_id="evt_1"
+    )
     assert result.outcome == "duplicate"
     assert result.skill_id == "skl_x"
     append = repo.append_source_id.await_args
     assert append.args[1:] == ("skl_x", "evt_1")
+    assert append.kwargs == {"provider": "slack"}
     repo.insert_skill.assert_not_awaited()
 
 

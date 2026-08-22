@@ -21,7 +21,7 @@ PUBLISHED_STATUSES: tuple[str, ...] = ("active", "stable")
 
 _SKILL_COLUMNS = (
     "id, name, version, status, trigger, base_logic, exceptions_block, actions, "
-    "source_authority, confidence, created_at, updated_at"
+    "source_authority, source_providers, confidence, created_at, updated_at"
 )
 
 # Columns for the browse-the-registry list (no embedding, no full actions body).
@@ -79,8 +79,15 @@ class SkillsRepository:
         by_id = {r["id"]: dict(r) for r in rows}
         return [by_id[i] for i in skill_ids if i in by_id]
 
-    async def list_versions(self, session: AsyncSession, skill_id: str) -> list[dict]:
-        """Version history for a skill, oldest first."""
+    async def list_versions(
+        self, session: AsyncSession, skill_id: str, *, limit: int = 5
+    ) -> list[dict]:
+        """The ``limit`` most recent versions for a skill, oldest first.
+
+        A skill edited often can accumulate a long tail of versions nobody
+        reviews again; the dashboard only ever shows the recent history, so
+        capping here keeps the row and the payload small instead of trimming
+        client-side after fetching everything."""
         rows = (
             await session.execute(
                 text(
@@ -89,12 +96,13 @@ class SkillsRepository:
                            change_type, created_at
                       FROM skill_versions
                      WHERE skill_id = :id
-                     ORDER BY created_at ASC
+                     ORDER BY created_at DESC
+                     LIMIT :limit
                     """
-                ).bindparams(id=skill_id)
+                ).bindparams(id=skill_id, limit=limit)
             )
         ).mappings().all()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in reversed(rows)]
 
     async def list_published(
         self, session: AsyncSession, statuses: tuple[str, ...] = PUBLISHED_STATUSES

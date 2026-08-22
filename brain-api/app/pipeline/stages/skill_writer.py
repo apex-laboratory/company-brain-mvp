@@ -170,12 +170,13 @@ async def write_duplicate(
     session: AsyncSession,
     repo: PipelineRepository,
     *,
+    provider: str,
     matched: SimilarSkill,
     event_id: str,
 ) -> PipelineResult:
     """DUPLICATE: no new skill — just record this event as another source of the
     matched skill and stop."""
-    await repo.append_source_id(session, matched.id, event_id)
+    await repo.append_source_id(session, matched.id, event_id, provider=provider)
     return PipelineResult(outcome="duplicate", skill_id=matched.id)
 
 

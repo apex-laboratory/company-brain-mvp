@@ -227,7 +227,9 @@ async def _route(
     if boundary.classification == "DUPLICATE" and matched is not None:
         return await _commit(
             event, ledger,
-            lambda s: skill_writer.write_duplicate(s, _repo, matched=matched, event_id=event.id),
+            lambda s: skill_writer.write_duplicate(
+                s, _repo, provider=event.provider, matched=matched, event_id=event.id
+            ),
             extra_meta=extra_meta,
         )
 

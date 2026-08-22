@@ -88,7 +88,8 @@ class SkillsService:
             SkillSearchResult(
                 id=h.id, name=h.name, version=h.version, status=h.status,
                 base_logic=h.base_logic, exceptions_block=h.exceptions_block,
-                source_authority=h.source_authority, similarity=round(h.similarity, 4),
+                source_authority=h.source_authority, source_providers=h.source_providers,
+                similarity=round(h.similarity, 4),
                 calls30d=h.calls_30d,
                 call_series=_densify_series(series.get(h.id, {})),
                 updated_at=h.updated_at,

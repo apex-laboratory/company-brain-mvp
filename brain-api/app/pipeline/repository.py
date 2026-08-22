@@ -9,7 +9,7 @@ finalizes in a second transaction.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import text
@@ -69,6 +69,7 @@ class SimilarSkill:
     # doesn't have to re-SELECT the rows it just retrieved.
     calls_30d: int = 0
     updated_at: object | None = None
+    source_providers: list = field(default_factory=list)
 
 
 def _vector_literal(embedding: list[float]) -> str:
@@ -161,7 +162,7 @@ class PipelineRepository:
                 text(
                     """
                     SELECT id, name, version, base_logic, exceptions_block,
-                           source_authority, status, calls_30d, updated_at,
+                           source_authority, source_providers, status, calls_30d, updated_at,
                            1 - (embedding <=> CAST(:vec AS vector)) AS similarity
                       FROM skills
                      WHERE workspace_id = :ws
@@ -191,23 +192,55 @@ class PipelineRepository:
                 status=r["status"],
                 calls_30d=int(r["calls_30d"] or 0),
                 updated_at=r["updated_at"],
+                source_providers=list(r["source_providers"] or []),
             )
             for r in rows
         ]
 
     async def append_source_id(
-        self, session: AsyncSession, skill_id: str, event_id: str
+        self, session: AsyncSession, skill_id: str, event_id: str, *, provider: str
     ) -> None:
-        """Record that ``event_id`` also supports ``skill_id`` (DUPLICATE path)."""
+        """Record that ``event_id`` also supports ``skill_id`` (DUPLICATE path).
+
+        Also folds ``provider`` into ``source_providers`` (deduped, order-preserving)
+        so the FE's source-lineage column reflects every provider that has actually
+        contributed evidence, not just the one present at creation."""
         await session.execute(
             text(
                 """
                 UPDATE skills
                    SET source_ids = source_ids || CAST(:eid AS jsonb),
+                       source_providers = CASE
+                           WHEN :provider = ANY(source_providers) THEN source_providers
+                           ELSE array_append(source_providers, :provider)
+                       END,
                        updated_at = now()
                  WHERE id = :skill_id
                 """
-            ).bindparams(skill_id=skill_id, eid=json.dumps([event_id]))
+            ).bindparams(skill_id=skill_id, eid=json.dumps([event_id]), provider=provider)
+        )
+
+    async def append_source_provider(
+        self, session: AsyncSession, skill_id: str, *, provider: str
+    ) -> None:
+        """Fold ``provider`` into ``source_providers`` (deduped, order-preserving).
+
+        For the UPDATE/EXCEPTION/contradiction approval paths, which apply on
+        review approve rather than at match time and have no new event id to
+        record against ``source_ids`` (the triggering event isn't threaded through
+        the review payload) — see ``reviews.service._apply_approval``."""
+        await session.execute(
+            text(
+                """
+                UPDATE skills
+                   SET source_providers = CASE
+                           WHEN :provider = ANY(source_providers) THEN source_providers
+                           ELSE array_append(source_providers, :provider)
+                       END,
+                       updated_at = now()
+                 WHERE id = :skill_id
+                """
+            ).bindparams(skill_id=skill_id, provider=provider)
         )
 
     async def update_skill_logic(
@@ -453,6 +486,24 @@ class PipelineRepository:
             )
         )
         return version_id
+
+    async def has_versions(self, session: AsyncSession, skill_id: str) -> bool:
+        """Whether ``skill_id`` has any ``skill_versions`` row yet.
+
+        A skill routed straight to ``draft`` at creation (confidence below the
+        review floor) never gets a v1 row — that only happens when a
+        ``new_decision`` review is approved (``ReviewsService._apply_approval``).
+        If a later boundary match (UPDATE/EXCEPTION/contradiction) is approved
+        before that ever happens, its version-history log would otherwise start
+        at v2 with no v1 baseline. Callers use this to backfill one first."""
+        row = (
+            await session.execute(
+                text("SELECT 1 FROM skill_versions WHERE skill_id = :id LIMIT 1").bindparams(
+                    id=skill_id
+                )
+            )
+        ).first()
+        return row is not None
 
     # ── reviews ───────────────────────────────────────────────────────────────
 

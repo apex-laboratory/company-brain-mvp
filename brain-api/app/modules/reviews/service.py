@@ -469,6 +469,7 @@ class ReviewsService:
         elif kind in ("policy_change", "contradiction"):
             # Apply the proposed base_logic (after_text) as a new version + re-embed.
             # The proposed exceptions/actions travel with it — see _superseded_clauses.
+            await self._ensure_v1_baseline(session, ws, skill)
             new_logic = review["after_text"] or skill["base_logic"]
             new_exceptions, new_actions = _superseded_clauses(review)
             new_version = next_version(skill["version"])
@@ -483,6 +484,10 @@ class ReviewsService:
                 confidence=_HUMAN_CONFIDENCE, embedding=embedding,
                 embedding_model=embedding_model, status="active",
             )
+            if review["source_provider"]:
+                await self._skills.append_source_provider(
+                    session, skill_id, provider=review["source_provider"]
+                )
 
         elif kind == "exception":
             proposed_skill = (review.get("payload") or {}).get("proposed_skill") or {}
@@ -498,6 +503,7 @@ class ReviewsService:
                     }
                 ]
             new_exceptions = (skill["exceptions_block"] or []) + proposed
+            await self._ensure_v1_baseline(session, ws, skill)
             new_version = next_version(skill["version"])
             await self._skills.insert_skill_version(
                 session, workspace_id=ws, skill_id=skill_id, version=new_version,
@@ -508,3 +514,26 @@ class ReviewsService:
                 session, skill_id, exceptions_block=new_exceptions, version=new_version,
                 confidence=_HUMAN_CONFIDENCE,
             )
+            if review["source_provider"]:
+                await self._skills.append_source_provider(
+                    session, skill_id, provider=review["source_provider"]
+                )
+
+    async def _ensure_v1_baseline(self, session, workspace_id: str, skill: dict) -> None:
+        """Backfill a v1 ``skill_versions`` row if this skill has none yet.
+
+        A skill routed straight to ``draft`` at creation (confidence below the
+        review floor) never got a ``new_decision`` approval, so it has no version
+        history at all. If the first review ever approved against it is a
+        boundary match (UPDATE/EXCEPTION/contradiction) rather than a
+        ``new_decision``, writing straight to v2+ would leave the history missing
+        its baseline. ``skill`` is the pre-mutation row, so its fields are exactly
+        what v1 looked like."""
+        if await self._skills.has_versions(session, skill["id"]):
+            return
+        await self._skills.insert_skill_version(
+            session, workspace_id=workspace_id, skill_id=skill["id"],
+            version=skill["version"] or "v1", base_logic=skill["base_logic"],
+            exceptions_block=skill["exceptions_block"] or [],
+            confidence=skill["confidence"], change_type="create",
+        )

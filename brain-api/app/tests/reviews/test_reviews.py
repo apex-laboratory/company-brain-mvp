@@ -80,6 +80,8 @@ def _svc(review: dict | None, skill: dict | None = None):
         update_skill_logic=AsyncMock(),
         apply_exception=AsyncMock(),
         set_skill_status=AsyncMock(),
+        append_source_provider=AsyncMock(),
+        has_versions=AsyncMock(return_value=True),
     )
     svc = ReviewsService(repository=repo, skills=skills)
     session = MagicMock(commit=AsyncMock())
@@ -147,6 +149,41 @@ async def test_approve_policy_change_updates_logic_and_reembeds() -> None:
     assert upd.kwargs["version"] == "v2"
     assert upd.kwargs["confidence"] == 1.0  # human-confirmed
     assert len(upd.kwargs["embedding"]) == 1536  # re-embedded on logic change
+
+
+async def test_approve_policy_change_backfills_missing_v1() -> None:
+    """A skill that went straight to draft (never approved as a new_decision) has
+    no version-history row yet — approving its first boundary match must not
+    write straight to v2 and leave v1 missing (PROD-observed: history showing
+    only 'v2')."""
+    review = _review(kind="policy_change", after_text="refund within 45 days")
+    svc, _repo, skills, patches = _svc(review, _skill(status="active"))
+    skills.has_versions = AsyncMock(return_value=False)
+    _enter(patches)
+    try:
+        await svc.approve(_auth(), "rev_1", None)
+    finally:
+        _exit(patches)
+    calls = skills.insert_skill_version.await_args_list
+    assert len(calls) == 2
+    baseline, updated = calls[0].kwargs, calls[1].kwargs
+    assert baseline["version"] == "v1"
+    assert baseline["base_logic"] == "refund within 30 days"  # pre-mutation snapshot
+    assert baseline["confidence"] == 0.8  # the skill's own confidence, not human-confirmed
+    assert baseline["change_type"] == "create"
+    assert updated["version"] == "v2"
+    assert updated["base_logic"] == "refund within 45 days"
+
+
+async def test_approve_policy_change_skips_backfill_when_v1_exists() -> None:
+    review = _review(kind="policy_change", after_text="refund within 45 days")
+    svc, _repo, skills, patches = _svc(review, _skill(status="active"))
+    _enter(patches)
+    try:
+        await svc.approve(_auth(), "rev_1", None)
+    finally:
+        _exit(patches)
+    assert skills.insert_skill_version.await_count == 1
 
 
 async def test_approve_exception_appends_carveout() -> None:

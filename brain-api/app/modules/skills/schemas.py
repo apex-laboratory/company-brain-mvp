@@ -29,6 +29,7 @@ class SkillSearchResult(CamelModel):
     base_logic: str
     exceptions_block: list = Field(default_factory=list)
     source_authority: str | None = None
+    source_providers: list[str] = Field(default_factory=list)
     similarity: float
     calls30d: int = Field(0, alias="calls30d")  # to_camel would mangle to calls30D
     call_series: list[int] = Field(default_factory=list)
@@ -78,6 +79,7 @@ class SkillOut(CamelModel):
     exceptions_block: list = Field(default_factory=list)
     actions: list = Field(default_factory=list)
     source_authority: str | None = None
+    source_providers: list[str] = Field(default_factory=list)
     confidence: float | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
