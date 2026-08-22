@@ -15,6 +15,7 @@ mode) against the stored row after decoding.
 from __future__ import annotations
 
 from datetime import datetime
+from secrets import token_urlsafe
 from typing import Any
 
 from jose import JWTError, jwt
@@ -47,6 +48,10 @@ def encode_state(
         "redirect_uri": redirect_uri,
         "mode": mode,
         "exp": int(expires_at.timestamp()),
+        # JWT signing is deterministic: without a per-request identifier, two
+        # otherwise identical starts in one second serialize to the same token
+        # (``exp`` is second-precision) and collide with oauth_states.state_hash.
+        "jti": token_urlsafe(32),
         **extra_claims,
     }
     token: str = jwt.encode(payload, settings.jwt_access_secret, algorithm=_ALGORITHM)

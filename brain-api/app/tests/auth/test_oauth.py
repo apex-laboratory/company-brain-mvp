@@ -255,6 +255,27 @@ async def test_start_google_returns_authorization_url_and_state(
 
 
 @pytest.mark.asyncio
+async def test_rapid_oauth_starts_create_distinct_single_use_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated starts must not collide on the unique state-hash constraint."""
+    repo = FakeRepo()
+    service = AuthService(repository=repo)
+    monkeypatch.setattr("app.modules.auth.service.get_session", _fake_session_ctx)
+
+    first = await service.start_oauth(
+        provider="google", mode="signin", user_id=None, workspace_id=None
+    )
+    second = await service.start_oauth(
+        provider="google", mode="signin", user_id=None, workspace_id=None
+    )
+
+    assert first.state != second.state
+    assert len(repo.state_rows) == 2
+    assert repo.state_rows[0].state_hash != repo.state_rows[1].state_hash
+
+
+@pytest.mark.asyncio
 async def test_start_github_returns_authorization_url_and_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
