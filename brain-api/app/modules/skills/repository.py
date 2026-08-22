@@ -92,12 +92,7 @@ class SkillsRepository:
     async def list_versions(
         self, session: AsyncSession, skill_id: str, *, limit: int = 5
     ) -> list[dict]:
-        """The ``limit`` most recent versions for a skill, oldest first.
-
-        A skill edited often can accumulate a long tail of versions nobody
-        reviews again; the dashboard only ever shows the recent history, so
-        capping here keeps the row and the payload small instead of trimming
-        client-side after fetching everything."""
+        """The ``limit`` most recent versions for a skill, oldest first."""
         rows = (
             await session.execute(
                 text(

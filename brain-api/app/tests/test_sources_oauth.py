@@ -13,7 +13,7 @@ import pytest
 import app.modules.sources.service as svc
 from app.config.settings import settings
 from app.integrations.base import OAuthTokens
-from app.modules.sources.repository import ResolvedState
+from app.modules.sources.repository import PeekedState, ResolvedState
 from app.modules.sources.service import SourcesService
 from app.shared.errors.app_error import (
     ConfigurationError,
@@ -120,8 +120,9 @@ async def test_callback_stored_subdomain_wins_over_query_installation_id() -> No
 class _ReturnToRepo:
     """Repo whose consumed state carries a stored (allowlisted) return_to."""
 
-    def __init__(self, return_to: str | None) -> None:
+    def __init__(self, return_to: str | None, frontend_origin: str | None = None) -> None:
         self._return_to = return_to
+        self._frontend_origin = frontend_origin
 
     async def consume_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
         return ResolvedState(
@@ -130,6 +131,7 @@ class _ReturnToRepo:
             workspace_id="wrk_1",
             redirect_uri="https://cb/callback",
             return_to=self._return_to,
+            frontend_origin=self._frontend_origin,
         )
 
     async def upsert_connection(self, *args, **kwargs):  # noqa: ANN002, ANN003
@@ -142,10 +144,13 @@ def _stub_sweeps() -> MagicMock:
 
 
 async def _run_success_callback(
-    return_to: str | None, sweeps: MagicMock | None = None
+    return_to: str | None,
+    sweeps: MagicMock | None = None,
+    *,
+    frontend_origin: str | None = None,
 ) -> str:
     service = SourcesService(
-        repository=_ReturnToRepo(return_to),  # type: ignore[arg-type]
+        repository=_ReturnToRepo(return_to, frontend_origin),  # type: ignore[arg-type]
         sweeps_service=sweeps or _stub_sweeps(),
     )
     fake = MagicMock()
@@ -166,6 +171,16 @@ async def _run_success_callback(
 async def test_callback_success_redirects_to_stored_return_to() -> None:
     """The state-bound return_to picks the landing page (onboarding connect step)."""
     redirect = await _run_success_callback("/onboarding")
+    assert redirect == f"{settings.frontend_url}/onboarding?connected=notion"
+
+
+async def test_callback_success_redirects_to_stored_frontend_origin() -> None:
+    redirect = await _run_success_callback("/onboarding", frontend_origin="http://localhost:5173")
+    assert redirect == "http://localhost:5173/onboarding?connected=notion"
+
+
+async def test_callback_success_without_frontend_origin_uses_default() -> None:
+    redirect = await _run_success_callback("/onboarding", frontend_origin=None)
     assert redirect == f"{settings.frontend_url}/onboarding?connected=notion"
 
 
@@ -211,14 +226,17 @@ async def test_failed_auto_import_still_completes_the_connect() -> None:
 class _NeverConsumeRepo:
     """Repo that fails the test if the callback tries to consume the state."""
 
-    def __init__(self, return_to: str | None = None) -> None:
+    def __init__(
+        self, return_to: str | None = None, frontend_origin: str | None = None
+    ) -> None:
         self._return_to = return_to
+        self._frontend_origin = frontend_origin
 
     async def consume_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
         raise AssertionError("state must not be consumed on a consent-cancel callback")
 
     async def peek_oauth_state(self, *args, **kwargs):  # noqa: ANN002, ANN003
-        return self._return_to
+        return PeekedState(return_to=self._return_to, frontend_origin=self._frontend_origin)
 
 
 async def test_callback_consent_cancel_redirects_without_burning_state() -> None:
@@ -246,6 +264,18 @@ async def test_callback_consent_cancel_honors_stored_return_to() -> None:
             "notion", state=_valid_state(), code=None, error="access_denied"
         )
     assert redirect == f"{settings.frontend_url}/onboarding?error=notion"
+
+
+async def test_callback_consent_cancel_honors_stored_frontend_origin() -> None:
+    service = SourcesService(  # type: ignore[arg-type]
+        repository=_NeverConsumeRepo(frontend_origin="http://localhost:5173")
+    )
+    session = MagicMock(commit=AsyncMock())
+    with patch.object(svc, "get_session", return_value=_AsyncCtx(session)):
+        redirect = await service.handle_callback(
+            "notion", state=_valid_state(), code=None, error="access_denied"
+        )
+    assert redirect == "http://localhost:5173/settings/sources?error=notion"
 
 
 class _NoDbRepo:
@@ -294,7 +324,14 @@ class _CaptureStateRepo:
         self.created = kwargs
 
 
-async def _run_start_authorization(monkeypatch, return_to: str | None) -> dict:
+async def _run_start_authorization(
+    monkeypatch,
+    return_to: str | None,
+    *,
+    origin: str | None = None,
+    frontend_url: str = "http://localhost:3000",
+    frontend_urls: list[str] | None = None,
+) -> dict:
     """Drive start_authorization's happy path with a stub settings + fake repo."""
     from types import SimpleNamespace
 
@@ -307,6 +344,8 @@ async def _run_start_authorization(monkeypatch, return_to: str | None) -> dict:
             jwt_access_secret=settings.jwt_access_secret,
             oauth_redirect_base_url="https://api.example.com",
             oauth_state_ttl_seconds=600,
+            frontend_url=frontend_url,
+            frontend_urls=frontend_urls or [],
         ),
     )
     repo = _CaptureStateRepo()
@@ -318,7 +357,7 @@ async def _run_start_authorization(monkeypatch, return_to: str | None) -> dict:
     with patch.object(svc, "get_integration", return_value=fake), patch.object(
         svc, "get_session", return_value=_AsyncCtx(session)
     ):
-        await service.start_authorization(auth, "notion", return_to=return_to)
+        await service.start_authorization(auth, "notion", return_to=return_to, origin=origin)
     assert repo.created is not None
     return repo.created
 
@@ -347,6 +386,27 @@ async def test_start_authorization_drops_non_allowlisted_return_to(
     callback falls back to the default — never an external or unexpected destination."""
     created = await _run_start_authorization(monkeypatch, evil)
     assert created["return_to"] is None
+
+
+async def test_start_authorization_persists_allowlisted_origin(monkeypatch) -> None:
+    created = await _run_start_authorization(
+        monkeypatch, None, origin="http://localhost:5173",
+        frontend_urls=["http://localhost:5173", "https://app.example.com"],
+    )
+    assert created["frontend_origin"] == "http://localhost:5173"
+
+
+async def test_start_authorization_drops_unlisted_origin(monkeypatch) -> None:
+    created = await _run_start_authorization(monkeypatch, None, origin="https://evil.com")
+    assert created["frontend_origin"] is None
+
+
+async def test_start_authorization_matches_default_frontend_url(monkeypatch) -> None:
+    """frontend_url is always an implicit allowlist member, no FRONTEND_URLS needed."""
+    created = await _run_start_authorization(
+        monkeypatch, None, origin="http://localhost:3000", frontend_url="http://localhost:3000",
+    )
+    assert created["frontend_origin"] == "http://localhost:3000"
 
 
 def test_every_integration_accepts_the_config_kwarg() -> None:

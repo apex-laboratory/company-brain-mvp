@@ -1084,6 +1084,8 @@ Successful agent runs are treated as a source like Slack or Notion: same relevan
 
 Adapters ship for: **Claude Agent SDK / Claude Code** transcripts, OpenAI-style tool-call message lists, LangSmith runs, and raw OTel spans. Custom harnesses post the envelope directly.
 
+> **Step-type addendum (v1.4.1, implemented).** The `type` enum is `tool_call | file_read | **file_write** | shell | assistant_message`. `file_write` was added during implementation: folding writes into `tool_call` erases the read/write distinction, and "read the policy, then edit the config" is a different procedure from "read the policy, then read the config" — precisely the signal Feature 31 compresses on. The client-side producer for this envelope is specced in `docs/AGENT_HOOK_SHIM.md`; `PostToolUse` is the hook that carries the trajectory, and it is the one every competitor's capture layer skips.
+
 Ingest does four things before the row is written, in order:
 
 1. **Redact** — secrets, tokens, auth headers, env values, and connection strings are stripped by pattern; step args and results over 2 KB are replaced by digests. Redaction failure marks the run `ineligible_reason = redaction_failed` and drops the trace body; it never stores the payload "just in case".

@@ -200,11 +200,8 @@ class PipelineRepository:
     async def append_source_id(
         self, session: AsyncSession, skill_id: str, event_id: str, *, provider: str
     ) -> None:
-        """Record that ``event_id`` also supports ``skill_id`` (DUPLICATE path).
-
-        Also folds ``provider`` into ``source_providers`` (deduped, order-preserving)
-        so the FE's source-lineage column reflects every provider that has actually
-        contributed evidence, not just the one present at creation."""
+        """Record ``event_id`` as another source of ``skill_id`` (DUPLICATE path),
+        folding ``provider`` into ``source_providers`` (deduped)."""
         await session.execute(
             text(
                 """
@@ -223,12 +220,8 @@ class PipelineRepository:
     async def append_source_provider(
         self, session: AsyncSession, skill_id: str, *, provider: str
     ) -> None:
-        """Fold ``provider`` into ``source_providers`` (deduped, order-preserving).
-
-        For the UPDATE/EXCEPTION/contradiction approval paths, which apply on
-        review approve rather than at match time and have no new event id to
-        record against ``source_ids`` (the triggering event isn't threaded through
-        the review payload) — see ``reviews.service._apply_approval``."""
+        """Fold ``provider`` into ``source_providers`` (deduped). Used by the
+        UPDATE/EXCEPTION/contradiction approval paths — see ``_apply_approval``."""
         await session.execute(
             text(
                 """
@@ -488,14 +481,8 @@ class PipelineRepository:
         return version_id
 
     async def has_versions(self, session: AsyncSession, skill_id: str) -> bool:
-        """Whether ``skill_id`` has any ``skill_versions`` row yet.
-
-        A skill routed straight to ``draft`` at creation (confidence below the
-        review floor) never gets a v1 row — that only happens when a
-        ``new_decision`` review is approved (``ReviewsService._apply_approval``).
-        If a later boundary match (UPDATE/EXCEPTION/contradiction) is approved
-        before that ever happens, its version-history log would otherwise start
-        at v2 with no v1 baseline. Callers use this to backfill one first."""
+        """Whether ``skill_id`` has any ``skill_versions`` row yet — a ``draft``
+        skill has none until its first approval; callers backfill v1 if not."""
         row = (
             await session.execute(
                 text("SELECT 1 FROM skill_versions WHERE skill_id = :id LIMIT 1").bindparams(

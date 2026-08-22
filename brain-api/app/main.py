@@ -23,6 +23,7 @@ from app.modules.auth.router import router as auth_router
 from app.modules.brain.router import router as brain_router
 from app.modules.dashboard.router import router as dashboard_router
 from app.modules.decisions.router import router as decisions_router
+from app.modules.runs.router import router as runs_router
 from app.modules.members.router import router as members_router
 from app.modules.reviews.router import router as reviews_router
 from app.modules.skills.router import interactions_router
@@ -83,6 +84,7 @@ app.include_router(skills_router, prefix="/api/v1")
 app.include_router(interactions_router, prefix="/api/v1")
 app.include_router(brain_router, prefix="/api/v1")
 app.include_router(decisions_router, prefix="/api/v1")
+app.include_router(runs_router, prefix="/api/v1")
 
 
 @app.get("/health")

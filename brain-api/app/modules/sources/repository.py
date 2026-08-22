@@ -27,6 +27,13 @@ class ResolvedState:
     redirect_uri: str
     subdomain: str | None = None
     return_to: str | None = None
+    frontend_origin: str | None = None
+
+
+@dataclass(frozen=True)
+class PeekedState:
+    return_to: str | None
+    frontend_origin: str | None
 
 
 class SourcesRepository:
@@ -45,15 +52,16 @@ class SourcesRepository:
         expires_at: datetime,
         subdomain: str | None = None,
         return_to: str | None = None,
+        frontend_origin: str | None = None,
     ) -> None:
         await session.execute(
             text(
                 """
                 INSERT INTO oauth_states
                     (user_id, workspace_id, provider, redirect_uri, state_hash,
-                     expires_at, subdomain, return_to)
+                     expires_at, subdomain, return_to, frontend_origin)
                 VALUES (:user_id, :workspace_id, :provider, :redirect_uri, :state_hash,
-                        :expires_at, :subdomain, :return_to)
+                        :expires_at, :subdomain, :return_to, :frontend_origin)
                 """
             ).bindparams(
                 user_id=user_id,
@@ -64,6 +72,7 @@ class SourcesRepository:
                 expires_at=expires_at,
                 subdomain=subdomain,
                 return_to=return_to,
+                frontend_origin=frontend_origin,
             )
         )
         await session.commit()
@@ -91,7 +100,8 @@ class SourcesRepository:
                        AND provider = :provider
                        AND consumed_at IS NULL
                        AND expires_at > :now
-                    RETURNING id, user_id, workspace_id, redirect_uri, subdomain, return_to
+                    RETURNING id, user_id, workspace_id, redirect_uri, subdomain, return_to,
+                              frontend_origin
                     """
                 ).bindparams(state_hash=state_hash, provider=provider, now=now)
             )
@@ -106,6 +116,7 @@ class SourcesRepository:
             redirect_uri=row.redirect_uri,
             subdomain=row.subdomain,
             return_to=row.return_to,
+            frontend_origin=row.frontend_origin,
         )
 
     async def peek_oauth_state(
@@ -115,8 +126,8 @@ class SourcesRepository:
         state_hash: bytes,
         provider: str,
         now: datetime,
-    ) -> str | None:
-        """Read a live state's ``return_to`` without consuming it.
+    ) -> PeekedState | None:
+        """Read a live state's ``return_to``/``frontend_origin`` without consuming it.
 
         Same predicate as ``consume_oauth_state`` but read-only: the decline leg of
         the callback needs the stored destination while leaving the single-use state
@@ -126,7 +137,7 @@ class SourcesRepository:
             await session.execute(
                 text(
                     """
-                    SELECT return_to
+                    SELECT return_to, frontend_origin
                       FROM oauth_states
                      WHERE state_hash = :state_hash
                        AND provider = :provider
@@ -136,7 +147,9 @@ class SourcesRepository:
                 ).bindparams(state_hash=state_hash, provider=provider, now=now)
             )
         ).first()
-        return row.return_to if row else None
+        if row is None:
+            return None
+        return PeekedState(return_to=row.return_to, frontend_origin=row.frontend_origin)
 
     # ── source_connections (tenant, admin-only RLS) ──────────────────────────────
     async def upsert_connection(

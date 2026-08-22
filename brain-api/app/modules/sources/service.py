@@ -77,6 +77,12 @@ def _resolve_return_to(return_to: str | None) -> str | None:
     return return_to if return_to in _RETURN_TO_ALLOWLIST else None
 
 
+def _match_frontend_origin(origin: str | None) -> str | None:
+    """Origin header vs. the FRONTEND_URLS allowlist; None degrades to the default."""
+    allowed = settings.frontend_urls or [settings.frontend_url]
+    return origin if origin in allowed else None
+
+
 def _validate_subdomain(provider: str, subdomain: str | None) -> str | None:
     """Validate + normalize the subdomain for subdomain-scoped providers.
 
@@ -183,6 +189,7 @@ class SourcesService:
         provider: str,
         subdomain: str | None = None,
         return_to: str | None = None,
+        origin: str | None = None,
     ) -> AuthorizeStartOut:
         workspace_id, _ = _require_workspace(auth)
         self._require_known(provider)
@@ -197,6 +204,7 @@ class SourcesService:
         # Bound to the state row (never the provider redirect_uri, which must stay
         # byte-identical to what's registered with each provider).
         return_to = _resolve_return_to(return_to)
+        frontend_origin = _match_frontend_origin(origin)
 
         nonce = secrets.token_urlsafe(32)
         state = f"{nonce}.{hmac_sign(nonce, settings.jwt_access_secret)}"
@@ -214,6 +222,7 @@ class SourcesService:
                 expires_at=expires_at,
                 subdomain=subdomain,
                 return_to=return_to,
+                frontend_origin=frontend_origin,
             )
 
         return AuthorizeStartOut(
@@ -246,17 +255,22 @@ class SourcesService:
         # must land back on onboarding), via a read-only peek gated on the stateless
         # signature check: a forged state gets the default without touching the DB.
         if error:
-            return_to = None
+            peeked = None
             nonce, _, signature = state.partition(".")
             if signature and hmac_verify(nonce, signature, settings.jwt_access_secret):
                 async with get_session() as session:
-                    return_to = await self._repo.peek_oauth_state(
+                    peeked = await self._repo.peek_oauth_state(
                         session,
                         state_hash=sha256_hash(state),
                         provider=provider,
                         now=datetime.now(UTC),
                     )
-            return f"{settings.frontend_url}{return_to or _DEFAULT_RETURN_TO}?error={provider}"
+            return_to = peeked.return_to if peeked else None
+            frontend_origin = peeked.frontend_origin if peeked else None
+            return (
+                f"{frontend_origin or settings.frontend_url}"
+                f"{return_to or _DEFAULT_RETURN_TO}?error={provider}"
+            )
 
         # 1. Stateless signature check before any DB work.
         nonce, _, signature = state.partition(".")
@@ -331,8 +345,8 @@ class SourcesService:
             await enqueue("watch_register", resolved.workspace_id, connection_id)
 
         return (
-            f"{settings.frontend_url}{resolved.return_to or _DEFAULT_RETURN_TO}"
-            f"?connected={provider}"
+            f"{resolved.frontend_origin or settings.frontend_url}"
+            f"{resolved.return_to or _DEFAULT_RETURN_TO}?connected={provider}"
         )
 
     # ── connections ──────────────────────────────────────────────────────────────

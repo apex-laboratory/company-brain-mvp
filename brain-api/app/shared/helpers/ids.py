@@ -28,6 +28,8 @@ PREFIX_MAP: dict[str, str] = {
     "request": "req",
     "refresh_token": "rt",
     "oauth_state": "st",
+    "agent_run": "run",
+    "run_cluster": "clu",
 }
 
 

@@ -15,7 +15,12 @@ from app.shared.schemas import CamelModel as _CamelModel
 
 # Allowed scopes for a workspace API key (API_DOCUMENTATION.md §Settings And API
 # Keys). ``require_scope`` enforces these per-route on the agent/MCP surface.
-ApiKeyScope = Literal["brain:query", "skills:invoke", "sources:read", "decisions:read"]
+# ``runs:write`` is write-only by design: a credential that can push agent run
+# traces cannot read them back. That lets a CI harness or a teammate's hook shim
+# feed the self-improving loop without also handing it read access to the brain.
+ApiKeyScope = Literal[
+    "brain:query", "skills:invoke", "sources:read", "decisions:read", "runs:write"
+]
 ALLOWED_SCOPES: frozenset[str] = frozenset(get_args(ApiKeyScope))
 
 
@@ -27,7 +32,7 @@ class ApiKeyCreateRequest(BaseModel):
     # No ``max_length`` here: it would be checked against the *raw* list before
     # ``_dedupe`` runs, so a request with duplicate-but-valid scopes that dedupe
     # within range would be wrongly rejected. The ``ApiKeyScope`` Literal already
-    # caps the distinct values at four; dedup enforces the effective ceiling.
+    # caps the distinct values; dedup enforces the effective ceiling.
     scopes: Annotated[list[ApiKeyScope], Field(min_length=1)]
 
     @field_validator("scopes", mode="after")

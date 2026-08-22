@@ -136,27 +136,20 @@ ALLOWED_ORIGINS           # → the frontend repo's deployed origin
 FRONTEND_URL / APP_BASE_URL
 ```
 
-**`ENVIRONMENT` is easy to miss because `.env.example` ships a `development`
-default like everything else, but on `api` it isn't just a label — it decides
-the dashboard refresh-token cookie's `SameSite`/`Secure` attributes
-(`app/modules/auth/router.py`):
+**`ENVIRONMENT` matters beyond labeling**: on `api` it picks the refresh-token
+cookie's `SameSite`/`Secure` attributes (`app/modules/auth/router.py`) —
+`strict`/insecure unless `production`. FE and API are on different domains in
+any real (or local-against-hosted) deployment, so `strict` gets silently
+dropped by the browser on every cross-site request, breaking `POST
+/auth/refresh` entirely. Set `ENVIRONMENT=production` on `api` regardless of
+whether the deploy is "real" prod.
 
-```
-_REFRESH_COOKIE_SAMESITE = "none" if settings.environment == "production" else "strict"
-_REFRESH_COOKIE_SECURE   = settings.environment == "production"
-```
-
-The frontend and this API are on different registrable domains in every real
-deployment (and whenever a local FE dev server points at this hosted `api`),
-which makes every request genuinely cross-site. A `SameSite=Strict` cookie is
-silently never attached by the browser on a cross-site request — so leaving
-`ENVIRONMENT` unset here doesn't just mislabel the deployment, it makes
-`POST /auth/refresh` fail 100% of the time from any frontend origin, which
-surfaces as users randomly losing their session (most visibly right after an
-OAuth connector redirect, since that's what forces the SPA to rehydrate via
-refresh). Set `ENVIRONMENT=production` on `api` even for a staging/preview
-Koyeb deploy — the switch is about cross-site cookie transport, not about
-whether the deployment is "real" production.
+**Local FE dev against this hosted `api`**: the source-connector OAuth
+callback always lands on `FRONTEND_URL` (a single static value), so if that's
+the deployed frontend's origin, connecting a source bounces you there instead
+of back to `localhost`. Set `FRONTEND_URLS` (plural, comma-separated) to add
+origins — the callback matches the `/authorize` request's `Origin` header
+against it, e.g. `FRONTEND_URLS=http://localhost:5173,https://<deployed-fe>`.
 
 ## Notes
 

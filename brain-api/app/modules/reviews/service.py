@@ -520,15 +520,9 @@ class ReviewsService:
                 )
 
     async def _ensure_v1_baseline(self, session, workspace_id: str, skill: dict) -> None:
-        """Backfill a v1 ``skill_versions`` row if this skill has none yet.
-
-        A skill routed straight to ``draft`` at creation (confidence below the
-        review floor) never got a ``new_decision`` approval, so it has no version
-        history at all. If the first review ever approved against it is a
-        boundary match (UPDATE/EXCEPTION/contradiction) rather than a
-        ``new_decision``, writing straight to v2+ would leave the history missing
-        its baseline. ``skill`` is the pre-mutation row, so its fields are exactly
-        what v1 looked like."""
+        """Backfill a v1 ``skill_versions`` row if this skill has none yet (a
+        ``draft`` skill approved via a boundary match, never a ``new_decision``,
+        would otherwise jump straight to v2+). ``skill`` is the pre-mutation row."""
         if await self._skills.has_versions(session, skill["id"]):
             return
         await self._skills.insert_skill_version(

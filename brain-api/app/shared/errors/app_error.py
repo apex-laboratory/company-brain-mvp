@@ -50,6 +50,19 @@ class ConflictError(AppError):
         super().__init__(409, "conflict", message)
 
 
+class PayloadTooLargeError(AppError):
+    """The request body exceeds the surface's cap (413).
+
+    Distinct from ``ValidationError`` on purpose: a 422 tells a caller to fix its
+    payload's *shape*, while this tells it to send *less* — for a run push that
+    means splitting the trace at a step boundary, not rewriting it. The message
+    names the limit so the client can split correctly without reading our docs.
+    """
+
+    def __init__(self, message: str = "Request body is too large.") -> None:
+        super().__init__(413, "payload_too_large", message)
+
+
 class ConfigurationError(AppError):
     """A server-side misconfiguration (e.g. a provider's OAuth credentials are unset).
 

@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # providers. Must match a redirect registered in each provider's app config.
     oauth_redirect_base_url: str = "http://localhost:4000"
     frontend_url: str = "http://localhost:3000"
+    # Additional allowlisted frontend origins (comma-separated) the source-connector
+    # callback may redirect to — see SourcesService._match_frontend_origin.
+    frontend_urls: Annotated[list[str], NoDecode] = []
     # Login SSO (Google/GitHub) redirects the browser to this FRONTEND page, which
     # reads ?code&state and POSTs them to /auth/oauth/{provider}/callback. Must be
     # registered verbatim as the "Authorized redirect URI" in each provider's
@@ -152,6 +155,34 @@ class Settings(BaseSettings):
     # by the brain readiness gate.
     brain_chat_enabled: bool = True
 
+    # ── agent-run ingestion (Phase 7 — PRD Features 29-34) ────────────────────
+    # Caps on a single pushed trace. The step cap is validated in the request
+    # schema (422 naming the field) and the byte cap by the ASGI body guard (413):
+    # a harness that trips either gets an actionable error, not a truncated run.
+    run_max_steps: int = 400
+    run_max_body_bytes: int = 1_048_576  # 1 MB
+    # A run this short is a conversation turn, not a procedure. Below the floor the
+    # gate rejects with ``too_trivial`` rather than spending a distillation on it.
+    run_min_steps: int = 3
+    # Step args/results larger than this are stored as a digest instead of content
+    # (redaction.py). Keeps the trace bounded and matches what the retention job
+    # leaves behind, so a step's shape does not change when the body is nulled.
+    run_step_payload_max_bytes: int = 2048
+    # Cosine floor for two runs to be "the same task". Deliberately stricter than
+    # the skill-match threshold (0.70): a false merge here distils two different
+    # procedures into one wrong one, where a false match there only returns a less
+    # relevant skill. Re-tune after any embedding-model rotation.
+    run_cluster_threshold: float = 0.85
+    # Runs a cluster needs before it is worth one Sonnet distillation. One success
+    # is an anecdote (luck, a warm cache, a path that works for one customer);
+    # three converging on the same spine is evidence. This is the cost control:
+    # an agent running a task 500 times yields one distillation, not 500.
+    # ``humanConfirmed`` runs bypass it entirely.
+    run_min_runs_per_cluster: int = 3
+    # Days a raw trace body survives before the retention job NULLs it. The digest
+    # and any distilled skill outlive it.
+    run_retention_days: int = 30
+
     # source_authority.yaml (sweep processing order etc.); lives at the repo root
     # in dev. A missing file falls back to the built-in default order.
     source_authority_path: str = "../source_authority.yaml"
@@ -179,7 +210,7 @@ class Settings(BaseSettings):
             raise ValueError("must be valid hex") from exc
         return v
 
-    @field_validator("allowed_origins", "allowed_hosts", mode="before")
+    @field_validator("allowed_origins", "allowed_hosts", "frontend_urls", mode="before")
     @classmethod
     def parse_csv_list(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):

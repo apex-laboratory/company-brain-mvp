@@ -48,13 +48,15 @@ async def authorize(
 
     Subdomain-scoped providers (Zendesk) pass ``{"subdomain": "acme"}`` in the body.
     ``returnTo`` (optional, allowlisted) picks the frontend path the callback redirects
-    to — e.g. ``/onboarding`` — instead of the default sources page.
+    to — e.g. ``/onboarding`` — instead of the default sources page. The ``Origin``
+    header (allowlisted against ``FRONTEND_URLS``) picks which frontend origin it lands on.
     """
     result = await _service.start_authorization(
         auth,
         provider,
         subdomain=body.subdomain if body else None,
         return_to=body.return_to if body else None,
+        origin=request.headers.get("origin"),
     )
     return accepted(request, result.model_dump(by_alias=True))
 

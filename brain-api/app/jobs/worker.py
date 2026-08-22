@@ -13,6 +13,7 @@ from app.config.settings import settings
 from app.integrations.base import close_http_client
 from app.jobs.tasks.brain_index_backfill import brain_index_backfill
 from app.jobs.tasks.extract_event import extract_event
+from app.jobs.tasks.gate_run import gate_run
 from app.jobs.tasks.google_watch import watch_register, watch_renew
 from app.jobs.tasks.onboarding_sweep import onboarding_sweep
 from app.jobs.tasks.poll_sync import poll_pull_sources
@@ -66,6 +67,10 @@ class WorkerSettings:
         # like the sweep itself. A timeout kill resumes on retry (queued events only).
         func(sweep_extract, timeout=3600),
         query_extract,
+        # Deterministic predicates + one vector lookup — no LLM, so the default
+        # 10-minute timeout is generous. It runs on every ingested run, which is
+        # exactly why it must stay cheap (PRD Feature 30).
+        gate_run,
         # Embedding every skill version can take a while on a large workspace; give it
         # an hour. Idempotent (skips already-indexed chunks), so a retry resumes cheaply.
         func(brain_index_backfill, timeout=3600),

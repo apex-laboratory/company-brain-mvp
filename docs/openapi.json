@@ -344,7 +344,7 @@
           "sources"
         ],
         "summary": "Authorize",
-        "description": "Begin the OAuth flow: return the provider consent URL to redirect the user to.\n\nSubdomain-scoped providers (Zendesk) pass ``{\"subdomain\": \"acme\"}`` in the body.\n``returnTo`` (optional, allowlisted) picks the frontend path the callback redirects\nto \u2014 e.g. ``/onboarding`` \u2014 instead of the default sources page.",
+        "description": "Begin the OAuth flow: return the provider consent URL to redirect the user to.\n\nSubdomain-scoped providers (Zendesk) pass ``{\"subdomain\": \"acme\"}`` in the body.\n``returnTo`` (optional, allowlisted) picks the frontend path the callback redirects\nto \u2014 e.g. ``/onboarding`` \u2014 instead of the default sources page. The ``Origin``\nheader (allowlisted against ``FRONTEND_URLS``) picks which frontend origin it lands on.",
         "operationId": "authorize_api_v1_sources__provider__authorize_post",
         "security": [
           {
@@ -2863,6 +2863,51 @@
         }
       }
     },
+    "/api/v1/runs": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Ingest Run",
+        "description": "Push one agent run trace. ``202`` \u2014 gating and distillation are async.\n\nThe response is a receipt, not a verdict: whether this run becomes a procedure\ndepends on the success gate and on whether its task cluster has enough\ncorroborating runs (Feature 30), neither of which is knowable in this request.",
+        "operationId": "ingest_run_api_v1_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunIngestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/health": {
       "get": {
         "summary": "Health",
@@ -2927,7 +2972,8 @@
                 "brain:query",
                 "skills:invoke",
                 "sources:read",
-                "decisions:read"
+                "decisions:read",
+                "runs:write"
               ]
             },
             "type": "array",
@@ -3526,6 +3572,80 @@
         ],
         "title": "OnboardingPatchRequest"
       },
+      "OutcomeSignals": {
+        "properties": {
+          "humanConfirmed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Humanconfirmed"
+          },
+          "testsPassed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Testspassed"
+          },
+          "ticketResolved": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticketresolved"
+          },
+          "noOverride": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nooverride"
+          },
+          "errorFreeTail": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errorfreetail"
+          },
+          "inferred": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inferred"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "OutcomeSignals",
+        "description": "Evidence behind the reported outcome. Every field is optional and tri-state:\n``True``/``False`` are assertions, ``None`` means \"this harness cannot tell\".\n\n``human_confirmed`` is the strongest signal in the system \u2014 it bypasses the\n``min_runs_per_cluster`` wait (Feature 30) \u2014 so it must only be set when a\nperson actually said so (the shim's ``/brain-done``), never inferred."
+      },
       "OverrideRequest": {
         "properties": {
           "reason": {
@@ -3580,6 +3700,228 @@
         "type": "object",
         "title": "ResolveRequest",
         "description": "Optional reviewer note attached to an approve/reject."
+      },
+      "RunIngestRequest": {
+        "properties": {
+          "externalId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Externalid"
+          },
+          "agentName": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Agentname"
+          },
+          "task": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Task"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "success",
+              "failure",
+              "partial",
+              "ambiguous",
+              "unknown"
+            ],
+            "title": "Outcome"
+          },
+          "outcomeSignals": {
+            "$ref": "#/components/schemas/OutcomeSignals",
+            "default": {}
+          },
+          "harness": {
+            "type": "string",
+            "enum": [
+              "claude_code",
+              "agent_sdk",
+              "openai",
+              "langsmith",
+              "langfuse",
+              "otel",
+              "custom"
+            ],
+            "title": "Harness",
+            "default": "custom"
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Startedat"
+          },
+          "endedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endedat"
+          },
+          "tokensUsed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokensused"
+          },
+          "durationMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durationms"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/RunStep"
+            },
+            "type": "array",
+            "maxItems": 400,
+            "minItems": 1,
+            "title": "Steps"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "agentName",
+          "task",
+          "outcome",
+          "steps"
+        ],
+        "title": "RunIngestRequest",
+        "description": "``POST /runs`` body \u2014 one task attempt by one agent."
+      },
+      "RunStep": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Index"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tool_call",
+              "file_read",
+              "file_write",
+              "shell",
+              "assistant_message"
+            ],
+            "title": "Type"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "args": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Args"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "resultDigest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resultdigest"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error",
+              "skipped"
+            ],
+            "title": "Status",
+            "default": "ok"
+          },
+          "latencyMs": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latencyms"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "index",
+          "type"
+        ],
+        "title": "RunStep",
+        "description": "One step of a trace. ``args``/``text`` are redacted at ingest, never as-is."
       },
       "SubmitForReviewRequest": {
         "properties": {

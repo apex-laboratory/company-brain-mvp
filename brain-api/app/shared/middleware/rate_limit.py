@@ -38,6 +38,11 @@ API_KEY_CREATE_LIMIT = "5/hour"
 BRAIN_LIMIT = "120/minute"
 # Full-corpus export is heavy and dumps all organizational knowledge; cap hard.
 EXPORT_LIMIT = "10/hour"
+# Agent-run ingestion. Higher than BRAIN_LIMIT because the caller is an editor
+# hook, not a human: a busy developer closes many short runs per minute and a
+# throttled push is a *lost* run — the client discards its spool entry on any
+# terminal response. Keyed by workspace, like the rest of the agent surface.
+RUNS_INGEST_LIMIT = "300/minute"
 
 # AUTH_LIMIT / BRAIN_LIMIT expressed as raw numbers for the manual checks below
 # (used off the slowapi decorator path: the API-key auth branch and the MCP
