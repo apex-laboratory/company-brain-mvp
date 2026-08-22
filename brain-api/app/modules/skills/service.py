@@ -29,6 +29,7 @@ from app.modules.skills.schemas import (
     SkillStats,
     SkillVersionOut,
     SubmitForReviewResult,
+    UpdateSkillRequest,
 )
 from app.pipeline import cache, embedder
 from app.pipeline.repository import PipelineRepository
@@ -189,6 +190,86 @@ class SkillsService:
             await session.commit()
         return SkillOut(**skill)
 
+    async def update(
+        self, auth: AuthContext, skill_id: str, req: UpdateSkillRequest
+    ) -> SkillOut:
+        """Edit an existing skill from the dashboard (editor or admin).
+
+        Partial: only the fields present in the request are written. Editing the
+        ``trigger`` or ``base_logic`` changes what the skill *means*, so its vector
+        is recomputed — otherwise semantic search would keep matching the old rule.
+        The embedding is computed **before** the write transaction (network I/O must
+        never pin a pooled connection — the create/reviews rule) and merged with the
+        current values so a one-field edit still embeds the whole skill text.
+
+        404 when the skill is unknown or soft-deleted; a duplicate ``name`` maps to
+        409. The read cache is invalidated because a served answer may now be stale."""
+        workspace_id, role = _require_workspace(auth)
+        provided = req.model_dump(exclude_unset=True)
+        if not provided:
+            # Empty body — nothing to change. Return the current body rather than
+            # touching updated_at, so a no-op edit doesn't look like a real change.
+            return await self.get_any(auth, skill_id)
+
+        current = await self.get_any(auth, skill_id)  # 404s if missing/deleted
+
+        embedding: list[float] | None = None
+        embedding_model: str | None = None
+        if "trigger" in provided or "base_logic" in provided:
+            trigger = provided.get("trigger", current.trigger)
+            base_logic = provided.get("base_logic", current.base_logic)
+            emb, usage = await embedder.embed_text(
+                embedder.skill_embedding_text(trigger, base_logic)
+            )
+            embedding, embedding_model = emb, usage.model
+
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            try:
+                updated = await self._repo.update(
+                    session, skill_id, fields=provided, changed_by=auth.user_id,
+                    embedding=embedding, embedding_model=embedding_model,
+                )
+            except IntegrityError as exc:
+                raise ConflictError("A skill with this name already exists.") from exc
+            if updated is None:
+                raise NotFoundError("Skill")  # raced with a delete between reads
+            await session.commit()
+        await cache.invalidate_skills(workspace_id)
+        return SkillOut(**updated)
+
+    async def delete(self, auth: AuthContext, skill_id: str) -> None:
+        """Soft-delete a skill (admin-only). Idempotent-friendly: a 404 is raised
+        only when nothing matched, so the caller learns the row was already gone.
+
+        Invalidates the read cache so ``query_brain`` stops serving a now-deleted
+        skill from a warm entry."""
+        workspace_id, role = _require_workspace(auth)
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            deleted = await self._repo.soft_delete(session, skill_id)
+            if not deleted:
+                raise NotFoundError("Skill")
+            await session.commit()
+        await cache.invalidate_skills(workspace_id)
+
+    async def get_any(self, auth: AuthContext, skill_id: str) -> SkillOut:
+        """Full body of a skill in **any** status (draft/review/published).
+
+        Unlike ``get`` (agent surface, published-only) the dashboard edit/delete
+        flow must reach drafts and in-review rows too. 404s when unknown or
+        soft-deleted."""
+        workspace_id, role = _require_workspace(auth)
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, auth.user_id, role
+        ):
+            skill = await self._repo.get(session, skill_id)
+        if skill is None:
+            raise NotFoundError("Skill")
+        return SkillOut(**skill)
+
     async def submit_for_review(
         self, auth: AuthContext, skill_id: str, note: str | None
     ) -> SubmitForReviewResult:
@@ -314,12 +395,20 @@ class SkillsService:
         return interaction_id
 
     async def get(self, auth: AuthContext, skill_id: str) -> SkillOut:
-        """Full body of a published skill."""
+        """Full body of a skill.
+
+        Agents (API keys) only ever see **published** skills — a draft or
+        in-review rule isn't a promise the brain will keep, so it stays off the
+        agent surface. Dashboard users (JWT) may read any status: they already see
+        draft/review rows in the registry list, and the edit flow needs the full
+        body of exactly those rows to prefill. 404 when unknown/soft-deleted (or,
+        for an agent, when the skill isn't published)."""
         workspace_id, role = _require_workspace(auth)
+        statuses = None if auth.kind == "jwt" else PUBLISHED_STATUSES
         async with get_tenant_session() as session, run_in_tenant(
             session, workspace_id, auth.user_id, role
         ):
-            skill = await self._repo.get(session, skill_id, statuses=PUBLISHED_STATUSES)
+            skill = await self._repo.get(session, skill_id, statuses=statuses)
         if skill is None:
             raise NotFoundError("Skill")
         return SkillOut(**skill)

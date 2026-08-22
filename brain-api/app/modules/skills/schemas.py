@@ -74,6 +74,7 @@ class SkillOut(CamelModel):
     name: str
     version: str
     status: str
+    description: str | None = None
     trigger: str | None = None
     base_logic: str | None = None
     exceptions_block: list = Field(default_factory=list)
@@ -106,6 +107,21 @@ class CreateSkillRequest(CamelRequestModel):
     name: Annotated[str, Field(min_length=1, max_length=200)]
     trigger: Annotated[str | None, Field(max_length=2000)] = None
     base_logic: Annotated[str, Field(min_length=1, max_length=20_000)]
+    description: Annotated[str | None, Field(max_length=2000)] = None
+
+
+class UpdateSkillRequest(CamelRequestModel):
+    """Edit an existing skill from the dashboard (editor or admin).
+
+    Every field is optional — only the keys present in the request body are
+    written (partial update). Changing ``trigger`` or ``baseLogic`` alters the
+    rule's meaning, so the service re-embeds the skill; a metadata-only edit
+    (name/description) leaves the vector untouched. Sending an empty body is a
+    no-op that returns the skill unchanged."""
+
+    name: Annotated[str | None, Field(min_length=1, max_length=200)] = None
+    trigger: Annotated[str | None, Field(max_length=2000)] = None
+    base_logic: Annotated[str | None, Field(min_length=1, max_length=20_000)] = None
     description: Annotated[str | None, Field(max_length=2000)] = None
 
 
