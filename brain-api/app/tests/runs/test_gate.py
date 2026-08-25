@@ -200,3 +200,38 @@ async def test_eligible_but_unembedded_run_is_left_unclustered() -> None:
     assert result["outcome"] == "eligible"
     assert result["cluster_id"] is None
     repo.nearest_cluster.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pgvector round-trip
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_parse_vector_handles_the_drivers_text_literal() -> None:
+    """A ``vector`` column comes back as text, not as a sequence.
+
+    No pgvector codec is registered on the asyncpg connection, so the column
+    arrives as ``'[0.1,0.2]'``. Before this was parsed at the repository
+    boundary, the gate ran ``list()`` over that string and produced a list of
+    *characters*, and clustering died on ``float('[')`` — every run reached the
+    gate and none was ever clustered. Unit tests could not catch it because they
+    inject a mocked repository; only a live round-trip did.
+    """
+    from app.modules.runs.repository import _parse_vector
+
+    assert _parse_vector("[0.1,0.2,-0.3]") == [0.1, 0.2, -0.3]
+    assert _parse_vector("[]") == []
+    assert _parse_vector(None) is None
+    # Already-parsed input (a codec registered later, or a test double) must
+    # survive unchanged rather than being re-parsed.
+    assert _parse_vector([0.1, 0.2]) == [0.1, 0.2]
+
+
+def test_parse_vector_output_is_usable_by_the_gate() -> None:
+    """The parsed value must survive the ``list(...)`` the gate applies to it."""
+    from app.modules.runs.repository import _parse_vector, _vector_literal
+
+    original = [0.125, -0.5, 0.75]
+    parsed = _parse_vector(_vector_literal(original))
+    assert parsed == original
+    assert [float(v) for v in list(parsed)] == original
