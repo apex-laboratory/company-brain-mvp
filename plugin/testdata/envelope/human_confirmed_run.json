@@ -1,0 +1,58 @@
+{
+  "agentName": "claude-code",
+  "endedAt": "2026-08-25T20:43:58.154989Z",
+  "externalId": "cc_797cea5f-21db-4028-b203-269a0614f26a_89ad257a-6129-47cc-803c-f4547e44d7f0",
+  "harness": "claude_code",
+  "outcome": "success",
+  "outcomeSignals": {
+    "errorFreeTail": true,
+    "humanConfirmed": true
+  },
+  "startedAt": "2026-08-25T20:43:58.114797Z",
+  "steps": [
+    {
+      "index": 0,
+      "latencyMs": 3,
+      "name": "note.txt",
+      "resultDigest": "6978ef66cd097a12 bytes=157 lines=1",
+      "status": "ok",
+      "type": "file_read"
+    },
+    {
+      "index": 1,
+      "latencyMs": 495,
+      "name": "wc -l /tmp/probe-repo/note.txt",
+      "resultDigest": "d84b7cc7805dee75 bytes=119 lines=1",
+      "status": "ok",
+      "type": "shell"
+    },
+    {
+      "args": {
+        "output_mode": "content",
+        "path": "/tmp/probe-repo/note.txt",
+        "pattern": "probe"
+      },
+      "index": 2,
+      "latencyMs": 38,
+      "name": "Grep",
+      "resultDigest": "0c5b95604bcbfa95 bytes=114 lines=1",
+      "status": "ok",
+      "type": "tool_call"
+    },
+    {
+      "index": 3,
+      "latencyMs": 10,
+      "name": "summary.txt",
+      "resultDigest": "b7a9947d038eba35 bytes=182 lines=1",
+      "status": "ok",
+      "type": "file_write"
+    },
+    {
+      "index": 4,
+      "status": "ok",
+      "text": "Done. `note.txt` is 2 lines; 'probe' matches line 1. `summary.txt` written with that one line.",
+      "type": "assistant_message"
+    }
+  ],
+  "task": "Read note.txt, then run 'wc -l note.txt' with Bash, then grep for 'probe' in note.txt, then write a file summary.txt containing one line. Be terse."
+}
