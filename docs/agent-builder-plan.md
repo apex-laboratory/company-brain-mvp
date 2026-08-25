@@ -26,7 +26,53 @@ than the original debate assumed.
 
 ---
 
-## 2. What we don't have to build
+## 2. How we build it
+
+This ships into two codebases that already have strong conventions. The plan
+adds no new architectural patterns; it follows the ones that are there.
+
+**Match the existing shape, don't invent one.**
+
+- Backend: `router` (paths + deps only) -> `service` (logic) -> `repository`
+  (the only place SQL lives), per `BACKEND_BEST_PRACTICES.md`. Response schemas
+  are `CamelModel`; request schemas are `CamelRequestModel` and reject unknown
+  keys.
+- Frontend: one feature slice under `src/features/agents/` with
+  `api/ hooks/ components/ pages/`, exactly like `features/sources/`. Nothing
+  agent-specific leaks into `src/lib` or `src/components/shared` until a second
+  feature needs it.
+
+**One seam per vendor.** Every Anthropic call goes through
+`anthropic_client.py`; nothing else imports the SDK. That keeps the surface
+mockable in tests, makes retry and rate-limit policy one file's problem, and
+contains the Managed-Agents lock-in noted in §8 to a module rather than
+smearing it across the service layer.
+
+**Connectors are data, not code.** A new provider is a row in
+`agent_connectors.yaml` plus an OAuth client registration — never a new Python
+class. This is the deliberate difference from the ingestion connectors
+(compile-time `SourceIntegration` implementations); don't copy that pattern
+here.
+
+**No abstraction before the second use.** The four OAuth flows will look
+similar and won't be identical. Write them out, then factor what actually
+repeats. A premature `BaseOAuthProvider` costs more than the duplication it
+removes.
+
+**Boundaries enforced by tests, not comments.** The data-liability wall (§5.5)
+is an import-guard test and a schema test. A rule that exists only in prose is
+a rule that gets broken under deadline.
+
+**Every route ships with its tests in the same PR** — unit tests against mocked
+repositories, plus a cross-tenant negative and an auth-failure case. That is the
+existing convention and the reason RLS regressions haven't shipped.
+
+**Migrations are additive.** Six new tables, no changes to existing ones. The
+`agent_*` names are scoped so nothing collides with `agent_interactions` (§4.5).
+
+---
+
+## 3. What we don't have to build
 
 Four things we'd otherwise write ourselves already exist as Anthropic primitives.
 
@@ -44,30 +90,30 @@ Everything Claude-shaped is configuration.
 
 ---
 
-## 3. Blockers in the current code
+## 4. Blockers in the current code
 
 Found by reading the repo. Two are one-line fixes; two are decisions.
 
-### 3.1 The MCP server speaks the wrong transport
+### 4.1 The MCP server speaks the wrong transport
 
 `app/mcp/server.py:122` runs `transport="sse"`. Managed Agents connects to MCP
 servers over **Streamable HTTP**. Switch to `transport="http"`, or mount both if
 an existing agent integration depends on SSE.
 
-### 3.2 The MCP server only accepts `X-API-Key`
+### 4.2 The MCP server only accepts `X-API-Key`
 
 `_authenticate()` at `app/mcp/server.py:62` reads exactly one header. A vault
 `static_bearer` credential arrives as `Authorization: Bearer <token>`. Accept
 both, resolving through the same `authenticate_api_key` path so the scope check
 is unchanged.
 
-### 3.3 It isn't publicly reachable
+### 4.3 It isn't publicly reachable
 
 Port 8001 is a compose-internal service. Anthropic's MCP proxy has to reach it
 over HTTPS, so it needs its own ingress (`mcp.brainite.…`), with the existing
 per-IP throttle doing the work it already does.
 
-### 3.4 ⚠️ The real hole in the wall
+### 4.4 ⚠️ The real hole in the wall
 
 `query_brain` escalates a miss into `run_query_extraction`, which writes skills
 and logs the query into `agent_interactions`. Attach it to a user's agent — which
@@ -79,7 +125,7 @@ Fix: mint agent-session keys with an `agent_origin` flag that skips
 `run_query_extraction` and nulls the `query` column while still recording the
 match. Cheap now, expensive to retrofit after a customer asks.
 
-### 3.5 Naming collision
+### 4.5 Naming collision
 
 `models/orm/agent.py` already holds `AgentInteraction` (table
 `agent_interactions`) — the extraction pipeline's episodic log, unrelated to this
@@ -87,12 +133,12 @@ feature. Put the new ORM models in **`models/orm/agent_builder.py`**.
 
 ---
 
-## 4. Backend
+## 5. Backend
 
 One module in the existing shape: `router` → `service` → `repository`, RLS on
 every read, camelCase out. See `BACKEND_BEST_PRACTICES.md`.
 
-### 4.1 Data model — six tables, no content columns
+### 5.1 Data model — six tables, no content columns
 
 | Table | Holds | Deliberately absent |
 |---|---|---|
@@ -112,7 +158,7 @@ AND (visibility = 'workspace' OR owner_user_id = current_user_id())
 
 Everything else scopes through the parent.
 
-### 4.2 Module layout
+### 5.2 Module layout
 
 ```
 brain-api/app/modules/agents/
@@ -126,7 +172,7 @@ brain-api/app/modules/agents/
   stream.py             # httpx.stream → StreamingResponse, zero buffering
 ```
 
-### 4.3 Endpoints
+### 5.3 Endpoints
 
 | Route | Does |
 |---|---|
@@ -149,7 +195,7 @@ brain-api/app/modules/agents/
 | `GET /agents/{id}/schedules/{sid}/runs` | Proxy `deployment_runs`, 30s Redis cache. Failures included. |
 | `POST /webhooks/anthropic` | HMAC-verified. Updates session status and usage only — never content. |
 
-### 4.4 Two vaults per session, not one
+### 5.4 Two vaults per session, not one
 
 A vault holds at most **20 credentials**, keyed uniquely by MCP server URL. If
 `query_brain`'s bearer credential lives in the user's vault it eats one of those
@@ -163,7 +209,7 @@ vault_ids=[user_vault_id, workspace_vault_id]
 Users keep all 20 connector slots, and rotating the Brain's key is one write
 instead of N.
 
-### 4.5 Enforcing the wall in CI, not in a doc
+### 5.5 Enforcing the wall in CI, not in a doc
 
 - An AST test that fails if `app/modules/agents/**` imports `app.pipeline.*`, or
   the reverse.
@@ -174,7 +220,7 @@ instead of N.
 - Cross-tenant negative tests and auth-failure tests on every new route, per the
   existing convention.
 
-### 4.6 Cost control
+### 5.6 Cost control
 
 Set a session budget on **every** session:
 
@@ -189,7 +235,7 @@ fired session. Without this, one user's runaway scheduled agent is our invoice.
 
 ---
 
-## 5. Frontend
+## 6. Frontend
 
 One feature slice in the existing convention. Three screens, one hard part.
 
@@ -210,7 +256,7 @@ Routes go under `DashboardLayout` in `src/app/router/index.tsx`:
 `SourcesCallbackRedirect` already pulls — the backend redirects to a path React
 Router doesn't serve, so forward it with the query string intact.
 
-### 5.1 The three screens
+### 6.1 The three screens
 
 - **Agents** — cards in two groups, *Yours* and *Shared in {workspace}*. Each card
   shows connector avatars, schedule state, last run. Reuses the `SourceCard`
@@ -225,7 +271,7 @@ Router doesn't serve, so forward it with the query string intact.
   the deployment-run table with failures shown, since a scheduled agent that
   silently stops running is the failure mode people actually hit.
 
-### 5.2 The hard part: the event reducer
+### 6.2 The hard part: the event reducer
 
 `useBrainChat`'s SSE handling doesn't carry over — the Brain streams tokens, an
 agent session streams a typed event union. `useAgentStream` reduces
@@ -248,7 +294,7 @@ accumulator code from elsewhere won't drop in.
 
 ---
 
-## 6. Build order
+## 7. Build order
 
 Sequenced so backend never blocks on frontend after phase 1. Days are one
 engineer per track.
@@ -277,11 +323,11 @@ the product.
 
 ---
 
-## 7. Limits worth designing around
+## 8. Limits worth designing around
 
 | Limit | Consequence |
 |---|---|
-| 20 credentials per vault | 20 connectors per user. The workspace-vault split (§4.4) keeps `query_brain` from eating one. |
+| 20 credentials per vault | 20 connectors per user. The workspace-vault split (§5.4) keeps `query_brain` from eating one. |
 | 20 MCP servers, 128 tools per agent | Not a real ceiling for v1, but cap the connector picker at 20 with a clear message rather than letting Anthropic reject the save. |
 | Scheduled runs jitter up to 9 minutes | Never promise an exact fire time in the UI. Say "around 8:00 PM". |
 | 1,000 deployments per organization | One per user schedule. At scale we'd need one deployment reused across users, or a support ticket. Fine for v1. |
@@ -292,7 +338,7 @@ the product.
 
 ---
 
-## 8. If it has to ship in a week
+## 9. If it has to ship in a week
 
 In cut order. The first two cost almost nothing; the third starts to hurt.
 
@@ -308,7 +354,7 @@ In cut order. The first two cost almost nothing; the third starts to hurt.
 
 ---
 
-## 9. Strategic caveat
+## 10. Strategic caveat
 
 A thin agent builder over Anthropic isn't defensible on its own — Anthropic can
 undercut it, and probably will. Build this as *"an agent that already knows how
