@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.shared.schemas import CamelModel, CamelRequestModel
 
@@ -118,3 +118,55 @@ class AgentUpdateRequest(CamelRequestModel):
     budget_cents: Annotated[int | None, Field(default=None, gt=0)] = None
     status: AgentStatus | None = None
     version: Annotated[int | None, Field(default=None, ge=1)] = None
+
+
+# Anthropic caps an agent at 20 MCP servers (§8). Enforced here so the picker
+# says so plainly rather than letting a save fail at the vendor.
+MAX_CONNECTORS_PER_AGENT = 20
+
+# ``name`` is not decoration: it is the key ``mcp_toolset.mcp_server_name``
+# points at, so it has to survive a round-trip through Anthropic's config
+# unchanged. Restricting it to a slug avoids finding out at save time which
+# characters that config rejects.
+_CONNECTOR_NAME = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+
+
+class AgentConnectorResponse(CamelModel):
+    """One MCP server this agent talks to. Never any credential material."""
+
+    id: str
+    agent_id: str
+    name: str
+    mcp_server_url: str
+    provider: str | None = None
+    tool_allowlist: list[str] = []
+    created_at: datetime | None = None
+
+
+class AgentConnectorCreateRequest(CamelRequestModel):
+    """``POST /agents/{id}/connectors``.
+
+    ``mcp_server_url`` must be ``https``. Anthropic connects to it over
+    Streamable HTTP carrying a vault credential, and a plaintext hop would put
+    that credential on the wire. We never fetch this URL ourselves — the
+    connection is made from Anthropic's side — so this is a credential-exposure
+    check, not an SSRF one.
+    """
+
+    name: Annotated[str, Field(pattern=_CONNECTOR_NAME)]
+    mcp_server_url: Annotated[str, Field(min_length=1, max_length=2048)]
+    # NULL means a pasted custom URL; a catalog key otherwise. The catalog
+    # itself is phase 3 — until then every connector is effectively custom.
+    provider: Annotated[str | None, Field(default=None, max_length=64)] = None
+    # Empty means "every tool this server exposes". A non-empty list becomes
+    # Anthropic's `default_config: {enabled: false}` + per-tool `configs`
+    # allowlist, which is the safer shape but a worse default: a server whose
+    # tool names we cannot know yet would be allowlisted down to nothing.
+    tool_allowlist: list[Annotated[str, Field(max_length=128)]] = []
+
+    @field_validator("mcp_server_url")
+    @classmethod
+    def _must_be_https(cls, url: str) -> str:
+        if not url.startswith("https://"):
+            raise ValueError("mcpServerUrl must be an https:// URL")
+        return url

@@ -21,6 +21,7 @@ are only ever the *mirror* of what that call returned.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy import text
@@ -215,3 +216,100 @@ class AgentsRepository:
         )
         found = row.mappings().first()
         return dict(found) if found else None
+
+    # ── connectors ────────────────────────────────────────────────────────────
+
+    async def list_connectors(
+        self, session: AsyncSession, *, workspace_id: str, agent_id: str
+    ) -> list[dict[str, Any]]:
+        """This agent's MCP servers, oldest first.
+
+        Order is stable and meaningful: the service turns this list into
+        Anthropic's ``mcp_servers`` and ``tools`` arrays, which are replaced
+        wholesale on every write. A non-deterministic order would mint a new
+        agent version on saves that changed nothing.
+        """
+        rows = await session.execute(
+            text(
+                """
+                SELECT id, workspace_id, agent_id, name, mcp_server_url,
+                       provider, tool_allowlist, created_at
+                  FROM agent_connectors
+                 WHERE agent_id = :agent_id AND workspace_id = :workspace_id
+                 ORDER BY created_at, id
+                """
+            ),
+            {"agent_id": agent_id, "workspace_id": workspace_id},
+        )
+        return [dict(row) for row in rows.mappings()]
+
+    async def insert_connector(
+        self,
+        session: AsyncSession,
+        *,
+        connector_id: str,
+        workspace_id: str,
+        agent_id: str,
+        name: str,
+        mcp_server_url: str,
+        provider: str | None,
+        tool_allowlist: list[str],
+    ) -> dict[str, Any]:
+        """Declare one MCP server. Raises ``IntegrityError`` on a duplicate name.
+
+        The ``(agent_id, name)`` unique constraint is load-bearing rather than
+        tidy: ``name`` is what ``mcp_toolset.mcp_server_name`` resolves against,
+        so two connectors sharing one would make the agent's tool config
+        ambiguous. The service catches the violation and renders it as a 409.
+        """
+        row = await session.execute(
+            text(
+                """
+                INSERT INTO agent_connectors (
+                    id, workspace_id, agent_id, name, mcp_server_url,
+                    provider, tool_allowlist
+                ) VALUES (
+                    :id, :workspace_id, :agent_id, :name, :mcp_server_url,
+                    :provider, CAST(:tool_allowlist AS jsonb)
+                )
+                RETURNING id, workspace_id, agent_id, name, mcp_server_url,
+                          provider, tool_allowlist, created_at
+                """
+            ),
+            {
+                "id": connector_id,
+                "workspace_id": workspace_id,
+                "agent_id": agent_id,
+                "name": name,
+                "mcp_server_url": mcp_server_url,
+                "provider": provider,
+                "tool_allowlist": json.dumps(tool_allowlist),
+            },
+        )
+        return dict(row.mappings().one())
+
+    async def delete_connector(
+        self, session: AsyncSession, *, workspace_id: str, agent_id: str, connector_id: str
+    ) -> bool:
+        """Remove one MCP server. ``False`` when it was not there to remove.
+
+        Scoped by ``agent_id`` as well as id, so a connector id from another
+        agent cannot be deleted through this agent's path even inside one
+        workspace.
+        """
+        result = await session.execute(
+            text(
+                """
+                DELETE FROM agent_connectors
+                 WHERE id = :connector_id
+                   AND agent_id = :agent_id
+                   AND workspace_id = :workspace_id
+                """
+            ),
+            {
+                "connector_id": connector_id,
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+            },
+        )
+        return bool(result.rowcount)
