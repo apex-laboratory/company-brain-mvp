@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import ARRAY, BigInteger, Date, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, UniqueConstraint, text
+from sqlalchemy import ARRAY, BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, LargeBinary, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,6 +28,11 @@ class ApiKey(Base):
     key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     key_prefix: Mapped[str] = mapped_column(Text, nullable=False)        # 'hph_live_abc1' for UI identification
     scopes: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
+    # Non-dashboard credential: skips query-driven extraction and nulls the logged
+    # query text. Defaults true so agent keys are closed unless opened deliberately.
+    agent_origin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
