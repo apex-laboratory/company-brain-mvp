@@ -8,6 +8,10 @@ from .sweep import Sweep
 from .review import Decision, DecisionPin, Review
 from .brain import BrainBuild, BrainChunk, BrainConversation, BrainMessage, ActivityEvent
 from .agent import AgentInteraction
+from .agent_builder import (
+    AgentConnector, AgentCredential, AgentDefinition, AgentSchedule, AgentSession,
+    AgentVault,
+)
 from .audit import AuditLog
 from .billing import ApiKey, UsagePeriod
 from .company import Company
@@ -26,6 +30,9 @@ __all__ = [
     "SourceConnection", "SourceChannel", "WebhookSubscription", "SourceEvent",
     # AI-internal
     "Sweep", "AgentInteraction",
+    # agent builder (pointers only — no tokens, no transcripts, no run records)
+    "AgentDefinition", "AgentConnector", "AgentVault", "AgentCredential",
+    "AgentSession", "AgentSchedule",
     # brain
     "BrainBuild", "BrainChunk", "BrainConversation", "BrainMessage", "ActivityEvent",
     # ops
