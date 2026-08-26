@@ -17,6 +17,7 @@ in parallel**, ~5 solo.
 | What v1 is | **A shippable surface.** Agent CRUD + versioning, builder UI, per-connector OAuth, vaulting, run history. | Not a spike. |
 | How agents are invoked | **Chat, schedule, and run-now.** | Anthropic's scheduled deployments cover cron *and* manual triggers, so this costs far less than it looks. |
 | Who can build and see them | **Personal, then published.** Any member builds; private by default; explicit publish-to-workspace. | Needs `owner_user_id` + `visibility` in the RLS policy. |
+| Whether agent runs feed the Brain | **Yes, eventually — a stated v1 non-goal, not an open question.** Builder runs will produce Feature 29 envelopes from event-stream metadata. | No schema change and no v1 scope (§5.7). Phase 4's stream proxy gets written knowing a metadata tap is coming. |
 
 Everything below follows from one boundary: **Brainite stores pointers to
 agents, sessions, vaults and schedules — never the content that flows through
@@ -92,13 +93,34 @@ Everything Claude-shaped is configuration.
 
 ## 4. Blockers in the current code
 
-Found by reading the repo. Two are one-line fixes; two are decisions.
+Found by reading the repo. Two are one-line fixes; three are decisions, and all
+three are now settled — §4.1, §4.4 and §4.5 record the call, not the debate.
 
 ### 4.1 The MCP server speaks the wrong transport
 
 `app/mcp/server.py:122` runs `transport="sse"`. Managed Agents connects to MCP
-servers over **Streamable HTTP**. Switch to `transport="http"`, or mount both if
-an existing agent integration depends on SSE.
+servers over **Streamable HTTP**. Phase 0 sets `transport="http"` and **drops SSE
+outright — switch, don't dual-mount.**
+
+The compatibility argument for dual-mounting is hypothetical and the cost is not.
+The one "existing agent integration" is the capture plugin, which is unpublished,
+so there is *no installed base to protect*. What is not hypothetical: this MCP
+server is about to become the only internet-facing service carrying an API key,
+and two transports means two auth paths and two rate-limit surfaces to get wrong
+on day one. SSE is also the deprecated MCP transport, so carrying it forward means
+migrating twice.
+
+The sequencing consequence is the part worth acting on: **do not publish the
+plugin to a marketplace before phase 0.** Publishing against `/sse` creates
+exactly the installed base whose absence makes this cheap. The plugin's
+`.mcp.json` — still spec-only, in `docs/PLUGIN_BUILD.md` — changes by one line
+once the new mount path is known, and that doc already carries the note and gates
+marketplace submission behind this phase.
+
+⚠️ **Verify, don't assume:** confirm which transport the OpenAI plugin directory
+accepts before freezing the submitted URL. `PLUGIN_BUILD.md`'s record on
+unverified platform details is seven errors deep — inherit the requirement from
+the directory, not from that doc.
 
 ### 4.2 The MCP server only accepts `X-API-Key`
 
@@ -113,6 +135,11 @@ Port 8001 is a compose-internal service. Anthropic's MCP proxy has to reach it
 over HTTPS, so it needs its own ingress (`mcp.brainite.…`), with the existing
 per-IP throttle doing the work it already does.
 
+**This ingress is also the blocker on plugin distribution.** `PLUGIN_BUILD.md`
+originally claimed the endpoint was already public; it is not, and both the Claude
+marketplace and the OpenAI directory require a public HTTPS MCP host. One ingress
+closes two efforts — worth knowing when phase 0 gets squeezed.
+
 ### 4.4 ⚠️ The real hole in the wall
 
 `query_brain` escalates a miss into `run_query_extraction`, which writes skills
@@ -121,15 +148,43 @@ is the whole moat play — and the agent's *query text* starts landing in the
 Brain. An agent that has just read a Slack DM will phrase its query using that
 content. **That is connector data crossing the wall by the back door.**
 
-Fix: mint agent-session keys with an `agent_origin` flag that skips
-`run_query_extraction` and nulls the `query` column while still recording the
-match. Cheap now, expensive to retrofit after a customer asks.
+Fix: an `agent_origin` flag that skips `run_query_extraction` and nulls the
+`query` column while still recording the match. Cheap now, expensive to retrofit
+after a customer asks.
+
+**Scope it wider than the agent builder.** The flag is per-credential and
+explicit, defaulting **on** for anything that is not a dashboard JWT — agent
+builder session keys, capture-plugin keys, CI harnesses alike — rather than
+being an agent-session special case.
+
+The plugin case looks weaker than the builder's and is not. Its user explicitly
+ran `brain enable` in that repo and already ships their prompt as the `task`
+field of every run, so nulling a query column while sending the same text
+elsewhere would be theatre. But **it is not the same text.** The plugin's
+redaction contract is *digests, never contents*: file paths, never file bodies; a
+hash of a shell result, never the result. A model-issued `query_brain` call is
+the one channel that can carry file contents into `agent_interactions` verbatim.
+Closing it is what makes the promise true rather than approximately true.
+
+What it costs and closes:
+
+| | |
+|---|---|
+| **Cost now** | Zero function lost. `app/pipeline/query_extraction.py:48` `search_sources()` returns `[]` — no provider implements search yet — so `run_query_extraction` cannot currently mint a skill from anything. We give up a feature that does not function. |
+| **What it closes** | `app/modules/skills/repository.py:495` writes a raw `query` column on every match. That is the only place plugin- or agent-captured file contents could land unredacted. |
+| **Not affected** | Feature 34 reinforcement reads the `mcp__brainite__query_brain` *step* in the trajectory, which the plugin records separately. Usage counters and the `/interactions/override` flow read the match, not the query text. |
 
 ### 4.5 Naming collision
 
 `models/orm/agent.py` already holds `AgentInteraction` (table
 `agent_interactions`) — the extraction pipeline's episodic log, unrelated to this
 feature. Put the new ORM models in **`models/orm/agent_builder.py`**.
+
+Three `agent_*` concepts will coexist once Phase 7 ingestion lands:
+`agent_interactions` (the query log), `agent_runs` (captured trace ingestion), and
+`agent_sessions` (this feature's builder sessions). The last two are the pair that
+will get confused. **Say so in the migration comment**, not only by putting the
+ORM in a separate file — a filename is invisible from inside a `psql` session.
 
 ---
 
@@ -146,7 +201,7 @@ every read, camelCase out. See `BACKEND_BEST_PRACTICES.md`.
 | `agent_connectors` | `agent_id`, `name` (unique per agent, referenced by `mcp_toolset.mcp_server_name`), `mcp_server_url`, `provider` or null for custom, `tool_allowlist` jsonb | Any credential material |
 | `agent_vaults` | `(workspace_id, user_id)` → `anthropic_vault_id` | — |
 | `agent_credentials` | `user_id`, `provider`, `mcp_server_url`, `anthropic_credential_id`, display name, `connected_at` | **The tokens.** They transit once, at vault-create, and are never written to disk. |
-| `agent_sessions` | `agent_id`, `user_id`, `anthropic_session_id`, title, status, `stop_reason`, `list_cost_cents`, token counts, timestamps | **The transcript.** Say so in the migration comment so the next engineer doesn't helpfully add it. |
+| `agent_sessions` | `agent_id`, `user_id`, `anthropic_session_id`, title, status, `stop_reason`, `list_cost_cents`, token counts, timestamps | **The transcript.** Say so in the migration comment so the next engineer doesn't helpfully add it — and say there that this is *not* `agent_runs` (§4.5). |
 | `agent_schedules` | `agent_id`, `user_id` (whose vault fires it), `anthropic_deployment_id`, cron expression, timezone, prompt, status, `budget_cents` | Run records — read those from Anthropic on demand. |
 
 RLS on `agent_definitions` is the one policy with real thought in it:
@@ -212,9 +267,12 @@ instead of N.
 ### 5.5 Enforcing the wall in CI, not in a doc
 
 - An AST test that fails if `app/modules/agents/**` imports `app.pipeline.*`, or
-  the reverse.
+  the reverse. **Exception, written as an allowlist rather than a hole:** when
+  §5.7's metadata tap lands, the envelope builder *may read event metadata, never
+  event content*. Encode that as the specific symbols it may touch, so the guard
+  gets sharper, not weaker.
 - A schema test asserting `agent_sessions` has no text column beyond `title` and
-  `stop_reason`.
+  `stop_reason`. This holds under §5.7 — the tap stores nothing new here.
 - Streaming is `httpx.AsyncClient.stream` straight into `StreamingResponse`. If a
   reviewer sees an accumulator variable in `stream.py`, that's the bug.
 - Cross-tenant negative tests and auth-failure tests on every new route, per the
@@ -232,6 +290,42 @@ budget={"type": "limit", "max_list_cost": {"amount": "200", "currency": "USD"}}
 pauses `idle` with `stop_reason: budget_reached` rather than dying; raising the
 cap resumes it. Do the same on deployments, where the cap is copied onto each
 fired session. Without this, one user's runaway scheduled agent is our invoice.
+
+### 5.7 Agent runs feed the corpus — decided now, built after v1
+
+**Nothing to build in v1. Costs one paragraph today, and reopening the wall
+argument if deferred silently.**
+
+§10 concedes that a thin agent builder over Anthropic isn't defensible, and
+answers with grounding — `query_brain` on by default. But grounding is
+**read-only**. It makes agents better today using knowledge that came from
+somewhere else, and it is precisely the feature Anthropic can ship themselves. A
+loop that compounds is not.
+
+The discard also falls on the best data. Engineers use the capture plugin; ops and
+support people use the agent builder. The operational knowledge this product
+exists to extract — refund handling, escalation policy — comes from the ops side.
+Leave builder runs out and the highest-value runs are the ones thrown away, with
+the loop fed only by Claude Code users. That is competing on a rival's ground
+rather than our own.
+
+**The wall survives this.** The Feature 29 envelope was designed for exactly this
+constraint: results are a 16-character hash plus a byte count, arguments go
+through the redactor, and `task` is a prompt the user typed into our own UI. A
+step reading `mcp__slack__read_message` with redacted args and a result digest
+carries no Slack content.
+
+So build it as a derivation from **event-stream metadata** — event types, tool
+names, statuses, result sizes — never from transcripts. `harness: "custom"` in
+`app/modules/runs/schemas.py:81` already accepts the envelope, so there is no
+migration, no new endpoint, and no v1 scope. `agent_sessions` still stores
+nothing (§5.1).
+
+What this costs today is the sentence above appearing in the contract freeze, and
+phase 4's `stream.py` being written by someone who knows a metadata tap is coming
+— which is the difference between a tap and a rewrite. The cost of deferring
+*silently* is discovering at scale that the platform's own agents never taught the
+Brain anything, which is a strategy problem, not a backlog item.
 
 ---
 
@@ -301,11 +395,11 @@ engineer per track.
 
 | # | Phase | Track | Days |
 |---|---|---|---|
-| 0 | **Make `query_brain` reachable** — Streamable HTTP, bearer auth, HTTPS ingress, the `agent_origin` key flag that closes the extraction back door. Nothing else can be tested end-to-end until this lands. | BE | 1 |
+| 0 | **Make `query_brain` reachable** — Streamable HTTP (switch, don't dual-mount), bearer auth, HTTPS ingress, and the `agent_origin` flag defaulting on for every non-dashboard credential. Nothing else can be tested end-to-end until this lands, and plugin distribution is blocked on the same ingress. | BE | 1 |
 | 1 | **Migration and agent CRUD** — six tables with RLS, the agents module, the Anthropic client wrapper. Agents create lazily on first save and sync version on every update. Ships with cross-tenant tests. Unblocks the FE contract. | BE | 3 |
 | 2 | **Credentials and vaults** — the expensive phase, and the one with nothing to do with Claude. Four provider OAuth flows, find-or-create vault, credential POST with the `refresh` block wired to each provider's token endpoint. | BE | 4 |
 | 3 | **Agents list and builder** — parallel with phase 2 against the phase-1 contract. List, builder form, connector picker, custom MCP dialog, publish toggle. | FE | 3 |
-| 4 | **Sessions, stream proxy, webhook** — session create with dual vaults and a budget, the pass-through SSE proxy, send-events, the HMAC webhook that keeps status and usage current without polling. | BE | 3 |
+| 4 | **Sessions, stream proxy, webhook** — session create with dual vaults and a budget, the pass-through SSE proxy, send-events, the HMAC webhook that keeps status and usage current without polling. Write `stream.py` knowing §5.7's metadata tap is coming: no accumulator, but a seam where event *metadata* can be observed. | BE | 3 |
 | 5 | **Run view and event reducer** — transcript, tool-call blocks, confirmation prompt, and the three reconnect traps above. Largest FE piece. | FE | 3 |
 | 6 | **Schedules and runs** — deployment CRUD mapped onto a cron picker, pause/unpause, Run now, run history with failures visible. Cheap because the scheduler isn't ours. | BE 2 · FE 2 | 4 |
 | 7 | **Wall enforcement, docs, polish** — import-guard and schema tests, `make docs`, empty states, error copy, connector-not-authorized path end to end. | BE 2 · FE 1 | 3 |
@@ -361,5 +455,25 @@ undercut it, and probably will. Build this as *"an agent that already knows how
 your company works"*: `query_brain` on by default, the grounding visible in the
 transcript, connectors treated as commodity glue.
 
+**Capture is not the moat — two competitors already capture more surface than we
+do. The gate is.**
+
+| Product | What it captures | Gate | Consent posture |
+|---|---|---|---|
+| Hyper | Prompts and outcomes. Three hooks, no `PostToolUse` — never the trajectory | None | Writes by default; mute as escape hatch |
+| Mem0 | The fullest hook surface shipped, trajectory included | None — episodic memory, ungated and unreviewed | Global |
+| Memory Store | Claude chats and Codex sessions as a first-class source, MCP-only | None | Ingestion-shaped |
+| **Brainite** | Trajectory as digests, plus a first-party agent runtime | **Success gate, clustering, human review, versioned skills** | **Opt-in per repo** |
+
+*(Competitor rows reflect what those clients were documented to ship, not
+independent testing.)*
+
+Mem0 cannot copy the gate without becoming a different product; Hyper will not
+copy the consent posture without giving up its default-on capture. Neither has a
+first-party agent runtime. If the builder feeds the loop (§5.7), the agents get
+better the more they are used — a compounding story none of the three is
+structured to tell. If it does not, we are an Anthropic agent builder with a wiki
+attached, which this section already admits is not defensible.
+
 The moat is the reviewed, versioned, trust-scored Brain. The agent builder is how
-people reach it.
+people reach it — and, once §5.7 lands, one of the things that fills it.
