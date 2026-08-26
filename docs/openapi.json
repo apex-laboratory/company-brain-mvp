@@ -2227,6 +2227,161 @@
         }
       }
     },
+    "/api/v1/agents/{agent_id}/connectors": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Connectors",
+        "description": "The MCP servers this agent talks to. No credential material, ever.",
+        "operationId": "list_connectors_api_v1_agents__agent_id__connectors_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Add Connector",
+        "description": "Declare an MCP server and push the agent's tool config. Owner only.",
+        "operationId": "add_connector_api_v1_agents__agent_id__connectors_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentConnectorCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{agent_id}/connectors/{connector_id}": {
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Remove Connector",
+        "description": "Undeclare an MCP server and push the reduced config. Owner only.",
+        "operationId": "remove_connector_api_v1_agents__agent_id__connectors__connector_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/skills": {
       "get": {
         "tags": [
@@ -3263,6 +3418,50 @@
   },
   "components": {
     "schemas": {
+      "AgentConnectorCreateRequest": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+            "title": "Name"
+          },
+          "mcpServerUrl": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Mcpserverurl"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "toolAllowlist": {
+            "items": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "type": "array",
+            "title": "Toolallowlist",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "mcpServerUrl"
+        ],
+        "title": "AgentConnectorCreateRequest",
+        "description": "``POST /agents/{id}/connectors``.\n\n``mcp_server_url`` must be ``https``. Anthropic connects to it over\nStreamable HTTP carrying a vault credential, and a plaintext hop would put\nthat credential on the wire. We never fetch this URL ourselves \u2014 the\nconnection is made from Anthropic's side \u2014 so this is a credential-exposure\ncheck, not an SSRF one."
+      },
       "AgentCreateRequest": {
         "properties": {
           "name": {
