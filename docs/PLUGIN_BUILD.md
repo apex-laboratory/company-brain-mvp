@@ -137,7 +137,8 @@ in both. Submission specifics:
   `app/mcp/server.py` binds port 8001 as a compose-internal service with no ingress,
   so a public HTTPS host (`mcp.brainite…`) is a prerequisite, not a given. The agent
   builder's phase 0 delivers exactly this ingress — **submission is blocked on it**,
-  and the two efforts should not build it twice.
+  and the two efforts should not build it twice. (Phase 0's transport half has
+  landed; the ingress half has not.)
 - Must strip Claude-specific language ("Claude" → "the model") and replace `userConfig`
   with explicit inputs, OAuth, or hosted storage.
 - Submission needs: production `/mcp` URL, domain verification, exact CSP domains,
@@ -274,25 +275,33 @@ detached flusher and return.
 {
   "mcpServers": {
     "brainite": {
-      "type": "sse",
-      "url": "https://mcp.brainites.com/sse",
+      "type": "http",
+      "url": "https://mcp.brainites.com/mcp",
       "headers": { "X-API-Key": "${BRAINITE_API_KEY}" }
     }
   }
 }
 ```
 
-> **⏳ This block changes when the agent builder's phase 0 lands.** That phase
-> switches `app/mcp/server.py` from `transport="sse"` to `transport="http"`
-> (Anthropic Managed Agents connects over Streamable HTTP), and the decision taken
-> was **switch, don't dual-mount**: there is no installed base to protect while the
-> plugin is unpublished, and two transports on the one internet-facing service
-> means two auth paths and two rate-limit surfaces to get wrong. SSE is also the
-> deprecated MCP transport — dual-mounting means migrating twice.
+> **✅ Shipped — this is `plugin/.mcp.json`, not a sketch.** The agent builder's
+> phase 0 landed the transport half: `app/mcp/server.py` now runs
+> `transport="http"` (Anthropic Managed Agents connects over Streamable HTTP),
+> and the decision taken was **switch, don't dual-mount** — there was no
+> installed base to protect while the plugin is unpublished, and two transports
+> on the one internet-facing service would mean two auth paths and two
+> rate-limit surfaces to get wrong. SSE is also the deprecated MCP transport, so
+> dual-mounting would have meant migrating twice.
 >
-> When it lands: `type` becomes `"http"` and the URL takes the new mount path.
-> Until then this file is correct and **must not ship to a marketplace** — see the
-> build order.
+> `.mcp.json` is force-added in `.gitignore` (the repo ignores `.mcp.json`
+> globally as local dev config; the plugin's copy is a shipped artifact that
+> `plugin.json` references). It holds an env-var reference, never a key.
+>
+> **Still blocked on marketplace submission:** the URL above assumes an HTTPS
+> ingress that does not exist yet — port 8001 is still compose-internal. The
+> host also has to be reconciled with the per-workspace endpoint the dashboard
+> advertises (`https://{slug}.brainites.com/mcp`, `workspaces/service.py:70`);
+> those two are not the same shape. See the build order and
+> `agent-builder-plan.md` §4.3.
 >
 > Note also that `report_run` is **not** in this block, though the shim spec
 > assumed it: no such tool exists in `app/mcp/server.py`, which exposes
@@ -481,9 +490,12 @@ have been of `nil`), and crashed on a `stop_reason` that is never sent. One prob
 session cost twenty minutes and turned all of that into fixtures.
 
 **Milestone 7 is gated on the MCP server becoming publicly reachable over
-Streamable HTTP** (the agent builder's phase 0). Publishing before that would
-create the installed base whose absence is the entire reason the transport switch
-is cheap.
+Streamable HTTP** (the agent builder's phase 0). Half of that is now done: the
+server speaks Streamable HTTP and `plugin/.mcp.json` targets `/mcp`. **The
+ingress is not** — port 8001 is still compose-internal, and the public host has
+yet to be reconciled with the per-workspace endpoint the dashboard hands out.
+Publishing before the ingress exists would ship a plugin pointing at a hostname
+that does not resolve.
 
 ## Test plan
 
