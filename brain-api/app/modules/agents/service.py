@@ -29,16 +29,21 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from app.config.database import get_tenant_session
 from app.modules.agents.anthropic_client import AnthropicAgentsClient
 from app.modules.agents.repository import AgentsRepository
 from app.modules.agents.schemas import (
+    MAX_CONNECTORS_PER_AGENT,
+    AgentConnectorCreateRequest,
+    AgentConnectorResponse,
     AgentCreateRequest,
     AgentResponse,
     AgentUpdateRequest,
     AgentVersionResponse,
 )
-from app.shared.errors.app_error import ForbiddenError, NotFoundError
+from app.shared.errors.app_error import ConflictError, ForbiddenError, NotFoundError
 from app.shared.helpers.ids import generate_id
 from app.shared.middleware.authenticate import AuthContext
 from app.shared.middleware.with_tenant import run_in_tenant
@@ -280,6 +285,160 @@ class AgentsService:
             await tenant.commit()
         return _to_response(row, caller_user_id=user_id)
 
+    # ── connectors ────────────────────────────────────────────────────────────
+
+    async def list_connectors(
+        self, auth: AuthContext, agent_id: str
+    ) -> list[AgentConnectorResponse]:
+        workspace_id, user_id, role = _require_dashboard_user(auth)
+        await self._load(workspace_id, user_id, role, agent_id)
+        rows = await self._connectors(workspace_id, user_id, role, agent_id)
+        return [_to_connector(row) for row in rows]
+
+    async def add_connector(
+        self, auth: AuthContext, agent_id: str, body: AgentConnectorCreateRequest
+    ) -> AgentConnectorResponse:
+        """Declare an MCP server, then push the agent's whole tool config.
+
+        The push is not optional bookkeeping: a connector row Anthropic has
+        never heard of is decorative, and the agent would run without the tool
+        its owner just added. So the new set is computed in memory, sent, and
+        only then written — vendor-first, same ordering and same reasoning as
+        ``create_agent``.
+        """
+        workspace_id, user_id, role = _require_dashboard_user(auth)
+        agent = await self._load(workspace_id, user_id, role, agent_id)
+        if agent["owner_user_id"] != user_id:
+            raise ForbiddenError("Only the agent's owner can change its connectors.")
+
+        existing = await self._connectors(workspace_id, user_id, role, agent_id)
+        if len(existing) >= MAX_CONNECTORS_PER_AGENT:
+            raise ConflictError(
+                f"An agent can have at most {MAX_CONNECTORS_PER_AGENT} connectors."
+            )
+        if any(row["name"] == body.name for row in existing):
+            # Caught here as well as by the unique constraint: this way the
+            # caller gets the 409 *before* we spend an Anthropic round-trip.
+            raise ConflictError(f"This agent already has a connector named {body.name!r}.")
+
+        connector_id = generate_id("agent_connector")
+        pending = {
+            "id": connector_id,
+            "name": body.name,
+            "mcp_server_url": body.mcp_server_url,
+            "tool_allowlist": body.tool_allowlist,
+        }
+
+        # ── phase 1: network, no transaction open ────────────────────────────
+        remote_id, remote_version = await self._push_tools(agent, [*existing, pending])
+
+        # ── phase 2: transaction ─────────────────────────────────────────────
+        try:
+            async with get_tenant_session() as session, run_in_tenant(
+                session, workspace_id, user_id, role
+            ) as tenant:
+                row = await self._repo.insert_connector(
+                    tenant,
+                    connector_id=connector_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    name=body.name,
+                    mcp_server_url=body.mcp_server_url,
+                    provider=body.provider,
+                    tool_allowlist=body.tool_allowlist,
+                )
+                await self._repo.update(
+                    tenant,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    fields={
+                        "anthropic_agent_id": remote_id,
+                        "anthropic_agent_version": remote_version,
+                    },
+                )
+                await tenant.commit()
+        except IntegrityError as exc:
+            # Lost a race on (agent_id, name) between the check above and here.
+            raise ConflictError(
+                f"This agent already has a connector named {body.name!r}."
+            ) from exc
+
+        return _to_connector(row)
+
+    async def remove_connector(
+        self, auth: AuthContext, agent_id: str, connector_id: str
+    ) -> None:
+        """Undeclare an MCP server and push the reduced tool config."""
+        workspace_id, user_id, role = _require_dashboard_user(auth)
+        agent = await self._load(workspace_id, user_id, role, agent_id)
+        if agent["owner_user_id"] != user_id:
+            raise ForbiddenError("Only the agent's owner can change its connectors.")
+
+        existing = await self._connectors(workspace_id, user_id, role, agent_id)
+        remaining = [row for row in existing if row["id"] != connector_id]
+        if len(remaining) == len(existing):
+            raise NotFoundError("Connector")
+
+        # ── phase 1: network, no transaction open ────────────────────────────
+        remote_id, remote_version = await self._push_tools(agent, remaining)
+
+        # ── phase 2: transaction ─────────────────────────────────────────────
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, user_id, role
+        ) as tenant:
+            await self._repo.delete_connector(
+                tenant,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                connector_id=connector_id,
+            )
+            await self._repo.update(
+                tenant,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                fields={
+                    "anthropic_agent_id": remote_id,
+                    "anthropic_agent_version": remote_version,
+                },
+            )
+            await tenant.commit()
+
+    async def _push_tools(
+        self, agent: dict[str, Any], connectors: list[dict[str, Any]]
+    ) -> tuple[str | None, int | None]:
+        """Send the agent's full tool + MCP-server config. Returns the new version.
+
+        Both arrays are replaced wholesale by Anthropic, so every write sends
+        the complete set — there is no incremental add.
+        """
+        tools = _agent_tools(connectors)
+        servers = _mcp_servers(connectors)
+        remote_id = agent["anthropic_agent_id"]
+        if remote_id:
+            remote = await self._anthropic.update_agent(
+                remote_id, tools=tools, mcp_servers=servers
+            )
+        else:
+            remote = await self._anthropic.create_agent(
+                name=agent["name"],
+                model=_model_config(agent["model"], agent["effort"]),
+                system=agent["system_prompt"],
+                description=agent["description"],
+                tools=tools,
+                mcp_servers=servers,
+            )
+        return remote["id"], remote["version"]
+
+    async def _connectors(
+        self, workspace_id: str, user_id: str, role: str, agent_id: str
+    ) -> list[dict[str, Any]]:
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, user_id, role
+        ) as tenant:
+            return await self._repo.list_connectors(
+                tenant, workspace_id=workspace_id, agent_id=agent_id
+            )
+
     # ── internals ─────────────────────────────────────────────────────────────
 
     async def _load(
@@ -306,3 +465,56 @@ _RUNTIME_FIELDS = frozenset({"name", "model", "effort", "system_prompt", "descri
 
 def _touches_runtime(sent: dict[str, Any]) -> bool:
     return bool(_RUNTIME_FIELDS & sent.keys())
+
+
+# The pre-built Claude agent toolset: bash, file ops, code execution inside the
+# session's container. Always present — an agent with only MCP tools has no way
+# to do anything with what it fetches.
+_AGENT_TOOLSET = {"type": "agent_toolset_20260401"}
+
+
+def _mcp_servers(connectors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Anthropic's ``mcp_servers``: declarations only, deliberately no auth field.
+
+    Credentials reach the server from the user's vault, matched by URL at
+    session create (phase 2). That split is what keeps secrets out of a
+    reusable agent definition.
+    """
+    return [
+        {"type": "url", "name": row["name"], "url": row["mcp_server_url"]}
+        for row in connectors
+    ]
+
+
+def _agent_tools(connectors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The agent's ``tools``: the built-in toolset plus one entry per connector.
+
+    An empty ``tool_allowlist`` means "every tool this server exposes", which is
+    the right default even though the allowlist is the safer shape: we cannot
+    know a pasted server's tool names before connecting to it, so defaulting to
+    an allowlist would narrow every new connector down to nothing.
+    """
+    tools: list[dict[str, Any]] = [dict(_AGENT_TOOLSET)]
+    for row in connectors:
+        toolset: dict[str, Any] = {
+            "type": "mcp_toolset",
+            "mcp_server_name": row["name"],
+        }
+        allowlist = row.get("tool_allowlist") or []
+        if allowlist:
+            toolset["default_config"] = {"enabled": False}
+            toolset["configs"] = [{"name": tool, "enabled": True} for tool in allowlist]
+        tools.append(toolset)
+    return tools
+
+
+def _to_connector(row: dict[str, Any]) -> AgentConnectorResponse:
+    return AgentConnectorResponse(
+        id=row["id"],
+        agent_id=row["agent_id"],
+        name=row["name"],
+        mcp_server_url=row["mcp_server_url"],
+        provider=row.get("provider"),
+        tool_allowlist=row.get("tool_allowlist") or [],
+        created_at=row.get("created_at"),
+    )

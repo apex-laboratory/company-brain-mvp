@@ -18,9 +18,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 
-from app.modules.agents.schemas import AgentCreateRequest, AgentUpdateRequest
+from app.modules.agents.schemas import (
+    AgentConnectorCreateRequest,
+    AgentCreateRequest,
+    AgentUpdateRequest,
+)
 from app.modules.agents.service import AgentsService
-from app.shared.http.respond import created, ok
+from app.shared.http.respond import created, no_content, ok
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
 from app.shared.middleware.authorize import require_role
 from app.shared.middleware.rate_limit import DASHBOARD_LIMIT, limiter, workspace_key
@@ -101,3 +105,47 @@ async def unpublish_agent(
     """Take it back to private. Owner only — the inverse of publish."""
     agent = await _service.set_visibility(auth, agent_id, visibility="private")
     return ok(request, agent.model_dump(by_alias=True))
+
+
+# ── connectors ────────────────────────────────────────────────────────────────
+
+
+@router.get("/{agent_id}/connectors")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def list_connectors(
+    request: Request, agent_id: str, auth: AuthContext = Depends(get_auth_context)
+):
+    """The MCP servers this agent talks to. No credential material, ever."""
+    connectors = await _service.list_connectors(auth, agent_id)
+    return ok(request, [c.model_dump(by_alias=True) for c in connectors])
+
+
+@router.post(
+    "/{agent_id}/connectors", dependencies=[Depends(require_role("editor"))]
+)
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def add_connector(
+    request: Request,
+    agent_id: str,
+    body: AgentConnectorCreateRequest,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Declare an MCP server and push the agent's tool config. Owner only."""
+    connector = await _service.add_connector(auth, agent_id, body)
+    return created(request, connector.model_dump(by_alias=True))
+
+
+@router.delete(
+    "/{agent_id}/connectors/{connector_id}",
+    dependencies=[Depends(require_role("editor"))],
+)
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def remove_connector(
+    request: Request,
+    agent_id: str,
+    connector_id: str,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Undeclare an MCP server and push the reduced config. Owner only."""
+    await _service.remove_connector(auth, agent_id, connector_id)
+    return no_content()
