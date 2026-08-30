@@ -131,7 +131,7 @@ calls if left as-is:
 ```
 OAUTH_REDIRECT_BASE_URL   # → https://<api-service>.koyeb.app
 AI_SERVICE_URL            # → wherever the frontend should reach `api`
-MCP_BASE_DOMAIN           # → the mcp service's public domain
+MCP_PUBLIC_URL            # → https://<mcp-service>.koyeb.app/mcp (same for every workspace)
 ALLOWED_ORIGINS           # → the frontend repo's deployed origin
 FRONTEND_URL / APP_BASE_URL
 ```

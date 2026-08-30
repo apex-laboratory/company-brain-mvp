@@ -95,9 +95,7 @@ async def test_get_settings_builds_brain_endpoint() -> None:
 
     assert result.workspace.name == "Riverline"
     assert result.workspace.seat_limit == 12
-    assert result.brain_endpoint == _brain_endpoint("riverline")
-    assert result.brain_endpoint.startswith("https://riverline.")
-    assert result.brain_endpoint.endswith("/mcp")
+    assert result.brain_endpoint == _brain_endpoint()
 
 
 @pytest.mark.asyncio

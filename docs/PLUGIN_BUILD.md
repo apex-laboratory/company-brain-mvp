@@ -297,11 +297,14 @@ detached flusher and return.
 > `plugin.json` references). It holds an env-var reference, never a key.
 >
 > **Still blocked on marketplace submission:** the URL above assumes an HTTPS
-> ingress that does not exist yet — port 8001 is still compose-internal. The
-> host also has to be reconciled with the per-workspace endpoint the dashboard
-> advertises (`https://{slug}.brainites.com/mcp`, `workspaces/service.py:70`);
-> those two are not the same shape. See the build order and
-> `agent-builder-plan.md` §4.3.
+> ingress that does not exist yet — port 8001 is still compose-internal.
+> The host-shape mismatch is resolved: the dashboard's `_brain_endpoint()`
+> (`workspaces/service.py:69`) now hands out the same single
+> `settings.mcp_public_url` (default `https://mcp.brainites.com/mcp`) to every
+> workspace, matching this file, instead of a `https://{slug}.brainites.com/mcp`
+> it had no ingress to back. `query_brain` resolves the tenant from
+> `X-API-Key`, never the Host header, so one host loses no isolation. See the
+> build order and `agent-builder-plan.md` §4.3.
 >
 > Note also that `report_run` is **not** in this block, though the shim spec
 > assumed it: no such tool exists in `app/mcp/server.py`, which exposes
@@ -490,12 +493,13 @@ have been of `nil`), and crashed on a `stop_reason` that is never sent. One prob
 session cost twenty minutes and turned all of that into fixtures.
 
 **Milestone 7 is gated on the MCP server becoming publicly reachable over
-Streamable HTTP** (the agent builder's phase 0). Half of that is now done: the
-server speaks Streamable HTTP and `plugin/.mcp.json` targets `/mcp`. **The
-ingress is not** — port 8001 is still compose-internal, and the public host has
-yet to be reconciled with the per-workspace endpoint the dashboard hands out.
-Publishing before the ingress exists would ship a plugin pointing at a hostname
-that does not resolve.
+Streamable HTTP** (the agent builder's phase 0). Most of that is now done: the
+server speaks Streamable HTTP, `plugin/.mcp.json` targets `/mcp`, and the
+dashboard's `_brain_endpoint()` now hands out that same single host instead of
+a per-workspace subdomain with no ingress behind it (see the correction above).
+**The ingress itself is still missing** — port 8001 is still compose-internal.
+Publishing before it exists would ship a plugin pointing at a hostname that
+does not resolve.
 
 ## Test plan
 
