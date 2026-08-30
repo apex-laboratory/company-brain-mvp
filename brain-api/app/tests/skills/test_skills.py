@@ -39,10 +39,16 @@ class _AsyncCtx:
         return False
 
 
-def _auth(role: str = "viewer", kind: str = "jwt", scopes: list[str] | None = None) -> AuthContext:
+def _auth(
+    role: str = "viewer",
+    kind: str = "jwt",
+    scopes: list[str] | None = None,
+    agent_origin: bool = False,
+) -> AuthContext:
     return AuthContext(
         user_id="usr_1", workspace_id="wrk_1", role=role,
         scopes=scopes or [], kind=kind,  # type: ignore[arg-type]
+        agent_origin=agent_origin,
     )
 
 
@@ -137,6 +143,70 @@ async def test_search_logs_no_match_below_threshold() -> None:
         _exit(patches)
     log = repo.insert_interaction.await_args.kwargs
     assert log["match_type"] == "no_match" and log["skill_id"] is None
+
+
+# ── agent_origin: the unreviewed path is closed ──────────────────────────────
+#
+# An agent that has just read a customer's Slack DM phrases its query using that
+# content, so the raw query column is the one channel that can carry connector or
+# file contents into the Brain unreviewed. /skills/search and query_brain both
+# accept API keys, so both must store the match without the text.
+
+
+async def test_search_stores_no_query_text_for_agent_origin() -> None:
+    svc, repo, _pipe, patches = _svc(hits=[_hit(0.91)])
+    _enter(patches)
+    try:
+        await svc.search(_auth(kind="api_key", agent_origin=True), "refund a VIP", 5)
+    finally:
+        _exit(patches)
+    log = repo.insert_interaction.await_args.kwargs
+    assert log["query"] is None
+    # The match itself is still recorded: usage counters and the override flow
+    # read these columns, not the query text.
+    assert log["match_type"] == "semantic" and log["skill_id"] == "skl_1"
+
+
+async def test_search_keeps_query_text_for_dashboard_jwt() -> None:
+    svc, repo, _pipe, patches = _svc(hits=[_hit(0.91)])
+    _enter(patches)
+    try:
+        await svc.search(_auth(), "refund a VIP", 5)
+    finally:
+        _exit(patches)
+    assert repo.insert_interaction.await_args.kwargs["query"] == "refund a VIP"
+
+
+async def test_query_stores_no_query_text_for_agent_origin() -> None:
+    svc, repo, _pipe, patches = _svc(skill=_skill(), hits=[_hit(0.91)])
+    _enter(patches)
+    try:
+        with patch.object(
+            service_module.cache, "get_cached_search", AsyncMock(return_value=None)
+        ), patch.object(service_module.cache, "set_cached_search", AsyncMock()):
+            await svc.query(_auth(kind="api_key", agent_origin=True), "refund a VIP")
+    finally:
+        _exit(patches)
+    assert repo.insert_interaction.await_args.kwargs["query"] is None
+
+
+async def test_cache_hit_path_stores_no_query_text_for_agent_origin() -> None:
+    """The cache-hit branch logs through a separate call site: close it too."""
+    svc, repo, _pipe, patches = _svc()
+    _enter(patches)
+    try:
+        with patch.object(
+            service_module.cache, "get_cached_search",
+            AsyncMock(return_value={"match_type": "semantic", "skill_id": "skl_1",
+                                    "similarity_score": 0.91}),
+        ):
+            result = await svc.query(
+                _auth(kind="api_key", agent_origin=True), "refund a VIP"
+            )
+    finally:
+        _exit(patches)
+    assert result["cache_hit"] is True
+    assert repo.insert_interaction.await_args.kwargs["query"] is None
 
 
 # ── query_brain core ─────────────────────────────────────────────────────────

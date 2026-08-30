@@ -77,7 +77,10 @@ class SkillsService:
             matched = top is not None and top.similarity >= _MATCH_THRESHOLD
             await self._repo.insert_interaction(
                 session, workspace_id=workspace_id, user_id=auth.user_id,
-                skill_id=top.id if matched else None, query=query,
+                skill_id=top.id if matched else None,
+                # /skills/search accepts API keys too, so it is the same
+                # unreviewed door as query_brain: store no text for agent keys.
+                query=None if auth.agent_origin else query,
                 matched_confidence=top.similarity if top else None,
                 match_type="semantic" if matched else "no_match",
             )
@@ -362,7 +365,8 @@ class SkillsService:
                 }
             interaction_id = await self._repo.insert_interaction(
                 session, workspace_id=workspace_id, user_id=auth.user_id,
-                skill_id=response.get("skill_id"), query=situation,
+                skill_id=response.get("skill_id"),
+                query=None if auth.agent_origin else situation,
                 matched_confidence=response.get("similarity_score"),
                 match_type=response["match_type"],
             )
@@ -388,7 +392,8 @@ class SkillsService:
         ):
             interaction_id = await self._repo.insert_interaction(
                 session, workspace_id=workspace_id, user_id=auth.user_id,
-                skill_id=skill_id, query=situation,
+                skill_id=skill_id,
+                query=None if auth.agent_origin else situation,
                 matched_confidence=confidence, match_type=match_type,
             )
             await session.commit()

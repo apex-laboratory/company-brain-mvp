@@ -1,11 +1,18 @@
 """MCP server exposing ``query_brain`` to AI agents (Phase 5 — PRD §14, Feature 15).
 
-Runs as its own process on ``settings.mcp_port`` (default 8001). Agents
-authenticate with the **same** ``X-API-Key`` credential as the REST API: the tool
-resolves it to a workspace-scoped ``AuthContext`` and requires the ``brain:query``
-scope, **failing closed** — a missing/invalid key or missing scope raises before
-any data is read, and there is no default workspace. All reads are RLS-scoped in
-``SkillsService``.
+Runs as its own process on ``settings.mcp_port`` (default 8001) over **Streamable
+HTTP** — the transport Anthropic Managed Agents connects on. SSE is the deprecated
+MCP transport and is deliberately *not* dual-mounted: this is the only
+internet-facing service carrying an API key, and a second transport would mean a
+second auth path and a second rate-limit surface (see ``docs/agent-builder-plan.md``
+§4.1).
+
+Agents authenticate with the same credential as the REST API, presented either as
+``X-API-Key: <key>`` or ``Authorization: Bearer <key>`` — a vault ``static_bearer``
+credential arrives in the latter form. Both resolve through ``authenticate_api_key``
+to a workspace-scoped ``AuthContext`` requiring the ``brain:query`` scope, **failing
+closed** — a missing/invalid key or missing scope raises before any data is read, and
+there is no default workspace. All reads are RLS-scoped in ``SkillsService``.
 
 Launch: ``python -m app.mcp.server`` (see the Dockerfile / compose ``mcp`` service).
 """
@@ -51,8 +58,26 @@ def _client_ip() -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _presented_key(headers: dict[str, str]) -> str | None:
+    """The API key from ``X-API-Key`` or an ``Authorization: Bearer`` header.
+
+    Managed Agents injects a vault ``static_bearer`` credential as a Bearer token,
+    so the same key reaches us in two shapes. ``X-API-Key`` wins when both are
+    present. Only the ``Bearer`` scheme is read: a JWT presented here would fail
+    ``authenticate_api_key`` anyway, so agent credentials stay the one way in.
+    """
+    raw_key = headers.get("x-api-key")
+    if raw_key:
+        return raw_key
+    authorization = headers.get("authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+    return None
+
+
 async def _authenticate() -> AuthContext:
-    """Resolve the request's X-API-Key into a scoped context, or raise ToolError.
+    """Resolve the request's API key into a scoped context, or raise ToolError.
 
     Mirrors the REST auth dependency, throttle included: this process listens on
     its own port with no slowapi limiter, so the per-IP AUTH_LIMIT is applied
@@ -60,9 +85,11 @@ async def _authenticate() -> AuthContext:
     an unthrottled surface.
     """
     headers = {k.lower(): v for k, v in get_http_headers(include_all=True).items()}
-    raw_key = headers.get("x-api-key")
+    raw_key = _presented_key(headers)
     if not raw_key:
-        raise ToolError("Unauthorized: missing X-API-Key header.")
+        raise ToolError(
+            "Unauthorized: missing credential. Send X-API-Key or Authorization: Bearer."
+        )
     try:
         await enforce_api_key_probe_limit(_client_ip())
     except RateLimitError as exc:
@@ -105,21 +132,28 @@ async def query_brain(situation: str) -> dict:
     except RateLimitError as exc:
         raise ToolError(_rate_limited_message(exc)) from exc
     result = await _service.query(auth, situation)
-    if result["match_type"] == "no_match" and not result.get("cache_hit"):
+    if (
+        result["match_type"] == "no_match"
+        and not result.get("cache_hit")
+        and not auth.agent_origin
+    ):
         # Feature 16: escalate a genuine miss to inline query-driven extraction.
+        # Skipped for agent-origin credentials: extraction would write the raw
+        # situation text (which may quote connector or file contents) into a
+        # skill and the query log without human review. See agent-builder-plan §4.4.
         return await run_query_extraction(auth, situation, prior=result)
     return result
 
 
 async def run_mcp_server() -> None:
-    """Serve the MCP tool over HTTP (SSE) on the configured port.
+    """Serve the MCP tool over Streamable HTTP on the configured port.
 
     This process runs no FastAPI lifespan, so it initializes the shared Redis
     client itself — the rate limiter above depends on it.
     """
     await init_redis()
     try:
-        await mcp.run_http_async(transport="sse", host="0.0.0.0", port=settings.mcp_port)
+        await mcp.run_http_async(transport="http", host="0.0.0.0", port=settings.mcp_port)
     finally:
         await close_redis()
 

@@ -30,6 +30,14 @@ PREFIX_MAP: dict[str, str] = {
     "oauth_state": "st",
     "agent_run": "run",
     "run_cluster": "clu",
+    # Agent builder. Distinct from "agent_run" above: that is an ingested trace,
+    # these are the user-built agents and their pointers (agent-builder-plan §4.5).
+    "agent": "agt",
+    "agent_connector": "acn",
+    "agent_vault": "avl",
+    "agent_credential": "acr",
+    "agent_session": "ass",
+    "agent_schedule": "asc",
 }
 
 

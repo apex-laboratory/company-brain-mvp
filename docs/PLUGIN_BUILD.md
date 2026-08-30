@@ -4,9 +4,16 @@ How to build the client that feeds `POST /runs` and injects skills back. Compani
 to `docs/AGENT_HOOK_SHIM.md` (which specs *what* the client does); this doc is the
 *how*, against the platform contracts as verified **August 2026**.
 
-> **This doc corrects `AGENT_HOOK_SHIM.md` in six places** — see
-> [Corrections](#corrections-to-agent_hook_shimmd). The shim spec was written
-> against assumed payload shapes; these are the real ones.
+ > **⚠️ The fixtures outrank this document.** Real hook payloads were captured
+> from a live session in **August 2026** and live in `plugin/testdata/golden/`,
+> with the differences catalogued in that directory's `README.md`. **They
+> contradict this doc in seven places, and where they do, they win** — they were
+> observed, this was asserted. Every correction is folded in below and marked
+> **[fixture]**; the ones that changed the design are called out where they bite.
+>
+> This doc still corrects `AGENT_HOOK_SHIM.md` — see
+> [Corrections](#corrections-to-agent_hook_shimmd) — but two of its own
+> "corrections" were themselves wrong.
 
 ---
 
@@ -39,13 +46,44 @@ to `settings.json`**, so anything that works in one works in the other.
 
 | Event | Matchers | Key stdin fields | Our use |
 |---|---|---|---|
-| `SessionStart` | `startup`, `resume`, `clear`, `compact`, `fork` | `session_id`, `transcript_path`, `cwd`, `model` | Open spool, emit brief |
+| `SessionStart` | `startup`, `resume`, `clear`, `compact`, `fork` | `session_id`, `transcript_path`, `cwd`, `source` **[fixture: `source`, not `model`]** | Open spool, emit brief |
 | `UserPromptSubmit` | — | `session_id`, **`prompt_id`**, `prompt`, `cwd`, `permission_mode` | Segment + inject |
-| `PreToolUse` | tool name regex | `tool_name`, `tool_input`, `tool_use_id`, `agent_id` | Stamp step start |
-| `PostToolUse` | tool name regex | `tool_name`, `tool_input`, **`tool_result`**, `tool_use_id` | **The trajectory** |
-| `Stop` | — | **`last_assistant_message`**, `stop_reason` | Close run, flush |
+| `PreToolUse` | tool name regex | `tool_name`, `tool_input`, `tool_use_id`, `prompt_id` **[fixture: no `agent_id`]** | **Open the step — this is where failures are recorded** |
+| `PostToolUse` | tool name regex | `tool_name`, `tool_input`, **`tool_response`**, `tool_use_id`, `duration_ms` **[fixture]** | **The trajectory** |
+| `Stop` | — | **`last_assistant_message`**, `stop_hook_active` **[fixture: there is no `stop_reason`]** | Close run, flush |
 | `PreCompact` | `manual`, `auto` | `compaction_trigger` | Flush before context loss |
-| `SessionEnd` | `clear`, `resume`, `logout`, `prompt_input_exit`, `other` | `session_end_reason` | Final drain |
+| `SessionEnd` | `clear`, `resume`, `logout`, `prompt_input_exit`, `other` | `reason` **[fixture: not `session_end_reason`]** | Final drain |
+
+> **`prompt_id` is present on `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+> `Stop` *and* `SessionEnd`** — confirmed against the fixtures. Segmentation by
+> `prompt_id` holds exactly as specced below.
+
+#### The finding that changes the hook set: a failed tool call emits no `PostToolUse`
+
+Probed directly (`cat /definitely/not/a/real/file`, `Read` of a missing path):
+both produced a `PreToolUse` and **no `PostToolUse` at all** — 6 `PreToolUse`
+against 4 `PostToolUse`, the two unmatched `tool_use_id`s being exactly the
+failures.
+
+So `PostToolUse` alone captures **only successful tool calls**. The consequences
+are not cosmetic:
+
+- The outcome resolver's rank 5 ("an error in the last 3 steps") and the server's
+  own `error_free_tail` check in `gate_run.evaluate` would both be fed a
+  trajectory in which `error` is unreachable. **Every run would look clean.**
+- Failures — the dead ends a *procedure* is partly made of — would leave no trace.
+
+**Therefore `PreToolUse` is hooked, and the two are reconciled by `tool_use_id`:
+`PreToolUse` opens a step and assigns its index; `PostToolUse` closes it `ok`; a
+step still open at segment close is `status: "error"`.** That is the only path by
+which a failure reaches the trace. `AGENT_HOOK_SHIM.md` had this right; the
+`hooks.json` printed later in this doc originally omitted `PreToolUse`, and that
+was a bug.
+
+Also from the fixtures: **parallel tool calls complete out of order** (`Grep`
+closed before `Bash` despite starting after). Step indices must be assigned at
+`PreToolUse`, in arrival order — closing order yields a shuffled list, and the
+envelope's contiguous-execution-order validator rejects it.
 
 **Output contract — the parts that can hurt us:**
 
@@ -95,7 +133,12 @@ in both. Submission specifics:
 - OpenAI converts `.claude-plugin/plugin.json` → `.codex-plugin/plugin.json`. Skills
   (`SKILL.md`, scripts, assets) and a remote MCP server carry over unchanged.
 - **stdio MCP servers and `.mcpb` bundles are not accepted** — the MCP server must be
-  a public HTTPS endpoint. Ours already is (SSE, `X-API-Key`).
+  a public HTTPS endpoint. **[fixture-adjacent correction] Ours is not one yet.**
+  `app/mcp/server.py` binds port 8001 as a compose-internal service with no ingress,
+  so a public HTTPS host (`mcp.brainite…`) is a prerequisite, not a given. The agent
+  builder's phase 0 delivers exactly this ingress — **submission is blocked on it**,
+  and the two efforts should not build it twice. (Phase 0's transport half has
+  landed; the ingress half has not.)
 - Must strip Claude-specific language ("Claude" → "the model") and replace `userConfig`
   with explicit inputs, OAuth, or hosted storage.
 - Submission needs: production `/mcp` URL, domain verification, exact CSP domains,
@@ -169,6 +212,12 @@ prompt. Point `hooks.json` at a shim that never changes, and update `bin/` freel
         "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/brainite-hook\" prompt",
         "timeout": 5 }]
     }],
+    "PreToolUse": [{
+      "matcher": ".*",
+      "hooks": [{ "type": "command",
+        "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/brainite-hook\" pretool",
+        "timeout": 5 }]
+    }],
     "PostToolUse": [{
       "matcher": ".*",
       "hooks": [{ "type": "command",
@@ -193,6 +242,9 @@ prompt. Point `hooks.json` at a shim that never changes, and update `bin/` freel
   }
 }
 ```
+
+`PreToolUse` is not optional — see the failed-call finding above. Without it the
+plugin captures only the tool calls that succeeded.
 
 Note the `SessionStart` matcher is **`startup|clear`** — deliberately *not*
 `resume|compact|fork`. A resumed or forked session already has an open spool and its
@@ -223,13 +275,38 @@ detached flusher and return.
 {
   "mcpServers": {
     "brainite": {
-      "type": "sse",
-      "url": "https://mcp.brainites.com/sse",
+      "type": "http",
+      "url": "https://mcp.brainites.com/mcp",
       "headers": { "X-API-Key": "${BRAINITE_API_KEY}" }
     }
   }
 }
 ```
+
+> **✅ Shipped — this is `plugin/.mcp.json`, not a sketch.** The agent builder's
+> phase 0 landed the transport half: `app/mcp/server.py` now runs
+> `transport="http"` (Anthropic Managed Agents connects over Streamable HTTP),
+> and the decision taken was **switch, don't dual-mount** — there was no
+> installed base to protect while the plugin is unpublished, and two transports
+> on the one internet-facing service would mean two auth paths and two
+> rate-limit surfaces to get wrong. SSE is also the deprecated MCP transport, so
+> dual-mounting would have meant migrating twice.
+>
+> `.mcp.json` is force-added in `.gitignore` (the repo ignores `.mcp.json`
+> globally as local dev config; the plugin's copy is a shipped artifact that
+> `plugin.json` references). It holds an env-var reference, never a key.
+>
+> **Still blocked on marketplace submission:** the URL above assumes an HTTPS
+> ingress that does not exist yet — port 8001 is still compose-internal. The
+> host also has to be reconciled with the per-workspace endpoint the dashboard
+> advertises (`https://{slug}.brainites.com/mcp`, `workspaces/service.py:70`);
+> those two are not the same shape. See the build order and
+> `agent-builder-plan.md` §4.3.
+>
+> Note also that `report_run` is **not** in this block, though the shim spec
+> assumed it: no such tool exists in `app/mcp/server.py`, which exposes
+> `query_brain` only. Outcome rank 1 is therefore unreachable, and `/brain-done`
+> (rank 2) carries v1.
 
 ---
 
@@ -260,10 +337,11 @@ Non-negotiable rules:
 |---|---|---|---|
 | `session-start` | `session_id`, `cwd` | Enabled-repo check; write spool header; read cached brief | `additionalContext` or nothing |
 | `prompt` | `prompt_id`, `prompt`, `cwd` | Close prior segment, open new one keyed by `prompt_id`; query brain under deadline | `additionalContext` or nothing |
-| `posttool` | `tool_name`, `tool_input`, `tool_result`, `tool_use_id` | Map to step envelope, redact, append to spool | nothing |
-| `stop` | `last_assistant_message`, `stop_reason` | Close segment, resolve outcome, spawn detached flush | nothing |
+| `pretool` | `tool_name`, `tool_input`, `tool_use_id`, `prompt_id` | Map to step envelope, redact, **open** the step and assign its index | nothing |
+| `posttool` | `tool_name`, `tool_response`, `tool_use_id`, `duration_ms` | **Close** the step: status, digest, latency | nothing |
+| `stop` | `last_assistant_message`, `stop_hook_active` | Close segment, resolve outcome, spawn detached flush | nothing |
 | `flush` | — | Assemble + POST closed segments | nothing |
-| `session-end` | `session_end_reason` | Signal detached flusher, return immediately | nothing |
+| `session-end` | `reason` | Signal detached flusher, return immediately | nothing |
 
 ### Segmentation — use `prompt_id`
 
@@ -293,12 +371,28 @@ genuinely stable across re-flushes. On Codex the same field is `turn_id`.
 | `Task` | `tool_call` | `Task:<subagent_type>` |
 | — | `assistant_message` | from `last_assistant_message` on `Stop` |
 
-`status` is `error` when `tool_result` indicates failure; `resultDigest` is
-`sha256(tool_result)[:16]` plus `{bytes, lines}`. **Never spool `tool_result` content
-itself** — only its digest and whatever survives redaction of `tool_input`.
+`resultDigest` is `sha256(tool_response)[:16]` plus `{bytes, lines}`. **Never spool
+`tool_response` content itself** — only its digest and whatever survives redaction of
+`tool_input`.
 
-> The `Stop` payload carries `last_assistant_message` directly, so **we never parse
-> `transcript_path`.** That removes the version-drift risk the shim spec flagged.
+`status` comes from two places, and the second is the one that matters:
+
+- `error` when `tool_response` reports failure in its own payload — a non-empty
+  `stderr`, `interrupted: true`. This catches the tool that returned successfully
+  while reporting failure inside.
+- `error` when the step was **opened and never closed**, because a hard failure
+  emits no `PostToolUse` at all. This is the only signal for a tool that failed,
+  was denied, or was interrupted.
+
+`tool_response` is a **per-tool object**, not a string: `Read` → `{file, type}`,
+`Bash` → `{stdout, stderr, interrupted, isImage, noOutputExpected}`, `Grep` →
+`{content, filenames, mode, numFiles, numLines, totalLines}`, `Write` → `{type,
+filePath, content, structuredPatch, originalFile, userModified}`. Digest the
+serialised form.
+
+> The `Stop` payload carries `last_assistant_message` directly — confirmed against
+> the fixtures — so **we never parse `transcript_path`.** That removes the
+> version-drift risk the shim spec flagged.
 
 ---
 
@@ -307,8 +401,15 @@ itself** — only its digest and whatever survives redaction of `tool_input`.
 Unchanged from `AGENT_HOOK_SHIM.md` — six ranked signals, `ambiguous` as the default,
 server owns the gate. Two implementation notes:
 
-- `stop_reason` is on the `Stop` payload. `max_tokens` means the agent was cut off
-  mid-task → force `ambiguous` regardless of other signals.
+- **[fixture] There is no `stop_reason` on the `Stop` payload** — the observed keys
+  are `background_tasks`, `cwd`, `effort`, `hook_event_name`,
+  `last_assistant_message`, `permission_mode`, `prompt_id`, `session_crons`,
+  `session_id`, `stop_hook_active`, `transcript_path`. The "`max_tokens` forces
+  `ambiguous`" rule has no input and is dropped. `stop_hook_active` is a
+  re-entrancy guard (true when a Stop hook is already running), not an outcome
+  signal — read it only to avoid closing a segment twice.
+- Rank 1 ("the model called `report_run`") is unreachable: no such MCP tool exists.
+  Ranks 2–6 carry v1.
 - `/brain-done` writes a marker file the next `stop` reads, because a slash command
   and a hook are separate processes.
 
@@ -358,7 +459,10 @@ plugin. `strict: true` if `plugin.json` owns component definitions.
 
 1. Archive with `.claude-plugin/plugin.json` + at least one skill.
 2. platform.openai.com/plugins → Create plugin → **With MCP**.
-3. Submit `https://mcp.brainites.com/sse` as the production endpoint; verify the domain.
+3. Submit the production MCP endpoint and verify the domain. **Confirm which
+   transport the directory accepts before freezing the URL** — post-phase-0 the
+   server speaks Streamable HTTP, and this doc's track record on unverified
+   platform details is poor.
 4. Strip "Claude" from all skill text; replace any `userConfig` with OAuth or explicit input.
 5. Supply reviewer credentials (a demo workspace API key), 5 positive + 3 negative tests.
 6. Ship the ChatGPT experience **assuming no hooks** — read-only `query_brain`, per
@@ -368,15 +472,30 @@ plugin. `strict: true` if `plugin.json` owns component definitions.
 
 ## Build order
 
-| # | Milestone | Proves |
-|---|---|---|
-| 1 | Binary skeleton: stdin parse, always-exit-0, spool append, `posttool` mapping | a trajectory lands on disk |
-| 2 | `prompt` segmentation by `prompt_id`, `stop` outcome, detached flush → `POST /runs` | **a real trajectory reaches `agent_runs`** |
-| 3 | `/brain-done` marker + skill | live demo: task → `/brain-done` → cluster ready |
-| 4 | Injection + cache + provenance line | the loop closes visibly |
-| 5 | Client redaction, `.brainignore`, `/brain mute`, `/brain status` | shippable to someone else's machine |
-| 6 | Codex adapter (`turn_id`, `async: true`, trust-stable shim) | second surface, ~1 day |
-| 7 | Claude marketplace + OpenAI directory submission | distribution |
+| # | Milestone | Proves | Status |
+|---|---|---|---|
+| 0 | **Capture real hook payloads before writing code** — tee all six events, diff against this doc | the contract is observed, not assumed | ✅ `plugin/testdata/golden/` |
+| 1 | Binary skeleton: stdin parse, always-exit-0, spool append, `pretool`/`posttool` mapping | a trajectory lands on disk | ✅ |
+| 2 | `prompt` segmentation by `prompt_id`, `stop` outcome, detached flush → `POST /runs` | **a real trajectory reaches `agent_runs`** | ✅ verified live |
+| 3 | `/brain-done` marker + skill | task → `/brain-done` → cluster ready for distillation | ✅ verified live |
+| 4 | Injection + cache + provenance line | the loop closes visibly | ✅ |
+| 5 | Client redaction hardening, `.brainignore`, `/brain mute`, `/brain status` | shippable to someone else's machine | ⏳ |
+| 6 | Codex adapter (`turn_id`, `async: true`, trust-stable shim) | second surface, ~1 day | ⏳ |
+| 7 | Claude marketplace + OpenAI directory submission | distribution | ⏳ **blocked on the agent builder's phase 0** — see below |
+
+Milestone 0 was not in the original plan and should have been. Writing the mapping
+against this doc's asserted field names would have produced a plugin that captured
+no failures, stored no results (`tool_result` does not exist, so the digest would
+have been of `nil`), and crashed on a `stop_reason` that is never sent. One probe
+session cost twenty minutes and turned all of that into fixtures.
+
+**Milestone 7 is gated on the MCP server becoming publicly reachable over
+Streamable HTTP** (the agent builder's phase 0). Half of that is now done: the
+server speaks Streamable HTTP and `plugin/.mcp.json` targets `/mcp`. **The
+ingress is not** — port 8001 is still compose-internal, and the public host has
+yet to be reconciled with the per-workspace endpoint the dashboard hands out.
+Publishing before the ingress exists would ship a plugin pointing at a hostname
+that does not resolve.
 
 ## Test plan
 
@@ -393,15 +512,44 @@ plugin. `strict: true` if `plugin.json` owns component definitions.
 
 ## Corrections to `AGENT_HOOK_SHIM.md`
 
+> **Two rows of this table were themselves wrong.** Rows 1 and 3 below are kept
+> with their errors struck through, because the failure mode is the point: both
+> were asserted confidently, neither was observed, and row 1 would have silently
+> broken every result digest. The fixtures in `plugin/testdata/golden/` are now the
+> authority for all of it.
+
 | # | Shim spec said | Reality |
 |---|---|---|
-| 1 | `tool_response` | The field is **`tool_result`** |
+| 1 | `tool_response` | ~~The field is **`tool_result`**~~ — **the shim spec was right.** The observed key is **`tool_response`**. |
 | 2 | Segment index synthesised from session id | Use the platform's **`prompt_id`** (`turn_id` on Codex) |
-| 3 | Parse `transcript_path` for the final message | **`last_assistant_message`** is on the `Stop` payload |
+| 3 | Parse `transcript_path` for the final message | **`last_assistant_message`** is on the `Stop` payload ✅ confirmed — but the accompanying claim that `stop_reason` is there too was wrong; **there is no `stop_reason`** |
 | 4 | `SessionEnd` does the final flush | **1.5s shared budget** — signal a detached flusher, nothing more |
 | 5 | Codex is "v2, a different event adapter" | Codex has a **near-identical hook system**; it is milestone 6, ~1 day |
 | 6 | Hook contract drift is a parse-failure risk | Also: **exit 2 on `UserPromptSubmit` erases the user's prompt** — never exit non-zero |
 
 Everything else in that spec — the hot/flush split, the ambiguous-by-default outcome
 resolver, opt-in per repo, the spool format, `min_runs_per_cluster` deferral to the
-server — stands as written.
+server — stands as written. So does its `PreToolUse` hook, which this doc wrongly
+dropped.
+
+## Corrections to *this* document
+
+Found by capturing real payloads (`plugin/testdata/golden/README.md`) and by
+running the client against a live stack.
+
+| # | This doc said | Reality |
+|---|---|---|
+| 1 | `tool_result` on `PostToolUse` | **`tool_response`** |
+| 2 | `hooks.json` needs no `PreToolUse` | **It does.** A failed tool call emits `PreToolUse` and *no* `PostToolUse`, so without it failures are invisible and every run looks clean |
+| 3 | `stop_reason` on `Stop` | Not present. `stop_hook_active` is a re-entrancy guard, not an outcome signal |
+| 4 | `session_end_reason` on `SessionEnd` | The key is **`reason`** |
+| 5 | `agent_id` on `PreToolUse` | Not present |
+| 6 | `model` on `SessionStart` | The key is **`source`**. `PostToolUse` also carries `duration_ms`, so `latencyMs` is free |
+| 7 | "the MCP server must be a public HTTPS endpoint. Ours already is" | It is not. Port 8001 is compose-internal with no ingress; that ingress is the agent builder's phase 0 |
+
+One more, found only by running it end-to-end rather than by reading: `gate_run`
+died on every real ingest with `ValueError: could not convert string to float: '['`.
+No pgvector codec is registered, so `task_embedding` comes back as its text literal
+and `list()` split it into characters — **every run reached the gate and none was
+ever clustered.** Unit tests could not catch it; they inject a mocked repository.
+Fixed at the repository boundary in `app/modules/runs/repository.py`.

@@ -383,7 +383,11 @@ class BrainService:
         ):
             interaction_id = await self._skills.insert_interaction(
                 session, workspace_id=workspace_id, user_id=auth.user_id,
-                skill_id=core.get("top_skill_id"), query=question,
+                skill_id=core.get("top_skill_id"),
+                # /brain/query accepts API keys as well as dashboard JWTs; agent
+                # callers log the match without the text. JWT callers are
+                # unaffected, so persisted chat history keeps its question.
+                query=None if auth.agent_origin else question,
                 matched_confidence=core.get("top_similarity"),
                 match_type=core["match_type"],
             )

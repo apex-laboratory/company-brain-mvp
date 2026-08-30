@@ -51,6 +51,10 @@ htmlcov/
 .agents
 .claude
 .mcp.json
+# The plugin's own .mcp.json is a shipped artifact, not local dev config:
+# plugin.json references it and the plugin is broken without it. It holds an
+# env-var reference (${BRAINITE_API_KEY}), never a key.
+!plugin/.mcp.json
 skills-lock.json
 .gstack/
 my_notes/

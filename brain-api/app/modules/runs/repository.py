@@ -28,6 +28,26 @@ def _vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(repr(float(v)) for v in embedding) + "]"
 
 
+def _parse_vector(value: Any) -> list[float] | None:
+    """Read a pgvector column back into floats.
+
+    No pgvector codec is registered on the asyncpg connection, so a ``vector``
+    column arrives as its **text literal** — ``'[0.1,0.2,...]'`` — not as a
+    sequence. Handing that straight to ``list()`` yields a list of *characters*,
+    and the first float conversion downstream dies on ``'['``. Parsing at the
+    repository boundary keeps the driver's representation from leaking into the
+    gate, which is the only place that reads this column into Python.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip().strip("[]")
+        if not stripped:
+            return []
+        return [float(part) for part in stripped.split(",")]
+    return [float(v) for v in value]
+
+
 class RunsRepository:
     async def insert(
         self,
@@ -160,7 +180,11 @@ class RunsRepository:
                 {"run_id": run_id},
             )
         ).mappings().first()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        out = dict(row)
+        out["task_embedding"] = _parse_vector(out.get("task_embedding"))
+        return out
 
     async def mark_gated(
         self,

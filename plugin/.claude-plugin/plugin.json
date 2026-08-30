@@ -1,0 +1,11 @@
+{
+  "name": "brainite",
+  "version": "0.1.0",
+  "description": "Your company's reviewed operational knowledge, in the agent's context",
+  "author": { "name": "Brainite", "url": "https://brainites.com" },
+  "repository": "https://github.com/brainite/plugin",
+  "license": "Apache-2.0",
+  "keywords": ["knowledge", "memory", "procedures", "context"],
+  "skills": ["./skills/brain-done", "./skills/brain-enable"],
+  "mcpServers": "./.mcp.json"
+}

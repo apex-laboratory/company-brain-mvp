@@ -1,0 +1,172 @@
+"""Agent-builder API contract (agent-builder-plan §5.3, phase 1).
+
+This is the half of phase 1 the frontend is blocked on, so the shapes here are
+the contract more than they are validation: `features/agents/` builds its list,
+builder form and version list against exactly these fields.
+
+Two things are deliberate:
+
+* **`model` and `effort` are closed sets, not free strings.** The alternative is
+  discovering a typo when Anthropic 400s at save time, having already charged the
+  user a round-trip; a 422 naming the field is cheaper and happens before any
+  vendor call. The list is Claude 4.5+ because that is what Managed Agents runs.
+* **Update is tri-state.** PATCH must tell "leave this alone" apart from "clear
+  it", so `AgentUpdateRequest` is read through ``model_dump(exclude_unset=True)``
+  and an explicit ``null`` is a real value. Collapsing the two would make every
+  partial save silently wipe the fields it did not mention.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Annotated, Literal
+
+from pydantic import Field, field_validator
+
+from app.shared.schemas import CamelModel, CamelRequestModel
+
+# Managed Agents supports Claude 4.5+. Kept explicit rather than free-form: see
+# the module docstring. Opus 5 is the default — never downgrade a user's agent
+# for cost, that is their call to make in the builder.
+AgentModel = Literal[
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+]
+
+# Effort is agent configuration only. Anthropic silently ignores an effort set in
+# a per-session override, so it lives here and changing it means a new agent
+# version — which is also why it is worth validating before the vendor call.
+AgentEffort = Literal["low", "medium", "high", "xhigh", "max"]
+
+Visibility = Literal["private", "workspace"]
+AgentStatus = Literal["draft", "active", "archived"]
+
+
+class AgentResponse(CamelModel):
+    """One agent as the dashboard sees it.
+
+    ``anthropic_agent_version`` is exposed as ``version`` because that is what a
+    caller passes back to PATCH for optimistic concurrency — naming it after the
+    vendor would make the round-trip read like an implementation leak.
+    """
+
+    id: str
+    name: str
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    ground_in_brain: bool = True
+    budget_cents: int | None = None
+    visibility: Visibility = "private"
+    status: AgentStatus = "draft"
+    owner_user_id: str
+    # Lets the list render *Yours* vs *Shared in {workspace}* without the client
+    # re-deriving ownership from a user id it would otherwise not need.
+    is_owner: bool = False
+    version: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class AgentVersionResponse(CamelModel):
+    """One entry of the agent's append-only history, proxied from Anthropic.
+
+    Not mirrored locally on purpose: version history is Anthropic's record, and a
+    local copy is one failed write away from disagreeing with it.
+    """
+
+    version: int | None = None
+    name: str | None = None
+    created_at: datetime | None = None
+
+
+class AgentCreateRequest(CamelRequestModel):
+    """``POST /agents``. Only ``name`` is required — the builder saves early."""
+
+    name: Annotated[str, Field(min_length=1, max_length=256)]
+    description: Annotated[str | None, Field(default=None, max_length=2048)] = None
+    # Anthropic caps the system prompt at 100K chars; rejecting here means the
+    # user hears about it before we spend a round-trip finding out.
+    system_prompt: Annotated[str | None, Field(default=None, max_length=100_000)] = None
+    model: AgentModel = "claude-opus-5"
+    effort: AgentEffort | None = None
+    # On by default: grounding *is* the product (§10). A builder that defaulted
+    # this off would ship an Anthropic agent builder with a wiki attached.
+    ground_in_brain: bool = True
+    budget_cents: Annotated[int | None, Field(default=None, gt=0)] = None
+
+
+class AgentUpdateRequest(CamelRequestModel):
+    """``PATCH /agents/{id}``. Every field optional; unset means "leave alone".
+
+    ``version`` is optimistic concurrency, passed straight to Anthropic. Send it
+    to get a 409 when someone else has edited the agent since you loaded it;
+    omit it to apply unconditionally, which is last-write-wins and appropriate
+    only for a declarative apply loop that owns the agent.
+
+    Note Anthropic 409s on a stale ``version`` **even when the fields you send
+    already equal the stored values**, so a no-op save is still a conflict.
+    """
+
+    name: Annotated[str | None, Field(default=None, min_length=1, max_length=256)] = None
+    description: Annotated[str | None, Field(default=None, max_length=2048)] = None
+    system_prompt: Annotated[str | None, Field(default=None, max_length=100_000)] = None
+    model: AgentModel | None = None
+    effort: AgentEffort | None = None
+    ground_in_brain: bool | None = None
+    budget_cents: Annotated[int | None, Field(default=None, gt=0)] = None
+    status: AgentStatus | None = None
+    version: Annotated[int | None, Field(default=None, ge=1)] = None
+
+
+# Anthropic caps an agent at 20 MCP servers (§8). Enforced here so the picker
+# says so plainly rather than letting a save fail at the vendor.
+MAX_CONNECTORS_PER_AGENT = 20
+
+# ``name`` is not decoration: it is the key ``mcp_toolset.mcp_server_name``
+# points at, so it has to survive a round-trip through Anthropic's config
+# unchanged. Restricting it to a slug avoids finding out at save time which
+# characters that config rejects.
+_CONNECTOR_NAME = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+
+
+class AgentConnectorResponse(CamelModel):
+    """One MCP server this agent talks to. Never any credential material."""
+
+    id: str
+    agent_id: str
+    name: str
+    mcp_server_url: str
+    provider: str | None = None
+    tool_allowlist: list[str] = []
+    created_at: datetime | None = None
+
+
+class AgentConnectorCreateRequest(CamelRequestModel):
+    """``POST /agents/{id}/connectors``.
+
+    ``mcp_server_url`` must be ``https``. Anthropic connects to it over
+    Streamable HTTP carrying a vault credential, and a plaintext hop would put
+    that credential on the wire. We never fetch this URL ourselves — the
+    connection is made from Anthropic's side — so this is a credential-exposure
+    check, not an SSRF one.
+    """
+
+    name: Annotated[str, Field(pattern=_CONNECTOR_NAME)]
+    mcp_server_url: Annotated[str, Field(min_length=1, max_length=2048)]
+    # NULL means a pasted custom URL; a catalog key otherwise. The catalog
+    # itself is phase 3 — until then every connector is effectively custom.
+    provider: Annotated[str | None, Field(default=None, max_length=64)] = None
+    # Empty means "every tool this server exposes". A non-empty list becomes
+    # Anthropic's `default_config: {enabled: false}` + per-tool `configs`
+    # allowlist, which is the safer shape but a worse default: a server whose
+    # tool names we cannot know yet would be allowlisted down to nothing.
+    tool_allowlist: list[Annotated[str, Field(max_length=128)]] = []
+
+    @field_validator("mcp_server_url")
+    @classmethod
+    def _must_be_https(cls, url: str) -> str:
+        if not url.startswith("https://"):
+            raise ValueError("mcpServerUrl must be an https:// URL")
+        return url

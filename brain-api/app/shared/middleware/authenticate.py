@@ -55,6 +55,11 @@ class AuthContext:
     role: str | None
     scopes: list[str] = field(default_factory=list)
     kind: Literal["jwt", "api_key"] = "jwt"
+    # Non-dashboard credential (agent, plugin, CI). When true, ``query_brain``
+    # skips query-driven extraction and stores no query text. Dashboard JWTs
+    # leave this False; API keys carry the per-credential ``api_keys`` column,
+    # which itself defaults true.
+    agent_origin: bool = False
 
 
 def _from_jwt(token: str) -> AuthContext | None:
@@ -102,6 +107,7 @@ async def _from_api_key(raw_key: str) -> AuthContext | None:
         role=_API_KEY_ROLE,
         scopes=resolved.scopes,
         kind="api_key",
+        agent_origin=resolved.agent_origin,
     )
     _api_key_cache[key_hash] = (time.monotonic() + _API_KEY_CACHE_TTL_SECONDS, auth)
     return auth

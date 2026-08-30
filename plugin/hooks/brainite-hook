@@ -1,0 +1,19 @@
+#!/bin/sh
+# Stable entrypoint. hooks.json points here and this file never changes.
+#
+# Codex records hook trust against the *hash of the command*, so pointing the
+# config at the real binary would re-trigger a trust prompt on every plugin
+# update. A shim that only execs keeps routine updates silent.
+#
+# Prefers the plugin's own build, falls back to an installed copy.
+set -eu
+root="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -x "$root/bin/brainite-hook" ]; then
+  exec "$root/bin/brainite-hook" "$@"
+elif [ -x "${HOME}/.brainite/bin/brainite-hook" ]; then
+  exec "${HOME}/.brainite/bin/brainite-hook" "$@"
+fi
+# No binary: exit 0 and capture nothing. A missing build must never surface as a
+# hook error on every prompt, and on UserPromptSubmit a non-zero exit would erase
+# what the user typed.
+exit 0

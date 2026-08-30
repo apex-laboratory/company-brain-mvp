@@ -36,6 +36,7 @@ class ResolvedApiKey:
     workspace_id: str
     created_by: str
     scopes: list[str]
+    agent_origin: bool
 
 
 @dataclass(frozen=True)
@@ -195,7 +196,7 @@ class AuthRepository:
             await session.execute(
                 text(
                     """
-                    SELECT id, workspace_id, created_by, scopes
+                    SELECT id, workspace_id, created_by, scopes, agent_origin
                     FROM api_keys
                     WHERE key_hash = :key_hash
                       AND revoked_at IS NULL
@@ -220,6 +221,8 @@ class AuthRepository:
             workspace_id=row.workspace_id,
             created_by=row.created_by,
             scopes=list(row.scopes or []),
+            # Fail closed: an unreadable flag is treated as a closed credential.
+            agent_origin=bool(row.agent_origin) if row.agent_origin is not None else True,
         )
 
     # ── refresh-token rotation (pre-tenant; refresh_tokens is a global table) ──
