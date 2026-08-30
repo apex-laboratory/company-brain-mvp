@@ -33,7 +33,7 @@ class _StubWorkspaceService:
             workspace=WorkspaceConfig(
                 name="Riverline", domain="riverline.io", plan="pro", seat_limit=12
             ),
-            brain_endpoint="https://riverline.brainites.com/mcp",
+            brain_endpoint="https://mcp.brainites.com/mcp",
         )
 
     async def update_settings(
@@ -112,7 +112,7 @@ async def test_get_settings_envelope(client: AsyncClient) -> None:
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert data["workspace"]["seatLimit"] == 12
-    assert data["brainEndpoint"] == "https://riverline.brainites.com/mcp"
+    assert data["brainEndpoint"] == "https://mcp.brainites.com/mcp"
 
 
 @pytest.mark.asyncio

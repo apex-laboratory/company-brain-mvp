@@ -66,8 +66,9 @@ def _is_slug_conflict(exc: IntegrityError) -> bool:
     return "slug" in str(getattr(exc, "orig", exc)).lower()
 
 
-def _brain_endpoint(slug: str) -> str:
-    return f"https://{slug}.{settings.mcp_base_domain}/mcp"
+def _brain_endpoint() -> str:
+    # Same URL for every workspace — see the mcp_public_url comment in settings.py.
+    return settings.mcp_public_url
 
 
 class WorkspaceService:
@@ -201,7 +202,7 @@ class WorkspaceService:
                 plan=row.plan,
                 seat_limit=row.seat_limit,
             ),
-            brain_endpoint=_brain_endpoint(row.slug),
+            brain_endpoint=_brain_endpoint(),
         )
 
     async def update_settings(

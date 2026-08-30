@@ -113,8 +113,12 @@ class Settings(BaseSettings):
     jira_client_id: str = ""
     jira_client_secret: str = ""
 
-    # Base domain for per-workspace MCP/brain endpoints.
-    mcp_base_domain: str = "brainites.com"
+    # Public MCP endpoint every workspace is handed. Single host, not per-workspace:
+    # query_brain resolves the tenant from the caller's X-API-Key, not the Host
+    # header, so a wildcard-subdomain-per-workspace scheme would need a DNS/TLS/
+    # ingress topology that doesn't exist and buys no isolation. Must match the
+    # URL baked into plugin/.mcp.json.
+    mcp_public_url: str = "https://mcp.brainites.com/mcp"
 
     # ── extraction pipeline LLMs (Phase 3) ───────────────────────────────────
     # Empty-string defaults so the API/worker boot without keys; the LLM client

@@ -99,7 +99,7 @@ Use predictable, resource-oriented route names:
 | Background jobs    | Use nouns for job collections, status by ID                  | `/api/v1/workspaces/:workspaceId/brain/builds/:buildId`     |
 | Provider callbacks | Keep provider in the path for OAuth clarity                  | `/api/v1/workspaces/:workspaceId/sources/slack/callback`    |
 | Server webhooks    | Keep provider webhooks outside workspace routes              | `/api/v1/webhooks/github`                                   |
-| MCP endpoint       | Keep MCP separate from REST versioning                       | `https://{workspaceSlug}.Brainite.com/mcp`                  |
+| MCP endpoint       | Keep MCP separate from REST versioning; single host for all workspaces (tenant comes from the API key, not the Host header) | `https://mcp.Brainite.com/mcp` |
 
 Naming style:
 
@@ -1639,10 +1639,11 @@ Response `200`:
 
 ## MCP Endpoint
 
-The UI exposes a workspace MCP endpoint:
+The UI exposes a single MCP endpoint, the same for every workspace — the tenant
+is resolved from the caller's API key, not the hostname:
 
 ```txt
-https://riverline.Brainite.com/mcp
+https://mcp.Brainite.com/mcp
 ```
 
 This should authenticate with a workspace API key and expose at least:
