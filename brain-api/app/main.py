@@ -18,15 +18,20 @@ from app.config.redis import close_redis, get_redis, init_redis
 from app.config.settings import settings
 from app.integrations.base import close_http_client
 from app.jobs.queue import close_queue
-from app.modules.agents.router import router as agents_router
+from app.modules.agents.router import (
+    credentials_router as agent_credentials_router,
+)
+from app.modules.agents.router import (
+    router as agents_router,
+)
 from app.modules.api_keys.router import router as api_keys_router
 from app.modules.auth.router import router as auth_router
 from app.modules.brain.router import router as brain_router
 from app.modules.dashboard.router import router as dashboard_router
 from app.modules.decisions.router import router as decisions_router
-from app.modules.runs.router import router as runs_router
 from app.modules.members.router import router as members_router
 from app.modules.reviews.router import router as reviews_router
+from app.modules.runs.router import router as runs_router
 from app.modules.skills.router import interactions_router
 from app.modules.skills.router import router as skills_router
 from app.modules.sources.router import router as sources_router
@@ -82,6 +87,7 @@ app.include_router(members_router, prefix="/api/v1")
 app.include_router(sweeps_router, prefix="/api/v1")
 app.include_router(reviews_router, prefix="/api/v1")
 app.include_router(agents_router, prefix="/api/v1")
+app.include_router(agent_credentials_router, prefix="/api/v1")
 app.include_router(skills_router, prefix="/api/v1")
 app.include_router(interactions_router, prefix="/api/v1")
 app.include_router(brain_router, prefix="/api/v1")
