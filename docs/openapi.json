@@ -1989,6 +1989,31 @@
         ]
       }
     },
+    "/api/v1/agents/catalog": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Catalog",
+        "description": "The curated connector catalog, annotated with what this caller has connected.\n\n**Declared before ``/{agent_id}`` on purpose.** FastAPI matches routes in\ndeclaration order, so moving this below would make ``catalog`` a perfectly\nvalid agent id and turn the whole catalog into a 404.",
+        "operationId": "list_catalog_api_v1_agents_catalog_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/agents/{agent_id}": {
       "get": {
         "tags": [
@@ -2357,6 +2382,222 @@
             "schema": {
               "type": "string",
               "title": "Connector Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-credentials": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Credentials",
+        "description": "What the caller has connected, plus which agents need something they lack.",
+        "operationId": "list_credentials_api_v1_agent_credentials_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/agent-credentials/{provider}/authorize": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Authorize Credential",
+        "description": "Begin the OAuth flow: return the provider consent URL to redirect to.\n\nSame contract as ``POST /sources/{provider}/authorize`` \u2014 ``202`` with an\n``authorizeUrl`` \u2014 so the frontend's existing full-page-redirect hook works\nunchanged. ``returnTo`` picks where the callback lands; the ``Origin`` header\n(allowlisted against ``FRONTEND_URLS``) picks which frontend it lands on.",
+        "operationId": "authorize_credential_api_v1_agent_credentials__provider__authorize_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AgentAuthorizeStartRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-credentials/{provider}/callback": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Credential Callback",
+        "description": "OAuth redirect target: exchange, vault the token, bounce to the dashboard.\n\nUnauthenticated by design \u2014 it is a browser redirect from the provider and\ncarries no JWT. The signed, single-use ``state`` is the credential, and it\nresolves the workspace and user the connection belongs to. ``code`` is absent\nwhen the user declined; ``error`` carries the provider's reason.\n\n**The token exchanged here is never written to Postgres.** It goes to the\nuser's Anthropic vault and the only thing stored is the id that comes back.",
+        "operationId": "credential_callback_api_v1_agent_credentials__provider__callback_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "State"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-credentials/{credential_id}": {
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Disconnect Credential",
+        "description": "Revoke a connection: delete it from the vault, then forget the pointer.\n\nNot in the plan's endpoint table, and load-bearing anyway: a vault holds 20\ncredentials, so without this a user who connects and abandons providers has\nno way to reclaim a slot \u2014 and no way to revoke access they have changed\ntheir mind about.",
+        "operationId": "disconnect_credential_api_v1_agent_credentials__credential_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "credential_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Credential Id"
             }
           }
         ],
@@ -3418,6 +3659,26 @@
   },
   "components": {
     "schemas": {
+      "AgentAuthorizeStartRequest": {
+        "properties": {
+          "returnTo": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Returnto"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AgentAuthorizeStartRequest",
+        "description": "``POST /agent-credentials/{provider}/authorize``.\n\n``returnTo`` picks where the callback lands the browser. It ends up in a\n``Location`` header, so it is validated against a strict pattern and anything\nthat fails degrades to the agents list rather than 422 \u2014 a stale frontend\nbuild must still be able to complete a connect."
+      },
       "AgentConnectorCreateRequest": {
         "properties": {
           "name": {
