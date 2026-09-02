@@ -170,3 +170,92 @@ class AgentConnectorCreateRequest(CamelRequestModel):
         if not url.startswith("https://"):
             raise ValueError("mcpServerUrl must be an https:// URL")
         return url
+
+
+# ── catalog + credentials (phase 2) ───────────────────────────────────────────
+
+
+class ConnectorCatalogEntry(CamelModel):
+    """One curated connector the picker can offer.
+
+    ``configured`` is not decoration: a deployment that has not registered an
+    OAuth client for a provider still lists it, so the picker can render it
+    disabled with a reason rather than letting the user start a consent flow that
+    ends in a 501. The frontend is expected to honour it.
+    """
+
+    provider: str
+    display_name: str
+    description: str | None = None
+    mcp_server_url: str
+    docs_url: str | None = None
+    # The scope string the consent screen will ask for, so the builder can tell
+    # the user what they are about to grant before they grant it.
+    scopes: str | None = None
+    configured: bool = True
+    # Whether the *calling user* has already authorized this provider. Part of
+    # the catalog rather than a second request because every surface that renders
+    # the picker needs both, and two calls means a frame where a connected
+    # provider renders as "Connect".
+    connected: bool = False
+
+
+class AgentCredentialResponse(CamelModel):
+    """One provider the calling user has connected. **Never any token material.**
+
+    There is no field here that could carry a secret, and that is enforced a
+    layer down: ``agent_credentials`` has no column to put one in (migration
+    0028). ``anthropic_credential_id`` is a pointer, not a credential.
+    """
+
+    id: str
+    provider: str
+    display_name: str | None = None
+    mcp_server_url: str
+    connected_at: datetime | None = None
+
+
+class UnauthorizedConnector(CamelModel):
+    """An agent connector the calling user has no credential for.
+
+    This is the "Needs your GitHub account" row. It names the agent as well as
+    the connector because the user meets it in two places — on an agent's card
+    and on the credentials screen — and only one of those already knows which
+    agent is asking.
+    """
+
+    agent_id: str
+    agent_name: str
+    connector_id: str
+    connector_name: str
+    provider: str | None = None
+    mcp_server_url: str
+
+
+class AgentCredentialsOverview(CamelModel):
+    """``GET /agent-credentials`` — what this user has, and what they still need."""
+
+    connections: list[AgentCredentialResponse] = []
+    needs_authorization: list[UnauthorizedConnector] = []
+
+
+class AgentAuthorizeStartRequest(CamelRequestModel):
+    """``POST /agent-credentials/{provider}/authorize``.
+
+    ``returnTo`` picks where the callback lands the browser. It ends up in a
+    ``Location`` header, so it is validated against a strict pattern and anything
+    that fails degrades to the agents list rather than 422 — a stale frontend
+    build must still be able to complete a connect.
+    """
+
+    return_to: Annotated[str | None, Field(default=None, max_length=256)] = None
+
+
+class AgentAuthorizeStartResponse(CamelModel):
+    """The provider consent URL to redirect the browser to.
+
+    Same shape as ``/sources/{provider}/authorize`` so the frontend's existing
+    full-page-redirect hook works unchanged.
+    """
+
+    authorize_url: str
