@@ -15,6 +15,12 @@ back as a forbidden row, it comes back as **no row at all** — so the service
 turns a missing row into 404, never 403. That is the right shape anyway: telling
 someone "this agent exists but is not yours" leaks that it exists.
 
+The three ``*_agent_oauth_state`` methods at the bottom are the documented
+exception to the tenant rule: they run on the **privileged** pool, because the
+OAuth callback has to resolve a state hash before any workspace context exists.
+They are the only methods here that may be called outside ``run_in_tenant``, and
+they touch no workspace-scoped table.
+
 Nothing here calls Anthropic. The vendor round-trip happens in the service,
 outside the transaction (``BACKEND_BEST_PRACTICES.md`` §7); the columns below
 are only ever the *mirror* of what that call returned.
@@ -22,6 +28,7 @@ are only ever the *mirror* of what that call returned.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -34,6 +41,24 @@ _COLUMNS = """
     model, effort, ground_in_brain, budget_cents, visibility, status,
     anthropic_agent_id, anthropic_agent_version, created_at, updated_at
 """
+
+# Every column ``agent_credentials`` has. Worth reading as an assertion rather
+# than a list: there is no token here, and adding one would move a user's
+# connector secret onto our infrastructure (migration 0028).
+_CREDENTIAL_COLUMNS = """
+    id, workspace_id, user_id, provider, mcp_server_url,
+    anthropic_credential_id, display_name, connected_at
+"""
+
+
+# Namespace for this module's rows in the shared ``oauth_states`` table. See
+# ``create_agent_oauth_state`` for why an un-namespaced provider would be a hole
+# rather than a nuisance.
+_STATE_NAMESPACE = "agent:"
+
+
+def _state_provider(provider: str) -> str:
+    return f"{_STATE_NAMESPACE}{provider}"
 
 
 class AgentsRepository:
@@ -313,3 +338,369 @@ class AgentsRepository:
             },
         )
         return bool(result.rowcount)
+
+    # ── vaults ────────────────────────────────────────────────────────────────
+    #
+    # Two shapes share this table, told apart by ``user_id`` (§5.4). A row with a
+    # user is that person's connector vault; the single row with ``user_id IS
+    # NULL`` is the workspace vault holding ``query_brain``'s own credential. Two
+    # partial unique indexes keep each singular — Postgres treats NULLs as
+    # distinct, so one plain UNIQUE would let workspace vaults accumulate.
+
+    async def get_vault(
+        self, session: AsyncSession, *, workspace_id: str, user_id: str | None
+    ) -> dict[str, Any] | None:
+        """This user's vault, or the workspace vault when ``user_id`` is ``None``.
+
+        ``IS NOT DISTINCT FROM`` rather than ``=``: the workspace vault is keyed
+        by a NULL, and ``user_id = NULL`` is never true, so the ordinary
+        comparison would silently never find it and we would mint a new vault on
+        every session create until the partial unique index started rejecting them.
+        """
+        row = await session.execute(
+            text(
+                """
+                SELECT id, workspace_id, user_id, anthropic_vault_id, created_at
+                  FROM agent_vaults
+                 WHERE workspace_id = :workspace_id
+                   AND user_id IS NOT DISTINCT FROM :user_id
+                """
+            ),
+            {"workspace_id": workspace_id, "user_id": user_id},
+        )
+        found = row.mappings().first()
+        return dict(found) if found else None
+
+    async def insert_vault(
+        self,
+        session: AsyncSession,
+        *,
+        vault_id: str,
+        workspace_id: str,
+        user_id: str | None,
+        anthropic_vault_id: str,
+    ) -> dict[str, Any] | None:
+        """Record a vault we just created at Anthropic.
+
+        ``ON CONFLICT DO NOTHING`` returning ``None`` is the concurrent-connect
+        case: two OAuth callbacks for the same user raced, both created a vault at
+        Anthropic, and only one row can survive. The caller re-reads and uses the
+        winner. The loser's remote vault is orphaned and logged — deleting it
+        would risk deleting the winner's on a mis-read, and an empty vault costs
+        nothing.
+        """
+        row = await session.execute(
+            text(
+                """
+                INSERT INTO agent_vaults (id, workspace_id, user_id, anthropic_vault_id)
+                VALUES (:id, :workspace_id, :user_id, :anthropic_vault_id)
+                ON CONFLICT DO NOTHING
+                RETURNING id, workspace_id, user_id, anthropic_vault_id, created_at
+                """
+            ),
+            {
+                "id": vault_id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "anthropic_vault_id": anthropic_vault_id,
+            },
+        )
+        found = row.mappings().first()
+        return dict(found) if found else None
+
+    # ── credentials ───────────────────────────────────────────────────────────
+    #
+    # **No token columns, and none may be added** (migration 0028). These rows say
+    # *that* a user connected a provider and carry the id Anthropic gave back; the
+    # secret itself transits the process once and is never written.
+
+    async def list_credentials(
+        self, session: AsyncSession, *, workspace_id: str, user_id: str
+    ) -> list[dict[str, Any]]:
+        """Everything this user has connected, newest first."""
+        rows = await session.execute(
+            text(
+                f"""
+                SELECT {_CREDENTIAL_COLUMNS}
+                  FROM agent_credentials
+                 WHERE workspace_id = :workspace_id AND user_id = :user_id
+                 ORDER BY connected_at DESC
+                """
+            ),
+            {"workspace_id": workspace_id, "user_id": user_id},
+        )
+        return [dict(row) for row in rows.mappings()]
+
+    async def get_credential(
+        self, session: AsyncSession, *, workspace_id: str, user_id: str, credential_id: str
+    ) -> dict[str, Any] | None:
+        row = await session.execute(
+            text(
+                f"""
+                SELECT {_CREDENTIAL_COLUMNS}
+                  FROM agent_credentials
+                 WHERE id = :credential_id
+                   AND workspace_id = :workspace_id
+                   AND user_id = :user_id
+                """
+            ),
+            {
+                "credential_id": credential_id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+            },
+        )
+        found = row.mappings().first()
+        return dict(found) if found else None
+
+    async def get_credential_for_server(
+        self, session: AsyncSession, *, workspace_id: str, user_id: str, mcp_server_url: str
+    ) -> dict[str, Any] | None:
+        """The existing connection for one MCP server, if any.
+
+        Keyed on the URL rather than the provider because that is how a vault
+        keys its credentials: two catalog entries pointing at one server are one
+        credential, and re-connecting either must replace the same slot.
+        """
+        row = await session.execute(
+            text(
+                f"""
+                SELECT {_CREDENTIAL_COLUMNS}
+                  FROM agent_credentials
+                 WHERE workspace_id = :workspace_id
+                   AND user_id = :user_id
+                   AND mcp_server_url = :mcp_server_url
+                """
+            ),
+            {
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "mcp_server_url": mcp_server_url,
+            },
+        )
+        found = row.mappings().first()
+        return dict(found) if found else None
+
+    async def upsert_credential(
+        self,
+        session: AsyncSession,
+        *,
+        credential_id: str,
+        workspace_id: str,
+        user_id: str,
+        provider: str,
+        mcp_server_url: str,
+        anthropic_credential_id: str,
+        display_name: str | None,
+    ) -> dict[str, Any]:
+        """Record a connection, replacing this user's previous one for the server.
+
+        The upsert target is ``(workspace_id, user_id, mcp_server_url)`` — the
+        vault's own uniqueness rule, mirrored — so a re-connect updates the row in
+        place and keeps its id stable for anything holding it. ``connected_at`` is
+        refreshed because it means "when this token was minted", which is what the
+        UI is actually reporting.
+        """
+        row = await session.execute(
+            text(
+                f"""
+                INSERT INTO agent_credentials (
+                    id, workspace_id, user_id, provider, mcp_server_url,
+                    anthropic_credential_id, display_name
+                ) VALUES (
+                    :id, :workspace_id, :user_id, :provider, :mcp_server_url,
+                    :anthropic_credential_id, :display_name
+                )
+                ON CONFLICT ON CONSTRAINT agent_credentials_user_server_key
+                DO UPDATE SET provider = EXCLUDED.provider,
+                              anthropic_credential_id = EXCLUDED.anthropic_credential_id,
+                              display_name = EXCLUDED.display_name,
+                              connected_at = now()
+                RETURNING {_CREDENTIAL_COLUMNS}
+                """
+            ),
+            {
+                "id": credential_id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "provider": provider,
+                "mcp_server_url": mcp_server_url,
+                "anthropic_credential_id": anthropic_credential_id,
+                "display_name": display_name,
+            },
+        )
+        return dict(row.mappings().one())
+
+    async def delete_credential_row(
+        self, session: AsyncSession, *, workspace_id: str, user_id: str, credential_id: str
+    ) -> bool:
+        """Forget one connection. ``False`` when it was not there to forget."""
+        result = await session.execute(
+            text(
+                """
+                DELETE FROM agent_credentials
+                 WHERE id = :credential_id
+                   AND workspace_id = :workspace_id
+                   AND user_id = :user_id
+                """
+            ),
+            {
+                "credential_id": credential_id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+            },
+        )
+        return bool(result.rowcount)
+
+    async def list_unauthorized_connectors(
+        self, session: AsyncSession, *, workspace_id: str, user_id: str
+    ) -> list[dict[str, Any]]:
+        """Connectors on agents this caller can see that they have no credential for.
+
+        This is the "Needs your GitHub account" list, and it is a SQL question
+        rather than a client-side set difference for one reason: the join to
+        ``agent_definitions`` is what applies the visibility policy. Computing it
+        in Python from two separate lists would need the connector list of every
+        agent in the workspace — including the private ones RLS is hiding.
+
+        Matched on ``mcp_server_url``, not ``provider``: a custom pasted URL has no
+        provider at all, and it still needs a credential.
+        """
+        rows = await session.execute(
+            text(
+                """
+                SELECT c.id            AS connector_id,
+                       c.name          AS connector_name,
+                       c.provider      AS provider,
+                       c.mcp_server_url AS mcp_server_url,
+                       d.id            AS agent_id,
+                       d.name          AS agent_name
+                  FROM agent_connectors c
+                  JOIN agent_definitions d
+                    ON d.id = c.agent_id
+                   AND d.workspace_id = c.workspace_id
+                 WHERE c.workspace_id = :workspace_id
+                   AND d.status <> 'archived'
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM agent_credentials cr
+                        WHERE cr.workspace_id = c.workspace_id
+                          AND cr.user_id = :user_id
+                          AND cr.mcp_server_url = c.mcp_server_url
+                   )
+                 ORDER BY d.name, c.name
+                """
+            ),
+            {"workspace_id": workspace_id, "user_id": user_id},
+        )
+        return [dict(row) for row in rows.mappings()]
+
+    # ── oauth_states (privileged pool, no RLS) ────────────────────────────────
+    #
+    # The three methods below break this class's one rule — they do NOT run in a
+    # tenant transaction — because they cannot: the OAuth callback resolves a
+    # state hash before any workspace context exists, which is why ``oauth_states``
+    # has no RLS and is reached on the privileged pool (migration 0004, 0008).
+    # ``app/modules/sources/repository.py`` holds a near-identical trio for the
+    # ingestion flow. That duplication is deliberate: the two flows resolve to
+    # different shapes, are namespaced apart on purpose (see ``provider`` below),
+    # and folding them into one helper would make a change to either flow able to
+    # break the other's consent path — which is the one path a user cannot retry
+    # their way out of.
+
+    async def create_agent_oauth_state(
+        self,
+        session: AsyncSession,
+        *,
+        state_hash: bytes,
+        provider: str,
+        redirect_uri: str,
+        user_id: str,
+        workspace_id: str,
+        expires_at: datetime,
+        return_to: str | None,
+        frontend_origin: str | None,
+    ) -> None:
+        """Record a single-use state for an agent-credential consent.
+
+        ``provider`` is stored **namespaced** as ``agent:{provider}``, and that is
+        load-bearing rather than tidy. ``oauth_states`` is shared with the
+        ingestion connectors, whose callback consumes by ``(state_hash,
+        provider)``; an un-namespaced ``slack`` state minted here could be
+        redeemed at ``/sources/slack/callback`` and would silently create a
+        *source connection* — an agent credential turning into an ingestion
+        pipeline is precisely the wall this feature exists to hold.
+        """
+        await session.execute(
+            text(
+                """
+                INSERT INTO oauth_states
+                    (user_id, workspace_id, provider, redirect_uri, state_hash,
+                     expires_at, return_to, frontend_origin)
+                VALUES (:user_id, :workspace_id, :provider, :redirect_uri, :state_hash,
+                        :expires_at, :return_to, :frontend_origin)
+                """
+            ),
+            {
+                "user_id": user_id,
+                "workspace_id": workspace_id,
+                "provider": _state_provider(provider),
+                "redirect_uri": redirect_uri,
+                "state_hash": state_hash,
+                "expires_at": expires_at,
+                "return_to": return_to,
+                "frontend_origin": frontend_origin,
+            },
+        )
+        await session.commit()
+
+    async def consume_agent_oauth_state(
+        self, session: AsyncSession, *, state_hash: bytes, provider: str, now: datetime
+    ) -> dict[str, Any] | None:
+        """Atomically claim an unconsumed, unexpired agent state for ``provider``.
+
+        One ``UPDATE ... RETURNING`` so consumption is race-safe: a replayed state
+        finds ``consumed_at`` already set and matches no row.
+        """
+        row = await session.execute(
+            text(
+                """
+                UPDATE oauth_states
+                   SET consumed_at = :now
+                 WHERE state_hash = :state_hash
+                   AND provider = :provider
+                   AND consumed_at IS NULL
+                   AND expires_at > :now
+                RETURNING user_id, workspace_id, redirect_uri, return_to, frontend_origin
+                """
+            ),
+            {"state_hash": state_hash, "provider": _state_provider(provider), "now": now},
+        )
+        found = row.mappings().first()
+        await session.commit()
+        return dict(found) if found else None
+
+    async def peek_agent_oauth_state(
+        self, session: AsyncSession, *, state_hash: bytes, provider: str, now: datetime
+    ) -> dict[str, Any] | None:
+        """Read a live state's redirect target without consuming it.
+
+        Same predicate as the consume, read-only: the declined-consent leg needs
+        somewhere to send the browser while leaving the single-use state
+        retryable.
+        """
+        row = await session.execute(
+            text(
+                """
+                SELECT return_to, frontend_origin
+                  FROM oauth_states
+                 WHERE state_hash = :state_hash
+                   AND provider = :provider
+                   AND consumed_at IS NULL
+                   AND expires_at > :now
+                """
+            ),
+            {"state_hash": state_hash, "provider": _state_provider(provider), "now": now},
+        )
+        found = row.mappings().first()
+        return dict(found) if found else None
