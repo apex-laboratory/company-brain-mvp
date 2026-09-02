@@ -191,6 +191,13 @@ class Settings(BaseSettings):
     # in dev. A missing file falls back to the built-in default order.
     source_authority_path: str = "../source_authority.yaml"
 
+    # agent_connectors.yaml — the agent-builder connector catalog (which hosted
+    # MCP servers a user may attach, and the OAuth dance for each). Same repo-root
+    # convention as source_authority.yaml. Unlike that file a missing/broken
+    # catalog is NOT fail-soft: it yields an empty catalog, so the picker shows
+    # nothing rather than offering a provider we cannot actually authorize.
+    agent_connectors_path: str = "../agent_connectors.yaml"
+
     # ── token lifetimes (seconds) ────────────────────────────────────────────
     access_token_ttl_seconds: int = 15 * 60  # 15 minutes
     refresh_token_ttl_seconds: int = 30 * 24 * 60 * 60  # 30 days

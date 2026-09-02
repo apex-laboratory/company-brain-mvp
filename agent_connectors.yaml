@@ -1,0 +1,105 @@
+# Agent-builder connector catalog (agent-builder-plan §2, §5.2, phase 2).
+#
+# **Connectors are data, not code.** A new provider is a row in this file plus an
+# OAuth client registration — never a new Python class. This is the deliberate
+# difference from the ingestion connectors in `brain-api/app/integrations/`, which
+# are compile-time `SourceIntegration` implementations; don't copy that pattern
+# here. `app/modules/agents/catalog.py` is the only reader.
+#
+# Each row describes two things that happen in different places:
+#
+#   * `mcp_server_url` — where *Anthropic* connects at run time. We never fetch it.
+#     It is also the key a vault stores the credential under, so it must be the
+#     byte-exact URL the agent's `mcp_servers` entry carries, trailing slash included.
+#   * the OAuth block — the consent dance *we* run, once, to mint the token we hand
+#     to the vault. The token is POSTed to Anthropic and never written to Postgres.
+#
+# Client credentials live in env vars named here rather than in `settings.py`, so
+# adding a provider stays a config change. A row whose env vars are unset is
+# listed in the catalog as `configured: false` — the picker can show it greyed out
+# rather than letting a user start a flow that would 501.
+#
+# A row with a blank `mcp_server_url` is skipped entirely: it is a provider we
+# intend to support but that has no hosted MCP server we can point at yet.
+#
+# ⚠️ Before enabling a row in production, verify `mcp_server_url`,
+# `authorize_endpoint` and `token_endpoint` against the provider's own current
+# docs. These are the values a wrong guess makes fail at consent time, in the
+# user's browser, with a provider-branded error page we cannot improve.
+
+version: 1
+
+connectors:
+  github:
+    display_name: GitHub
+    description: Issues, pull requests, code search and repository files.
+    mcp_server_url: https://api.githubcopilot.com/mcp/
+    authorize_endpoint: https://github.com/login/oauth/authorize
+    token_endpoint: https://github.com/login/oauth/access_token
+    # GitHub's token endpoint returns form-encoded unless asked for JSON.
+    accept_json: true
+    token_endpoint_auth: client_secret_post
+    scopes: repo read:org read:user
+    client_id_env: AGENT_GITHUB_CLIENT_ID
+    client_secret_env: AGENT_GITHUB_CLIENT_SECRET
+    docs_url: https://docs.github.com/en/copilot/customizing-copilot/using-model-context-protocol
+
+  notion:
+    display_name: Notion
+    description: Search, read and update pages and databases in your workspace.
+    mcp_server_url: https://mcp.notion.com/mcp
+    authorize_endpoint: https://api.notion.com/v1/oauth/authorize
+    token_endpoint: https://api.notion.com/v1/oauth/token
+    # Notion authenticates the token request with HTTP Basic, not a body field.
+    token_endpoint_auth: client_secret_basic
+    extra_authorize_params:
+      owner: user
+    client_id_env: AGENT_NOTION_CLIENT_ID
+    client_secret_env: AGENT_NOTION_CLIENT_SECRET
+    docs_url: https://developers.notion.com/docs/mcp
+
+  linear:
+    display_name: Linear
+    description: Issues, projects and cycles — read status and file new work.
+    mcp_server_url: https://mcp.linear.app/mcp
+    authorize_endpoint: https://linear.app/oauth/authorize
+    token_endpoint: https://api.linear.app/oauth/token
+    token_endpoint_auth: client_secret_post
+    scopes: read write
+    client_id_env: AGENT_LINEAR_CLIENT_ID
+    client_secret_env: AGENT_LINEAR_CLIENT_SECRET
+    docs_url: https://linear.app/docs/mcp
+
+  atlassian:
+    display_name: Jira & Confluence
+    description: Atlassian Cloud issues, boards and Confluence pages.
+    mcp_server_url: https://mcp.atlassian.com/v1/mcp
+    authorize_endpoint: https://auth.atlassian.com/authorize
+    token_endpoint: https://auth.atlassian.com/oauth/token
+    token_endpoint_auth: client_secret_post
+    scopes: read:jira-work write:jira-work read:confluence-content.all offline_access
+    # Atlassian's 3LO flow needs both: `audience` selects the API behind the
+    # consent screen, and without `prompt=consent` a re-auth returns no refresh
+    # token — which would make the vault credential expire and never recover.
+    extra_authorize_params:
+      audience: api.atlassian.com
+      prompt: consent
+    client_id_env: AGENT_ATLASSIAN_CLIENT_ID
+    client_secret_env: AGENT_ATLASSIAN_CLIENT_SECRET
+    docs_url: https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/
+
+  slack:
+    display_name: Slack
+    description: Read channels and post messages as the connecting user.
+    # Deliberately blank: Slack ships no first-party hosted remote MCP server, so
+    # there is no URL to point Anthropic at. The row stays so the OAuth block is
+    # ready the day one exists (or the day we host a bridge ourselves) — the
+    # loader skips it until then, and it never reaches the picker.
+    mcp_server_url: ""
+    authorize_endpoint: https://slack.com/oauth/v2/authorize
+    token_endpoint: https://slack.com/api/oauth.v2.access
+    token_endpoint_auth: client_secret_post
+    scopes: channels:read channels:history chat:write users:read
+    client_id_env: AGENT_SLACK_CLIENT_ID
+    client_secret_env: AGENT_SLACK_CLIENT_SECRET
+    docs_url: https://api.slack.com/authentication/oauth-v2
