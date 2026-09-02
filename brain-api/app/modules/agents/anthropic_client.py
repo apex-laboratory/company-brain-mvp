@@ -23,13 +23,22 @@ Three rules hold for every method here:
   crash for the whole app rather than a clear error on the one route that needs
   it.
 
-Only what phase 1 needs is here — the agent object's CRUD and version history.
-Sessions, vaults and deployments arrive in phases 2, 4 and 6; they belong in this
-same file when they do.
+Phases 1 and 2 are here — the agent object's CRUD and version history, plus the
+vaults and credentials that hold a user's connector tokens. Sessions and
+deployments arrive in phases 4 and 6; they belong in this same file when they do.
+
+The credential methods carry one extra rule the agent ones do not: **a token
+passed to ``create_credential`` must never be logged, echoed, or stored.** It
+transits this process once, on its way from the provider's token endpoint into
+Anthropic's vault, and the ``agent_credentials`` row that records the connection
+deliberately has no column to put it in (migration 0028). That is the data-
+liability wall in its most literal form, so the argument is not kept on ``self``,
+not returned, and not included in the error we raise when the call fails.
 """
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from app.config.settings import settings
@@ -192,15 +201,137 @@ class AnthropicAgentsClient:
         """
         await self._call(lambda sdk: sdk.beta.agents.archive(agent_id))
 
+    # ── vaults ────────────────────────────────────────────────────────────────
+
+    async def create_vault(
+        self, *, display_name: str, metadata: dict[str, str] | None = None
+    ) -> str:
+        """Create a vault and return its ``vlt_`` id.
+
+        A vault is a credential container Anthropic injects at egress: the tokens
+        inside it never enter the agent's sandbox, and Anthropic refreshes them
+        itself via the ``refresh`` block on each credential. Created at most twice
+        per user — once for their own connectors, once per workspace for
+        ``query_brain`` (§5.4) — so this is never on a hot path.
+        """
+        vault = await self._call(
+            lambda sdk: sdk.beta.vaults.create(
+                display_name=display_name, **({"metadata": metadata} if metadata else {})
+            ),
+            resource="Vault",
+        )
+        return str(vault.id)
+
+    # ── credentials ───────────────────────────────────────────────────────────
+
+    async def create_mcp_oauth_credential(
+        self,
+        vault_id: str,
+        *,
+        mcp_server_url: str,
+        access_token: str,
+        display_name: str | None = None,
+        expires_at: datetime | None = None,
+        refresh: dict[str, Any] | None = None,
+    ) -> str:
+        """Put a user's OAuth token in the vault. Returns the ``acr``-side id.
+
+        ``refresh`` is what makes the credential outlive its access token:
+        Anthropic runs the ``refresh_token`` grant against the provider's token
+        endpoint on its own, which is the whole reason we do not need a token
+        store. Omitting it is correct only for tokens that genuinely do not
+        expire — everything else silently dies at the first expiry and surfaces
+        much later as a ``session.error`` the user reads as "the agent is broken".
+
+        Nothing about ``access_token`` is logged. See the module docstring.
+        """
+        auth: dict[str, Any] = {
+            "type": "mcp_oauth",
+            "access_token": access_token,
+            "mcp_server_url": mcp_server_url,
+        }
+        if expires_at is not None:
+            auth["expires_at"] = expires_at
+        if refresh is not None:
+            auth["refresh"] = refresh
+
+        payload: dict[str, Any] = {"auth": auth}
+        if display_name is not None:
+            payload["display_name"] = display_name
+
+        credential = await self._call(
+            lambda sdk: sdk.beta.vaults.credentials.create(vault_id, **payload),
+            resource="Vault",
+        )
+        return str(credential.id)
+
+    async def create_static_bearer_credential(
+        self,
+        vault_id: str,
+        *,
+        mcp_server_url: str,
+        token: str,
+        display_name: str | None = None,
+    ) -> str:
+        """Store a non-expiring bearer token — this is how ``query_brain`` is reached.
+
+        The Brain's own MCP server takes an API key, not an OAuth token, and
+        accepts it as ``Authorization: Bearer`` precisely so it can arrive this
+        way (``app/mcp/server.py``, §4.2). It lives in the *workspace* vault, not
+        each user's, so it does not eat one of their 20 credential slots (§5.4).
+        """
+        payload: dict[str, Any] = {
+            "auth": {
+                "type": "static_bearer",
+                "token": token,
+                "mcp_server_url": mcp_server_url,
+            }
+        }
+        if display_name is not None:
+            payload["display_name"] = display_name
+
+        credential = await self._call(
+            lambda sdk: sdk.beta.vaults.credentials.create(vault_id, **payload),
+            resource="Vault",
+        )
+        return str(credential.id)
+
+    async def delete_credential(self, vault_id: str, credential_id: str) -> None:
+        """Remove one credential from a vault.
+
+        Delete rather than archive: an archived credential still occupies one of
+        the vault's 20 slots, so a user who disconnects and reconnects four
+        providers would run out of room having connected four things. Archive is
+        the right call for audit trails; a slot budget makes it the wrong one here.
+
+        A credential Anthropic has already forgotten is not an error — the caller
+        is trying to reach a state where it does not exist, and it does not.
+        """
+        try:
+            await self._call(
+                lambda sdk: sdk.beta.vaults.credentials.delete(
+                    credential_id, vault_id=vault_id
+                ),
+                resource="Credential",
+            )
+        except NotFoundError:
+            log.info(
+                "credential %s was already absent from vault %s", credential_id, vault_id
+            )
+
     # ── error translation ─────────────────────────────────────────────────────
 
-    async def _call(self, fn: Any) -> Any:
+    async def _call(self, fn: Any, *, resource: str = "Agent") -> Any:
         """Run one SDK coroutine, mapping vendor errors onto domain errors.
 
         The chain is most-specific-first. A bare ``except APIError`` would erase
         the distinction between "your version is stale" (the caller can fix it)
         and "Anthropic is down" (they cannot), which is exactly the distinction
         the dashboard needs to decide between showing a reload prompt and a retry.
+
+        ``resource`` names the noun a 404 is about. It is a parameter rather than
+        a constant because a vault call that reported "Agent not found." would
+        send an operator looking at the wrong object entirely.
         """
         import anthropic
 
@@ -208,7 +339,7 @@ class AnthropicAgentsClient:
             return await fn(self._sdk())
         except anthropic.NotFoundError as exc:
             # NotFoundError renders "{resource} not found." — pass the noun only.
-            raise NotFoundError("Agent") from exc
+            raise NotFoundError(resource) from exc
         except anthropic.ConflictError as exc:
             raise ConflictError(
                 "This agent was changed by someone else. Reload and re-apply "
