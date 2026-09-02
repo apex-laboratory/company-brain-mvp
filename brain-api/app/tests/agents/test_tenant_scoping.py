@@ -163,3 +163,144 @@ async def test_a_foreign_workspace_never_appears_anywhere() -> None:
         repo, opened = await _run(call, *args)
         assert _OTHER_WORKSPACE not in _bound_workspaces(repo), call
         assert _OTHER_WORKSPACE not in opened, call
+
+
+# ── credentials and vaults (phase 2) ──────────────────────────────────────────
+#
+# The credential paths have a second tenancy question the agent paths do not.
+# For a dashboard call the answer is the same one swept above — the workspace
+# comes from the auth context. But the **OAuth callback carries no auth context
+# at all**: it is an unauthenticated browser redirect, and the only thing that
+# says which workspace and which user this token belongs to is the signed,
+# single-use state row. So the guard there is that the workspace comes from the
+# consumed state and from nowhere else — not the path, not the query string.
+
+
+def _credentials_repo() -> MagicMock:
+    from app.tests.agents.test_credentials import _credential_row, _vault_row
+
+    repo = MagicMock()
+    repo.list_credentials = AsyncMock(return_value=[])
+    repo.list_unauthorized_connectors = AsyncMock(return_value=[])
+    repo.get_credential = AsyncMock(return_value=_credential_row())
+    repo.get_credential_for_server = AsyncMock(return_value=None)
+    repo.upsert_credential = AsyncMock(return_value=_credential_row())
+    repo.delete_credential_row = AsyncMock(return_value=True)
+    repo.get_vault = AsyncMock(return_value=_vault_row())
+    repo.insert_vault = AsyncMock(return_value=_vault_row())
+    repo.create_agent_oauth_state = AsyncMock(return_value=None)
+    return repo
+
+
+async def _run_credentials(call: str, *args: Any) -> tuple[MagicMock, list[str]]:
+    from app.modules.agents.credentials import AgentCredentialsService
+
+    repo = _credentials_repo()
+    service = AgentCredentialsService(repository=repo, anthropic=_credentials_anthropic())
+    tenant = MagicMock()
+    tenant.commit = AsyncMock()
+    opened: list[str] = []
+
+    def _run_in_tenant(_s: Any, workspace_id: str, *_rest: Any) -> Any:
+        opened.append(workspace_id)
+        return _AsyncCtx(tenant)
+
+    with patch.multiple(
+        "app.modules.agents.credentials",
+        get_tenant_session=MagicMock(return_value=_AsyncCtx(MagicMock())),
+        get_session=MagicMock(return_value=_AsyncCtx(MagicMock())),
+        run_in_tenant=MagicMock(side_effect=_run_in_tenant),
+    ):
+        await getattr(service, call)(_auth(), *args)
+    return repo, opened
+
+
+def _credentials_anthropic() -> MagicMock:
+    client = MagicMock()
+    client.create_vault = AsyncMock(return_value="vlt_new")
+    client.create_mcp_oauth_credential = AsyncMock(return_value="cred_new")
+    client.delete_credential = AsyncMock(return_value=None)
+    return client
+
+
+_CREDENTIAL_CALLS: list[tuple[str, tuple[Any, ...]]] = [
+    ("overview", ()),
+    ("list_catalog", ()),
+    ("disconnect", ("acr_from_path",)),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call,args", _CREDENTIAL_CALLS, ids=[c for c, _ in _CREDENTIAL_CALLS]
+)
+async def test_credential_reads_and_writes_are_bound_to_the_callers_workspace(
+    call: str, args: tuple[Any, ...]
+) -> None:
+    repo, opened = await _run_credentials(call, *args)
+    bound = _bound_workspaces(repo)
+    assert bound == {_CALLER_WORKSPACE}, f"{call} scoped to {bound}"
+    assert set(opened) == {_CALLER_WORKSPACE}
+    assert _OTHER_WORKSPACE not in bound and _OTHER_WORKSPACE not in opened
+
+
+@pytest.mark.asyncio
+async def test_credential_writes_are_bound_to_the_calling_user_too() -> None:
+    """Unlike agents, these rows are *personal*: ``agent_credentials``' policy
+    compares ``user_id`` to ``current_user_id()``, so a call that bound another
+    member's id would write a row its own caller could not read back."""
+    users: set[str] = set()
+    for call, args in _CREDENTIAL_CALLS:
+        repo, _ = await _run_credentials(call, *args)
+        for name in dir(repo):
+            if name.startswith("_"):
+                continue
+            for made in getattr(getattr(repo, name), "await_args_list", []) or []:
+                if "user_id" in made.kwargs and made.kwargs["user_id"] is not None:
+                    users.add(made.kwargs["user_id"])
+    assert users == {"usr_1"}
+
+
+@pytest.mark.asyncio
+async def test_the_callback_takes_its_tenant_from_the_state_not_the_request() -> None:
+    """The callback is unauthenticated. If the workspace could come from anywhere
+    the browser controls, a forged redirect would write a credential into
+    somebody else's tenant."""
+    from app.modules.agents import oauth
+    from app.modules.agents.credentials import AgentCredentialsService
+    from app.tests.agents.test_credentials import _SPEC, _grant, _state
+
+    repo = _credentials_repo()
+    repo.consume_agent_oauth_state = AsyncMock(
+        return_value={
+            "user_id": "usr_from_state",
+            "workspace_id": _OTHER_WORKSPACE,  # the state's workspace, not the caller's
+            "redirect_uri": "https://api.test/cb",
+            "return_to": None,
+            "frontend_origin": None,
+        }
+    )
+    service = AgentCredentialsService(
+        repository=repo, anthropic=_credentials_anthropic()
+    )
+    opened: list[str] = []
+
+    def _run_in_tenant(_s: Any, workspace_id: str, *_rest: Any) -> Any:
+        opened.append(workspace_id)
+        return _AsyncCtx(MagicMock(commit=AsyncMock()))
+
+    async def _exchange(*_a: Any, **_k: Any) -> Any:
+        return _grant()
+
+    with patch.multiple(
+        "app.modules.agents.credentials",
+        get_tenant_session=MagicMock(return_value=_AsyncCtx(MagicMock())),
+        get_session=MagicMock(return_value=_AsyncCtx(MagicMock())),
+        run_in_tenant=MagicMock(side_effect=_run_in_tenant),
+        _require_spec=MagicMock(return_value=_SPEC),
+    ), patch.object(oauth, "exchange_code", side_effect=_exchange):
+        await service.handle_callback("provider", state=_state(), code="c")
+
+    assert set(opened) == {_OTHER_WORKSPACE}
+    assert _bound_workspaces(repo) == {_OTHER_WORKSPACE}
+    assert repo.upsert_credential.await_args.kwargs["user_id"] == "usr_from_state"
