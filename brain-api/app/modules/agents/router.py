@@ -21,6 +21,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 
+from app.jobs.queue import enqueue
 from app.modules.agents.credentials import AgentCredentialsService
 from app.modules.agents.schemas import (
     AgentAuthorizeStartRequest,
@@ -32,10 +33,12 @@ from app.modules.agents.schemas import (
 )
 from app.modules.agents.service import AgentsService
 from app.modules.agents.sessions import AgentSessionsService
+from app.modules.agents.webhook import parse, summarize, verify
 from app.shared.http.respond import accepted, created, no_content, ok
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
 from app.shared.middleware.authorize import require_role
 from app.shared.middleware.rate_limit import (
+    AGENT_WEBHOOK_LIMIT,
     DASHBOARD_LIMIT,
     OAUTH_CALLBACK_LIMIT,
     limiter,
@@ -423,3 +426,52 @@ async def close_agents_http_client() -> None:
     SDK, so there is a connection pool here that nothing else would close.
     """
     await _sessions._anthropic.aclose()  # noqa: SLF001 — same module's own client
+
+
+# ── the Anthropic webhook ─────────────────────────────────────────────────────
+#
+# **Registered before ``webhooks_router`` in main.py, and that ordering is
+# load-bearing.** The sources module owns ``POST /webhooks/{provider}``, which
+# matches ``/webhooks/anthropic`` perfectly well; FastAPI resolves in
+# registration order, so if this router went second every Anthropic delivery
+# would reach the source-integration dispatcher and 404 as an unknown provider.
+# A test asserts the resolution rather than the registration, because the
+# registration is the thing somebody would reorder while tidying imports.
+#
+# It lives here rather than in the webhooks module because the payload is an
+# agent-builder concern end to end — that module dispatches to
+# ``app/integrations``, and Anthropic is not a source we ingest from.
+
+webhook_router = APIRouter(prefix="/webhooks", tags=["agents"])
+
+
+@webhook_router.post("/anthropic")
+@limiter.limit(AGENT_WEBHOOK_LIMIT)
+async def anthropic_webhook(request: Request):
+    """Verify a session-state delivery and queue the mirror update.
+
+    Unauthenticated by design and verified by signature instead — a vendor
+    callback carries no credential of ours. The raw body is read **before**
+    anything parses it, because the HMAC covers the exact bytes Anthropic signed
+    and re-serializing JSON would reorder keys.
+
+    Always ``200`` once verified, even for an event we do not handle. A 4xx would
+    make Anthropic retry a delivery that cannot ever succeed, and an endpoint
+    that retries forever on events it ignores eventually starves the ones it
+    does. The response says only whether it was accepted — never anything about
+    the session, which would let a forged id be used as an oracle.
+    """
+    raw_body = await request.body()
+    verify(request.headers, raw_body)
+    parsed = parse(raw_body)
+    if parsed is not None:
+        delivery_id, event_type, session_id = parsed
+        await enqueue(
+            "sync_agent_session",
+            session_id,
+            event_type,
+            # Anthropic's own delivery id, so a redelivery inside the result
+            # window collapses instead of racing itself through the mirror.
+            _job_id=f"agent-session-sync:{delivery_id}",
+        )
+    return ok(request, summarize(parsed))

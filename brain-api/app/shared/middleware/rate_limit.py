@@ -29,6 +29,12 @@ def get_remote_address(request: Request) -> str:
 # Per-surface defaults (documented; applied at the route).
 AUTH_LIMIT = "10/minute"
 OAUTH_CALLBACK_LIMIT = "20/minute"
+# Anthropic session-state webhooks. Generous because the vendor decides the rate
+# and a dropped delivery costs us an out-of-date mirror, and because the work is
+# enqueued rather than done here. Keyed on the socket peer, which behind a proxy
+# collapses to one global bucket for every delivery — for a single-vendor webhook
+# that is the behaviour you want, unlike on the API surface (docs/MCP_INGRESS.md).
+AGENT_WEBHOOK_LIMIT = "600/minute"
 DASHBOARD_LIMIT = "300/minute"
 # API-key creation is expensive and security-sensitive (each mints a live
 # credential); cap it per admin (API_DOCUMENTATION.md §Rate Limits).

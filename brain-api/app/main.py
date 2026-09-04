@@ -30,6 +30,9 @@ from app.modules.agents.router import (
 from app.modules.agents.router import (
     sessions_router as agent_sessions_router,
 )
+from app.modules.agents.router import (
+    webhook_router as anthropic_webhook_router,
+)
 from app.modules.api_keys.router import router as api_keys_router
 from app.modules.auth.router import router as auth_router
 from app.modules.brain.router import router as brain_router
@@ -90,6 +93,12 @@ register_exception_handlers(app)
 
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(sources_router, prefix="/api/v1")
+# BEFORE webhooks_router, and that ordering is load-bearing: the sources module
+# owns POST /webhooks/{provider}, which matches /webhooks/anthropic perfectly
+# well. FastAPI resolves in registration order, so swapping these two would send
+# every Anthropic delivery to the source-integration dispatcher, where it 404s as
+# an unknown provider. app/tests/agents/test_webhook.py asserts the resolution.
+app.include_router(anthropic_webhook_router, prefix="/api/v1")
 app.include_router(webhooks_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api/v1")
 app.include_router(workspaces_router, prefix="/api/v1")

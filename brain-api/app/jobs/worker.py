@@ -23,6 +23,7 @@ from app.jobs.tasks.reconcile_push_sync import reconcile_push_sources
 from app.jobs.tasks.reembed_skills import reembed_skills
 from app.jobs.tasks.source_sync import source_sync
 from app.jobs.tasks.sweep_extract import sweep_extract
+from app.jobs.tasks.sync_agent_session import sync_agent_session
 from app.jobs.tasks.webhook_ingest import webhook_ingest
 
 
@@ -60,6 +61,10 @@ class WorkerSettings:
     functions = [
         source_sync,
         webhook_ingest,
+        # One vendor round-trip and one small UPDATE. The default timeout is
+        # already generous; what matters is that it is off the webhook's request
+        # path, not that it gets a budget of its own.
+        sync_agent_session,
         watch_register,
         func(extract_event, timeout=1800),
         func(onboarding_sweep, timeout=3600),
