@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 
 from app.shared.schemas import CamelModel, CamelRequestModel
 
@@ -259,3 +259,126 @@ class AgentAuthorizeStartResponse(CamelModel):
     """
 
     authorize_url: str
+
+
+# ── sessions (phase 4) ────────────────────────────────────────────────────────
+#
+# **§5.6's session budget does not exist.** The plan specifies
+# ``budget={"type": "limit", "max_list_cost": …}`` on every session, and there is
+# no such parameter in Managed Agents as shipped: no ``budget`` on
+# ``sessions.create``, none on ``deployments.create``, and no cost field on the
+# session object to read one back from. That was written against a surface the
+# vendor has not exposed, so the cost brake has to be ours.
+#
+# What replaces it is deliberately cruder and actually enforceable: a cap on how
+# many of a user's sessions may be live at once. It does not bound spend per
+# session — nothing available to us does — but it does bound the failure mode
+# that costs real money, which is sessions accumulating faster than anyone
+# notices. ``agent_definitions.budget_cents`` stays in the schema for the day the
+# parameter lands; until then it is recorded and not enforced, and saying so here
+# is cheaper than someone discovering it from an invoice.
+
+# Per user, not per workspace: ``agent_sessions``' RLS is personal, so a
+# workspace-wide count is not something a member's transaction can even see.
+MAX_LIVE_SESSIONS_PER_USER = 5
+
+# The first message is required. A session is a running container; creating one
+# with nothing to do burns the environment's resources until it idles out, and
+# there is no interactive affordance that would ever want it.
+_MAX_MESSAGE_CHARS = 100_000
+
+SessionStatus = Literal["rescheduling", "running", "idle", "terminated"]
+
+
+class AgentSessionResponse(CamelModel):
+    """One run of an agent, as the dashboard sees it. **Never any transcript.**
+
+    Every field here is a pointer or a counter, and that is enforced a layer
+    down: ``agent_sessions`` has no column to put message content in (migration
+    0028). The transcript is fetched from ``/agent-sessions/{id}/events``, which
+    proxies Anthropic and stores nothing.
+    """
+
+    id: str
+    agent_id: str
+    title: str | None = None
+    status: SessionStatus | None = None
+    # The discriminator inside Anthropic's ``session.status_idle`` stop reason —
+    # ``end_turn``, ``requires_action``, ``retries_exhausted``. The frontend needs
+    # it to tell "finished" from "waiting for you to approve a tool", which is the
+    # idle-gate trap in §6.2 and the difference between a done run and a frozen UI.
+    stop_reason: str | None = None
+    # The agent version this session is pinned to. An agent edited mid-session
+    # does not retroactively change what this run executed.
+    agent_version: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class AgentSessionCreateRequest(CamelRequestModel):
+    """``POST /agents/{id}/sessions`` — start a run and say the first thing."""
+
+    message: Annotated[str, Field(min_length=1, max_length=_MAX_MESSAGE_CHARS)]
+    title: Annotated[str | None, Field(default=None, max_length=256)] = None
+
+
+class UserMessageEvent(CamelRequestModel):
+    """Say something to a running agent.
+
+    Text only. Anthropic's user message takes image and document blocks too, and
+    accepting them would mean forwarding caller-supplied vendor structures we do
+    not validate — a wider surface than the builder has any use for yet.
+    """
+
+    type: Literal["user.message"]
+    text: Annotated[str, Field(min_length=1, max_length=_MAX_MESSAGE_CHARS)]
+
+
+class UserInterruptEvent(CamelRequestModel):
+    """Stop the agent mid-turn. It goes idle rather than terminating."""
+
+    type: Literal["user.interrupt"]
+
+
+class UserToolConfirmationEvent(CamelRequestModel):
+    """Answer a tool-confirmation prompt.
+
+    ``tool_use_id`` comes from the ``event_ids`` on the last
+    ``session.status_idle`` whose stop reason is ``requires_action`` — not from
+    the tool-use event the client happens to have rendered last, which is a
+    different id whenever the agent asked for several tools at once.
+    """
+
+    type: Literal["user.tool_confirmation"]
+    tool_use_id: Annotated[str, Field(min_length=1, max_length=256)]
+    result: Literal["allow", "deny"]
+    deny_message: Annotated[str | None, Field(default=None, max_length=2048)] = None
+
+    @field_validator("deny_message")
+    @classmethod
+    def _only_when_denying(cls, value: str | None, info: ValidationInfo) -> str | None:
+        # Anthropic rejects a deny_message on an allow. Caught here so the caller
+        # gets a 422 naming the field instead of a 400 after a round-trip.
+        if value and info.data.get("result") != "deny":
+            raise ValueError("denyMessage is only allowed when result is 'deny'")
+        return value
+
+
+# Discriminated on ``type`` so a body with an unknown kind fails naming the
+# field, rather than being tried against each member and reported as three
+# simultaneous errors. Deliberately a subset of what the vendor accepts:
+# ``user.define_outcome``, ``system.message`` and the custom-tool results have no
+# surface in the builder, and exposing them would let a client drive parts of the
+# session lifecycle the UI cannot represent.
+AgentSessionEvent = Annotated[
+    UserMessageEvent | UserInterruptEvent | UserToolConfirmationEvent,
+    Field(discriminator="type"),
+]
+
+
+class AgentEventSendRequest(CamelRequestModel):
+    """``POST /agent-sessions/{id}/events``. One batch, sent in order."""
+
+    events: Annotated[list[AgentSessionEvent], Field(min_length=1, max_length=20)]
