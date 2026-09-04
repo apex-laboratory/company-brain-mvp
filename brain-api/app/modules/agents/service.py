@@ -32,6 +32,7 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 
 from app.config.database import get_tenant_session
+from app.config.settings import settings
 from app.modules.agents.anthropic_client import AnthropicAgentsClient
 from app.modules.agents.repository import AgentsRepository
 from app.modules.agents.schemas import (
@@ -155,11 +156,14 @@ class AgentsService:
         workspace_id, user_id, role = _require_dashboard_user(auth)
 
         # ── phase 1: network, no transaction open ────────────────────────────
+        connectors = _with_grounding({"ground_in_brain": body.ground_in_brain}, [])
         remote = await self._anthropic.create_agent(
             name=body.name,
             model=_model_config(body.model, body.effort),
             system=body.system_prompt,
             description=body.description,
+            tools=_agent_tools(connectors),
+            mcp_servers=_mcp_servers(connectors),
         )
 
         agent_id = generate_id("agent")
@@ -223,6 +227,13 @@ class AgentsService:
         remote_id: str | None = current["anthropic_agent_id"]
         if _touches_runtime(sent):
             merged = {**current, **sent}
+            # The tool config rides along because ``ground_in_brain`` is in
+            # ``_RUNTIME_FIELDS``: toggling the grounding switch has to add or
+            # remove the Brain's MCP server, and Anthropic replaces both arrays
+            # wholesale, so a partial update would drop the user's connectors.
+            connectors = _with_grounding(
+                merged, await self._connectors(workspace_id, user_id, role, agent_id)
+            )
             if remote_id:
                 remote = await self._anthropic.update_agent(
                     remote_id,
@@ -231,6 +242,8 @@ class AgentsService:
                     model=_model_config(merged["model"], merged["effort"]),
                     system=merged["system_prompt"],
                     description=merged["description"],
+                    tools=_agent_tools(connectors),
+                    mcp_servers=_mcp_servers(connectors),
                 )
             else:
                 # A row whose earlier sync failed. Create now rather than
@@ -240,6 +253,8 @@ class AgentsService:
                     model=_model_config(merged["model"], merged["effort"]),
                     system=merged["system_prompt"],
                     description=merged["description"],
+                    tools=_agent_tools(connectors),
+                    mcp_servers=_mcp_servers(connectors),
                 )
             remote_id, remote_version = remote["id"], remote["version"]
 
@@ -311,10 +326,21 @@ class AgentsService:
         if agent["owner_user_id"] != user_id:
             raise ForbiddenError("Only the agent's owner can change its connectors.")
 
-        existing = await self._connectors(workspace_id, user_id, role, agent_id)
-        if len(existing) >= MAX_CONNECTORS_PER_AGENT:
+        if body.name == BRAIN_CONNECTOR_NAME:
             raise ConflictError(
-                f"An agent can have at most {MAX_CONNECTORS_PER_AGENT} connectors."
+                f"{BRAIN_CONNECTOR_NAME!r} is reserved for the Brain's own "
+                "connector. Pick another name."
+            )
+
+        existing = await self._connectors(workspace_id, user_id, role, agent_id)
+        # A grounded agent spends one of Anthropic's 20 MCP-server slots on the
+        # Brain, so the ceiling for the user's own connectors is one lower. Left
+        # uncounted, the twentieth connector would save locally and then be
+        # rejected by the vendor, leaving the row and the agent disagreeing.
+        ceiling = MAX_CONNECTORS_PER_AGENT - (1 if agent["ground_in_brain"] else 0)
+        if len(existing) >= ceiling:
+            raise ConflictError(
+                f"An agent can have at most {ceiling} connectors."
             )
         if any(row["name"] == body.name for row in existing):
             # Caught here as well as by the unique constraint: this way the
@@ -411,6 +437,7 @@ class AgentsService:
         Both arrays are replaced wholesale by Anthropic, so every write sends
         the complete set — there is no incremental add.
         """
+        connectors = _with_grounding(agent, connectors)
         tools = _agent_tools(connectors)
         servers = _mcp_servers(connectors)
         remote_id = agent["anthropic_agent_id"]
@@ -460,7 +487,9 @@ class AgentsService:
 # grounding, budget, status — must not mint a vendor version: versions are the
 # agent's audit trail, and filling it with local bookkeeping makes rollback
 # useless.
-_RUNTIME_FIELDS = frozenset({"name", "model", "effort", "system_prompt", "description"})
+_RUNTIME_FIELDS = frozenset(
+    {"name", "model", "effort", "system_prompt", "description", "ground_in_brain"}
+)
 
 
 def _touches_runtime(sent: dict[str, Any]) -> bool:
@@ -471,6 +500,49 @@ def _touches_runtime(sent: dict[str, Any]) -> bool:
 # session's container. Always present — an agent with only MCP tools has no way
 # to do anything with what it fetches.
 _AGENT_TOOLSET = {"type": "agent_toolset_20260401"}
+
+# The Brain's own MCP server, declared on every grounded agent.
+#
+# **This closes a phase-1 gap.** ``ground_in_brain`` defaults to true and was
+# stored on every agent from the first migration, but nothing ever put the Brain's
+# server into the agent's ``mcp_servers`` — so the flag was recorded and had no
+# effect, and "grounding is the product" (§10) shipped as a column. Phase 4 is
+# where that becomes visible, because the session-side half (the workspace vault
+# holding this server's credential, §5.4) is meaningless if the agent never
+# declares the server the credential is matched to by URL.
+#
+# Reserved as a connector name so a user cannot shadow it: two entries with the
+# same ``mcp_server_name`` is a config Anthropic rejects, and the failure would
+# land at save time on the user's connector rather than on the collision.
+BRAIN_CONNECTOR_NAME = "brainite_brain"
+
+# Narrowed to the one tool. The Brain's MCP server also exposes nothing else
+# today, but an allowlist that says so keeps that true if it grows: a grounded
+# agent should reach the corpus, not whatever else we later mount there.
+_BRAIN_TOOLS = ["query_brain"]
+
+
+def _with_grounding(
+    agent: dict[str, Any], connectors: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Prepend the Brain's connector when this agent is grounded.
+
+    Synthetic — there is no ``agent_connectors`` row for it, and there should not
+    be. A row would be editable, deletable and listable, which would let a user
+    silently un-ground an agent through the connector API while
+    ``ground_in_brain`` still read true, and would put the toggle in two places
+    that can disagree. The flag stays the single source of truth and this
+    function is where it is spent.
+    """
+    if not agent.get("ground_in_brain"):
+        return connectors
+    brain = {
+        "id": None,
+        "name": BRAIN_CONNECTOR_NAME,
+        "mcp_server_url": settings.mcp_public_url,
+        "tool_allowlist": list(_BRAIN_TOOLS),
+    }
+    return [brain, *connectors]
 
 
 def _mcp_servers(connectors: list[dict[str, Any]]) -> list[dict[str, Any]]:

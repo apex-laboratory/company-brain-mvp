@@ -24,7 +24,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.modules.agents.schemas import AgentCreateRequest, AgentUpdateRequest
-from app.modules.agents.service import AgentsService
+from app.modules.agents.service import BRAIN_CONNECTOR_NAME, AgentsService
 from app.shared.errors.app_error import ForbiddenError, NotFoundError
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
 
@@ -179,12 +179,58 @@ async def test_create_passes_effort_inside_the_model_object() -> None:
 
 @pytest.mark.asyncio
 async def test_local_only_update_does_not_call_anthropic() -> None:
-    """Versions are the agent's audit trail — local bookkeeping must not fill it."""
+    """Versions are the agent's audit trail — local bookkeeping must not fill it.
+
+    ``budget_cents`` is the example because it is genuinely ours: Anthropic has
+    no budget parameter to send it to (see ``schemas.py``). ``ground_in_brain``
+    used to be the example here and no longer is — it changes the agent's MCP
+    server list, so it is a runtime field now.
+    """
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=_row())
+    repo.update = AsyncMock(return_value=_row())
+    repo.list_connectors = AsyncMock(return_value=[])
+    anthropic = MagicMock()
+    anthropic.update_agent = AsyncMock()
+    tenant = MagicMock()
+    tenant.commit = AsyncMock()
+
+    with patch(
+        "app.modules.agents.service.get_tenant_session",
+        return_value=_AsyncCtx(MagicMock()),
+    ), patch(
+        "app.modules.agents.service.run_in_tenant", return_value=_AsyncCtx(tenant)
+    ):
+        await _service(repo, anthropic).update_agent(
+            _auth(), "agt_1", AgentUpdateRequest(budget_cents=500)
+        )
+
+    anthropic.update_agent.assert_not_awaited()
+    # The stored version is carried forward untouched.
+    assert repo.update.await_args.kwargs["fields"]["anthropic_agent_version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_toggling_grounding_repushes_the_mcp_servers() -> None:
+    """The flag is only real if it reaches Anthropic's ``mcp_servers``.
+
+    ``ground_in_brain`` was stored from migration 0028 and pushed nowhere until
+    phase 4, so an agent could read ``groundInBrain: true`` in the API and have
+    no way to reach the Brain. Turning it off must remove the server, and the
+    user's own connectors must survive the rewrite — Anthropic replaces the whole
+    array, so a partial push would silently drop them.
+    """
     repo = MagicMock()
     repo.get = AsyncMock(return_value=_row())
     repo.update = AsyncMock(return_value=_row(ground_in_brain=False))
+    repo.list_connectors = AsyncMock(
+        return_value=[
+            {"id": "acn_1", "agent_id": "agt_1", "name": "gh",
+             "mcp_server_url": "https://gh", "tool_allowlist": []}
+        ]
+    )
     anthropic = MagicMock()
-    anthropic.update_agent = AsyncMock()
+    anthropic.update_agent = AsyncMock(return_value={"id": "agent_remote_1", "version": 3})
     tenant = MagicMock()
     tenant.commit = AsyncMock()
 
@@ -198,9 +244,56 @@ async def test_local_only_update_does_not_call_anthropic() -> None:
             _auth(), "agt_1", AgentUpdateRequest(ground_in_brain=False)
         )
 
-    anthropic.update_agent.assert_not_awaited()
-    # The stored version is carried forward untouched.
-    assert repo.update.await_args.kwargs["fields"]["anthropic_agent_version"] == 2
+    sent = anthropic.update_agent.await_args.kwargs
+    assert [server["name"] for server in sent["mcp_servers"]] == ["gh"]
+
+
+@pytest.mark.asyncio
+async def test_a_grounded_agent_is_created_with_the_brain_server() -> None:
+    """Grounding is the product (§10) — a new agent must ship able to reach it."""
+    repo = MagicMock()
+    repo.insert = AsyncMock(return_value=_row())
+    anthropic = MagicMock()
+    anthropic.create_agent = AsyncMock(return_value={"id": "agent_remote_1", "version": 1})
+    tenant = MagicMock()
+    tenant.commit = AsyncMock()
+
+    with patch(
+        "app.modules.agents.service.get_tenant_session",
+        return_value=_AsyncCtx(MagicMock()),
+    ), patch(
+        "app.modules.agents.service.run_in_tenant", return_value=_AsyncCtx(tenant)
+    ):
+        await _service(repo, anthropic).create_agent(
+            _auth(), AgentCreateRequest(name="Refunds")
+        )
+
+    sent = anthropic.create_agent.await_args.kwargs
+    assert [server["name"] for server in sent["mcp_servers"]] == [BRAIN_CONNECTOR_NAME]
+    # The built-in toolset rides along, or the agent can fetch and do nothing.
+    assert sent["tools"][0] == {"type": "agent_toolset_20260401"}
+
+
+@pytest.mark.asyncio
+async def test_an_ungrounded_agent_is_created_with_no_mcp_servers() -> None:
+    repo = MagicMock()
+    repo.insert = AsyncMock(return_value=_row(ground_in_brain=False))
+    anthropic = MagicMock()
+    anthropic.create_agent = AsyncMock(return_value={"id": "agent_remote_1", "version": 1})
+    tenant = MagicMock()
+    tenant.commit = AsyncMock()
+
+    with patch(
+        "app.modules.agents.service.get_tenant_session",
+        return_value=_AsyncCtx(MagicMock()),
+    ), patch(
+        "app.modules.agents.service.run_in_tenant", return_value=_AsyncCtx(tenant)
+    ):
+        await _service(repo, anthropic).create_agent(
+            _auth(), AgentCreateRequest(name="Refunds", ground_in_brain=False)
+        )
+
+    assert anthropic.create_agent.await_args.kwargs["mcp_servers"] == []
 
 
 @pytest.mark.asyncio
@@ -209,6 +302,7 @@ async def test_runtime_update_calls_anthropic_with_the_merged_config() -> None:
     repo = MagicMock()
     repo.get = AsyncMock(return_value=_row())
     repo.update = AsyncMock(return_value=_row(name="Refunds v2"))
+    repo.list_connectors = AsyncMock(return_value=[])
     anthropic = MagicMock()
     anthropic.update_agent = AsyncMock(return_value={"id": "agent_remote_1", "version": 3})
     tenant = MagicMock()
@@ -238,6 +332,7 @@ async def test_update_creates_remotely_when_an_earlier_sync_failed() -> None:
     repo = MagicMock()
     repo.get = AsyncMock(return_value=_row(anthropic_agent_id=None, anthropic_agent_version=None))
     repo.update = AsyncMock(return_value=_row())
+    repo.list_connectors = AsyncMock(return_value=[])
     anthropic = MagicMock()
     anthropic.create_agent = AsyncMock(return_value={"id": "agent_new", "version": 1})
     anthropic.update_agent = AsyncMock()

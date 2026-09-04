@@ -17,6 +17,7 @@ import pytest
 
 from app.modules.agents.schemas import AgentConnectorCreateRequest
 from app.modules.agents.service import (
+    BRAIN_CONNECTOR_NAME,
     AgentsService,
     _agent_tools,
     _mcp_servers,
@@ -122,8 +123,12 @@ async def test_add_pushes_the_whole_set_not_just_the_new_one() -> None:
         )
 
     sent = anthropic.update_agent.await_args.kwargs
-    assert [s["name"] for s in sent["mcp_servers"]] == ["linear", "gh"]
-    assert [t.get("mcp_server_name") for t in sent["tools"][1:]] == ["linear", "gh"]
+    # The Brain's own server leads, because ``_row()`` is grounded by default and
+    # a grounded agent declares it on every push (service._with_grounding).
+    assert [s["name"] for s in sent["mcp_servers"]] == [BRAIN_CONNECTOR_NAME, "linear", "gh"]
+    assert [t.get("mcp_server_name") for t in sent["tools"][1:]] == [
+        BRAIN_CONNECTOR_NAME, "linear", "gh"
+    ]
 
 
 @pytest.mark.asyncio
@@ -181,15 +186,18 @@ async def test_remove_pushes_the_remaining_set() -> None:
         )
 
     sent = anthropic.update_agent.await_args.kwargs
-    assert [s["name"] for s in sent["mcp_servers"]] == ["gh"]
+    assert [s["name"] for s in sent["mcp_servers"]] == [BRAIN_CONNECTOR_NAME, "gh"]
 
 
 @pytest.mark.asyncio
 async def test_removing_the_last_connector_clears_mcp_servers() -> None:
     """Anthropic 400s on clearing mcp_servers while tools still reference one,
-    so the tools array must lose its mcp_toolset entries in the same push."""
+    so the tools array must lose its mcp_toolset entries in the same push.
+
+    Ungrounded on purpose: a grounded agent never reaches an empty
+    ``mcp_servers``, because the Brain's own server is always declared."""
     repo = MagicMock()
-    repo.get = AsyncMock(return_value=_row())
+    repo.get = AsyncMock(return_value=_row(ground_in_brain=False))
     repo.list_connectors = AsyncMock(return_value=[_connector()])
     repo.delete_connector = AsyncMock(return_value=True)
     repo.update = AsyncMock(return_value=_row())
@@ -256,10 +264,38 @@ async def test_duplicate_name_is_rejected_before_the_vendor_round_trip() -> None
 
 
 @pytest.mark.asyncio
-async def test_the_twenty_connector_cap_is_enforced_our_side() -> None:
-    """§8: say so plainly rather than letting the save fail at the vendor."""
+async def test_a_grounded_agent_reserves_one_of_the_twenty_slots() -> None:
+    """§8's cap is Anthropic's, and a grounded agent spends one of it.
+
+    Left uncounted, the twentieth user connector would save locally and then be
+    rejected by the vendor, leaving the row and the agent disagreeing about what
+    the agent can actually reach.
+    """
     repo = MagicMock()
     repo.get = AsyncMock(return_value=_row())
+    repo.list_connectors = AsyncMock(
+        return_value=[_connector(id=f"acn_{i}", name=f"s{i}") for i in range(19)]
+    )
+    anthropic = MagicMock()
+    anthropic.update_agent = AsyncMock()
+
+    session_patch, tenant_patch = _patched()
+    with session_patch, tenant_patch, pytest.raises(ConflictError, match="at most 19"):
+        await AgentsService(repository=repo, anthropic=anthropic).add_connector(
+            _auth(),
+            "agt_1",
+            AgentConnectorCreateRequest(
+                name="one-too-many", mcp_server_url="https://x.example/mcp"
+            ),
+        )
+
+    anthropic.update_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_ungrounded_agent_gets_all_twenty_slots() -> None:
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=_row(ground_in_brain=False))
     repo.list_connectors = AsyncMock(
         return_value=[_connector(id=f"acn_{i}", name=f"s{i}") for i in range(20)]
     )
@@ -310,6 +346,32 @@ async def test_removing_an_unknown_connector_is_404_with_no_push() -> None:
     with session_patch, tenant_patch, pytest.raises(NotFoundError):
         await AgentsService(repository=repo, anthropic=anthropic).remove_connector(
             _auth(), "agt_1", "acn_missing"
+        )
+
+    anthropic.update_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_brain_connector_name_is_reserved() -> None:
+    """Two MCP servers sharing a name is a config Anthropic rejects.
+
+    Caught here so the error names the collision, rather than arriving as a
+    vendor 400 about the user's own connector — which is the one it looks like
+    and the one thing that is not wrong with it.
+    """
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=_row())
+    anthropic = MagicMock()
+    anthropic.update_agent = AsyncMock()
+
+    session_patch, tenant_patch = _patched()
+    with session_patch, tenant_patch, pytest.raises(ConflictError, match="reserved"):
+        await AgentsService(repository=repo, anthropic=anthropic).add_connector(
+            _auth(),
+            "agt_1",
+            AgentConnectorCreateRequest(
+                name=BRAIN_CONNECTOR_NAME, mcp_server_url="https://evil.example/mcp"
+            ),
         )
 
     anthropic.update_agent.assert_not_awaited()
