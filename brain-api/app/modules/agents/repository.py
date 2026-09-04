@@ -737,6 +737,7 @@ class AgentsRepository:
         session_id: str,
         status: str | None = None,
         stop_reason: str | None = None,
+        clear_stop_reason: bool = False,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         ended: bool = False,
@@ -748,13 +749,22 @@ class AgentsRepository:
         delivery set. ``ended`` is a flag rather than a timestamp parameter
         because the vendor's terminal event carries no end time we could trust,
         and ``now()`` on a monotonic clock we control is the honest answer.
+
+        ``clear_stop_reason`` exists because COALESCE cannot express "set this
+        back to NULL". A session that starts running again is no longer stopped
+        for any reason, and without an explicit clear the stale
+        ``requires_action`` would persist through the next turn — which is
+        exactly the state §6.2 warns freezes the UI on a session that is in fact
+        working.
         """
         row = await session.execute(
             text(
                 f"""
                 UPDATE agent_sessions
                    SET status        = COALESCE(:status, status),
-                       stop_reason   = COALESCE(:stop_reason, stop_reason),
+                       stop_reason   = CASE WHEN :clear_stop_reason THEN NULL
+                                            ELSE COALESCE(:stop_reason, stop_reason)
+                                       END,
                        input_tokens  = COALESCE(:input_tokens, input_tokens),
                        output_tokens = COALESCE(:output_tokens, output_tokens),
                        ended_at      = CASE WHEN :ended THEN COALESCE(ended_at, now())
@@ -768,6 +778,7 @@ class AgentsRepository:
                 "session_id": session_id,
                 "status": status,
                 "stop_reason": stop_reason,
+                "clear_stop_reason": clear_stop_reason,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "ended": ended,

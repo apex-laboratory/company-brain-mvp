@@ -53,6 +53,7 @@ from app.modules.agents.schemas import (
     UnauthorizedConnector,
 )
 from app.modules.agents.service import _require_dashboard_user
+from app.modules.api_keys.service import generate_raw_key
 from app.shared.errors.app_error import (
     NotFoundError,
     UnauthorizedError,
@@ -84,6 +85,11 @@ _RETURN_TO_RE = re.compile(r"^/dashboard/agents(?:/[A-Za-z0-9_-]{1,64})*$")
 # ``AuthContext`` to read a role from, so it passes the least-privilege one; the
 # policies do not consult it.
 _CALLBACK_ROLE = "viewer"
+
+# The name a workspace's Brain-grounding key carries in ``api_keys``. An admin
+# looking at the key list needs to know at a glance that this one is not a
+# person's and that revoking it un-grounds every agent in the workspace.
+_BRAIN_KEY_NAME = "Brain grounding (agent builder)"
 
 
 def _callback_uri(provider: str) -> str:
@@ -428,14 +434,108 @@ class AgentCredentialsService:
         credential so that credential does not eat one of every user's 20 slots,
         and so rotating the Brain's key is one write instead of N.
 
-        **The vault is created empty.** Putting ``query_brain``'s credential in it
-        means minting an API key with the ``brain:query`` scope, and ``api_keys``
-        is admin-only at the RLS layer while the caller who first needs grounding
-        may be any member. Who mints it, under whose authority, and whether it is
-        provisioned eagerly or on first session is a session-lifecycle decision —
-        phase 4's, where the caller is known. This is the seam it plugs into.
+        **The vault is created empty.** Filling it is
+        ``ensure_brain_credential``'s job, which is where the API key gets minted
+        — that needed to know who the caller was and when, which is a
+        session-lifecycle question this method has no answer to. Call this one
+        when you want the vault; call that one when you want it usable.
         """
         return await self._ensure_vault(workspace_id, None, acting_user_id=user_id)
+
+    async def ensure_brain_credential(
+        self, workspace_id: str, user_id: str, role: str
+    ) -> str:
+        """The workspace vault id, with ``query_brain``'s credential in it (§5.4).
+
+        This is the seam ``ensure_workspace_vault`` left open in phase 2: it
+        created the vault and deliberately stopped short of filling it, because
+        who mints the API key and under whose authority is a session-lifecycle
+        question and there was no session yet. There is now.
+
+        **The key is minted on the privileged pool.** ``api_keys``' RLS policy is
+        admin-only — a row there holds a usable credential's hash — but whoever
+        starts the first grounded session is routinely a viewer, and routing this
+        through the tenant pool would make an ordinary member's first run fail
+        with an error only an admin could clear, on a resource they never asked
+        for and cannot see. What makes that safe is that nothing about the row is
+        caller-controlled: the scope is fixed at ``brain:query``, the workspace
+        comes from the resolved session context, and the row is attributed to the
+        user who caused it. See ``repository.insert_brain_api_key``.
+
+        **The raw key is never stored.** It goes to Anthropic's vault and is
+        dropped; ``api_keys`` keeps a SHA-256 hash exactly as it does for a
+        dashboard-issued key. What comes back is a credential id, which is a
+        pointer, and that is what migration 0029's column holds.
+
+        Provisioned lazily rather than at workspace creation, because eager
+        provisioning would mint a live credential for every workspace that never
+        builds an agent.
+        """
+        vault = await self._read_vault(workspace_id, None, user_id)
+        if vault is not None and vault.get("brain_credential_id"):
+            return str(vault["anthropic_vault_id"])
+
+        anthropic_vault_id = await self.ensure_workspace_vault(workspace_id, user_id)
+        vault = await self._read_vault(workspace_id, None, user_id)
+        if vault is None:
+            raise NotFoundError("Vault")
+        if vault.get("brain_credential_id"):
+            # Somebody provisioned it between our two reads. Nothing to do, and
+            # nothing minted — this is the cheap half of the race.
+            return anthropic_vault_id
+
+        raw_key, display_prefix = generate_raw_key()
+        key_id = generate_id("key")
+
+        # ── privileged write, then network ───────────────────────────────────
+        async with get_session() as privileged:
+            await self._repo.insert_brain_api_key(
+                privileged,
+                key_id=key_id,
+                workspace_id=workspace_id,
+                name=_BRAIN_KEY_NAME,
+                key_hash=sha256_hash(raw_key),
+                key_prefix=display_prefix,
+                created_by=user_id,
+            )
+
+        credential_id = await self._anthropic.create_static_bearer_credential(
+            anthropic_vault_id,
+            mcp_server_url=settings.mcp_public_url,
+            token=raw_key,
+            display_name="Brainite Brain",
+        )
+        del raw_key  # nothing below this line may see it
+
+        # ── transaction ──────────────────────────────────────────────────────
+        async with get_tenant_session() as session, run_in_tenant(
+            session, workspace_id, user_id, role
+        ) as tenant:
+            stored = await self._repo.set_vault_brain_credential(
+                tenant,
+                workspace_id=workspace_id,
+                vault_row_id=str(vault["id"]),
+                credential_id=credential_id,
+            )
+            await tenant.commit()
+
+        if stored != credential_id:
+            # Lost the race after all: another caller's credential is the one the
+            # vault records, so ours is unreferenced. Delete it — unlike the
+            # orphaned *vault* in ``_ensure_vault``, this one is unambiguously
+            # ours (we hold the id we just created), so there is no risk of
+            # deleting the winner's. The API key behind it stays in ``api_keys``,
+            # unreferenced but valid, and is logged for an admin to revoke: a
+            # cross-tenant privileged DELETE to tidy up would be a much worse
+            # thing to have in the codebase than a rare orphan row.
+            log.warning(
+                "brain credential raced for workspace=%s; deleting our credential "
+                "%s and leaving api key %s orphaned for manual revocation",
+                workspace_id, credential_id, key_id,
+            )
+            await self._anthropic.delete_credential(anthropic_vault_id, credential_id)
+
+        return anthropic_vault_id
 
     async def _ensure_vault(
         self, workspace_id: str, owner_user_id: str | None, *, acting_user_id: str

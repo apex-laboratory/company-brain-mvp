@@ -32,12 +32,17 @@ _SECRET_HEX_CHARS = 32  # 16 random bytes → 32 hex chars (§7: hph_live_<32-ch
 _DISPLAY_CHARS = 4  # chars of the random part kept in the stored display prefix
 
 
-def _generate_raw_key() -> tuple[str, str]:
+def generate_raw_key() -> tuple[str, str]:
     """Return ``(raw_key, display_prefix)``.
 
     ``raw_key`` is ``hph_live_<32 hex chars>``; ``display_prefix`` is
     ``hph_live_<first 4 chars>`` — enough for a human to recognise the key in a
     list without exposing the secret.
+
+    Public because the agent builder mints one too: §5.4's workspace vault holds
+    a ``query_brain`` key that no person ever sees or types, and it has to be
+    byte-identical in shape to a dashboard-issued one or the two would diverge
+    the first time either format changed. One definition, two callers.
     """
     secret = secrets.token_hex(_SECRET_HEX_CHARS // 2)
     raw_key = f"{_KEY_PREFIX}{secret}"
@@ -74,7 +79,7 @@ class ApiKeyService:
     ) -> ApiKeyCreated:
         workspace_id = assert_workspace_member(auth, workspace_id)
 
-        raw_key, display_prefix = _generate_raw_key()
+        raw_key, display_prefix = generate_raw_key()
         key_id = generate_id("key")
 
         async with tenant_session(auth, workspace_id) as session:
