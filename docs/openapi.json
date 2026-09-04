@@ -737,6 +737,26 @@
         }
       }
     },
+    "/api/v1/webhooks/anthropic": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Anthropic Webhook",
+        "description": "Verify a session-state delivery and queue the mirror update.\n\nUnauthenticated by design and verified by signature instead \u2014 a vendor\ncallback carries no credential of ours. The raw body is read **before**\nanything parses it, because the HMAC covers the exact bytes Anthropic signed\nand re-serializing JSON would reorder keys.\n\nAlways ``200`` once verified, even for an event we do not handle. A 4xx would\nmake Anthropic retry a delivery that cannot ever succeed, and an endpoint\nthat retries forever on events it ignores eventually starves the ones it\ndoes. The response says only whether it was accepted \u2014 never anything about\nthe session, which would let a forged id be used as an oracle.",
+        "operationId": "anthropic_webhook_api_v1_webhooks_anthropic_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/webhooks/{provider}": {
       "post": {
         "tags": [
@@ -2407,6 +2427,118 @@
         }
       }
     },
+    "/api/v1/agents/{agent_id}/sessions": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Create Session",
+        "description": "Start a run of this agent, with the caller's vaults attached, and speak first.",
+        "operationId": "create_session_api_v1_agents__agent_id__sessions_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentSessionCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Agent Sessions",
+        "description": "The caller's own runs of this agent, newest first.",
+        "operationId": "list_agent_sessions_api_v1_agents__agent_id__sessions_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agent-credentials": {
       "get": {
         "tags": [
@@ -2601,6 +2733,351 @@
             }
           }
         ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-sessions": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Sessions",
+        "description": "Every run of the caller's, across agents.",
+        "operationId": "list_sessions_api_v1_agent_sessions_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Get Session",
+        "description": "One run's status and usage. Somebody else's session is a 404, not a 403.",
+        "operationId": "get_session_api_v1_agent_sessions__session_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Archive Session",
+        "description": "End a run for good and free one of the caller's concurrent-session slots.\n\n``DELETE`` rather than a ``/stop`` POST because it is terminal \u2014 Anthropic\nhas no unarchive \u2014 and because the row survives as history either way. This\nis the only thing that actually ends the spend; ``user.interrupt`` pauses a\nturn.",
+        "operationId": "archive_session_api_v1_agent_sessions__session_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-sessions/{session_id}/stream": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Stream Session",
+        "description": "Pass-through of Anthropic's live event stream. Nothing is stored.\n\nThe upstream connection is opened *before* this returns a response, so an\nunknown or someone else's session still renders as an ordinary 404 envelope\nrather than a 200 with a silent empty body \u2014 Starlette commits the status\nline before pulling the first chunk of a ``StreamingResponse``.",
+        "operationId": "stream_session_api_v1_agent_sessions__session_id__stream_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-sessions/{session_id}/events": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Session Events",
+        "description": "Replay proxy for reconnect \u2014 **proxied verbatim, never stored**.\n\nSSE has no replay, so reopening a stream starts from \"now\" and silently\nloses the gap. \u00a76.2's recipe is to open the stream first and then call this\nto backfill, deduping on event id as the live stream catches up; ``after``\nis an RFC-3339 timestamp bounding that backfill.\n\nThe body is Anthropic's, forwarded unchanged, cursor included. It is not\nreshaped into a ``CamelModel`` on purpose: the event union is open-ended at\nthe vendor, and typing it here would drop the first event kind they add.",
+        "operationId": "list_session_events_api_v1_agent_sessions__session_id__events_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string",
+              "default": "asc",
+              "title": "Order"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Page"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Send Session Events",
+        "description": "Say something, interrupt, or answer a tool-confirmation prompt.",
+        "operationId": "send_session_events_api_v1_agent_sessions__session_id__events_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentEventSendRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -3809,6 +4286,73 @@
         "title": "AgentCreateRequest",
         "description": "``POST /agents``. Only ``name`` is required \u2014 the builder saves early."
       },
+      "AgentEventSendRequest": {
+        "properties": {
+          "events": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/UserMessageEvent"
+                },
+                {
+                  "$ref": "#/components/schemas/UserInterruptEvent"
+                },
+                {
+                  "$ref": "#/components/schemas/UserToolConfirmationEvent"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "type",
+                "mapping": {
+                  "user.interrupt": "#/components/schemas/UserInterruptEvent",
+                  "user.message": "#/components/schemas/UserMessageEvent",
+                  "user.tool_confirmation": "#/components/schemas/UserToolConfirmationEvent"
+                }
+              }
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Events"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "events"
+        ],
+        "title": "AgentEventSendRequest",
+        "description": "``POST /agent-sessions/{id}/events``. One batch, sent in order."
+      },
+      "AgentSessionCreateRequest": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Message"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "AgentSessionCreateRequest",
+        "description": "``POST /agents/{id}/sessions`` \u2014 start a run and say the first thing."
+      },
       "AgentUpdateRequest": {
         "properties": {
           "name": {
@@ -4982,6 +5526,89 @@
         "type": "object",
         "title": "UpdateSkillRequest",
         "description": "Edit an existing skill from the dashboard (editor or admin).\n\nEvery field is optional \u2014 only the keys present in the request body are\nwritten (partial update). Changing ``trigger`` or ``baseLogic`` alters the\nrule's meaning, so the service re-embeds the skill; a metadata-only edit\n(name/description) leaves the vector untouched. Sending an empty body is a\nno-op that returns the skill unchanged."
+      },
+      "UserInterruptEvent": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "user.interrupt",
+            "title": "Type"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "UserInterruptEvent",
+        "description": "Stop the agent mid-turn. It goes idle rather than terminating."
+      },
+      "UserMessageEvent": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "user.message",
+            "title": "Type"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Text"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "text"
+        ],
+        "title": "UserMessageEvent",
+        "description": "Say something to a running agent.\n\nText only. Anthropic's user message takes image and document blocks too, and\naccepting them would mean forwarding caller-supplied vendor structures we do\nnot validate \u2014 a wider surface than the builder has any use for yet."
+      },
+      "UserToolConfirmationEvent": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "user.tool_confirmation",
+            "title": "Type"
+          },
+          "toolUseId": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Tooluseid"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny"
+            ],
+            "title": "Result"
+          },
+          "denyMessage": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Denymessage"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "toolUseId",
+          "result"
+        ],
+        "title": "UserToolConfirmationEvent",
+        "description": "Answer a tool-confirmation prompt.\n\n``tool_use_id`` comes from the ``event_ids`` on the last\n``session.status_idle`` whose stop reason is ``requires_action`` \u2014 not from\nthe tool-use event the client happens to have rendered last, which is a\ndifferent id whenever the agent asked for several tools at once."
       },
       "ValidationError": {
         "properties": {
