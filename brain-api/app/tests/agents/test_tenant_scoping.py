@@ -23,6 +23,10 @@ from app.modules.agents.schemas import (
     AgentCreateRequest,
     AgentUpdateRequest,
 )
+from app.modules.agents.schemas import AgentEventSendRequest as _AgentEventSendRequest
+from app.modules.agents.schemas import (
+    AgentSessionCreateRequest as _AgentSessionCreateRequest,
+)
 from app.modules.agents.service import AgentsService
 from app.tests.agents.test_agents import _AsyncCtx, _auth, _row
 from app.tests.agents.test_connectors import _connector
@@ -304,3 +308,164 @@ async def test_the_callback_takes_its_tenant_from_the_state_not_the_request() ->
     assert set(opened) == {_OTHER_WORKSPACE}
     assert _bound_workspaces(repo) == {_OTHER_WORKSPACE}
     assert repo.upsert_credential.await_args.kwargs["user_id"] == "usr_from_state"
+
+
+# ── sessions (phase 4) ────────────────────────────────────────────────────────
+#
+# ``agent_sessions``' RLS policy is *personal* — ``workspace_id =
+# current_workspace_id() AND user_id = current_user_id()`` — so these paths have
+# two inputs to get right, not one, and the second is the one that is easy to
+# lose. A method that bound another member's id would write a row its own caller
+# could not read back, and would read rows that are not theirs.
+#
+# The webhook is swept separately below, because it is the one path that
+# deliberately crosses tenants: its whole job is to resolve a vendor session id
+# to a workspace it was not told about. What must hold there is the opposite
+# shape — that the tenant it ends up using comes from the *resolved row* and
+# never from anything in the delivery.
+
+
+def _session_repo() -> MagicMock:
+    from app.tests.agents.test_sessions import _session_row
+
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=_row())
+    repo.get_session_row = AsyncMock(return_value=_session_row())
+    repo.list_sessions = AsyncMock(return_value=[])
+    repo.insert_session = AsyncMock(return_value=_session_row())
+    repo.count_live_sessions = AsyncMock(return_value=0)
+    repo.update_session_state = AsyncMock(return_value=_session_row())
+    repo.resolve_session_tenant = AsyncMock(
+        return_value={"id": "ass_1", "workspace_id": _CALLER_WORKSPACE, "user_id": "usr_1"}
+    )
+    return repo
+
+
+async def _run_sessions(
+    call: str, *args: Any, **kwargs: Any
+) -> tuple[MagicMock, list[str], list[str]]:
+    from app.modules.agents.sessions import AgentSessionsService
+    from app.tests.agents.test_sessions import _anthropic as _session_anthropic
+    from app.tests.agents.test_sessions import _credentials as _session_credentials
+
+    repo = _session_repo()
+    service = AgentSessionsService(
+        repository=repo,
+        anthropic=_session_anthropic(),
+        credentials=_session_credentials(),
+    )
+    tenant = MagicMock()
+    tenant.commit = AsyncMock()
+    workspaces: list[str] = []
+    users: list[str] = []
+
+    def _run_in_tenant(_s: Any, workspace_id: str, user_id: str, *_rest: Any) -> Any:
+        workspaces.append(workspace_id)
+        users.append(user_id)
+        return _AsyncCtx(tenant)
+
+    with patch.multiple(
+        "app.modules.agents.sessions",
+        get_tenant_session=MagicMock(return_value=_AsyncCtx(MagicMock())),
+        get_session=MagicMock(return_value=_AsyncCtx(MagicMock())),
+        run_in_tenant=MagicMock(side_effect=_run_in_tenant),
+    ):
+        await getattr(service, call)(_auth(), *args, **kwargs)
+    return repo, workspaces, users
+
+
+def _bound_users(repo: MagicMock) -> set[str]:
+    found: set[str] = set()
+    for name in dir(repo):
+        if name.startswith("_"):
+            continue
+        for call in getattr(getattr(repo, name), "await_args_list", []) or []:
+            if call.kwargs.get("user_id") is not None:
+                found.add(call.kwargs["user_id"])
+    return found
+
+
+# Ids that look like they came from somebody else's URL. None of them may
+# influence which workspace or user the call is scoped to.
+_SESSION_CALLS: list[tuple[str, tuple[Any, ...]]] = [
+    ("list_sessions", ()),
+    ("get_session", ("ass_from_path",)),
+    ("list_events", ("ass_from_path",)),
+    ("archive_session", ("ass_from_path",)),
+    (
+        "create_session",
+        ("agt_from_path", _AgentSessionCreateRequest(message="do the thing")),
+    ),
+    (
+        "send_events",
+        (
+            "ass_from_path",
+            _AgentEventSendRequest.model_validate(
+                {"events": [{"type": "user.interrupt"}]}
+            ),
+        ),
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call,args", _SESSION_CALLS, ids=[c for c, _ in _SESSION_CALLS])
+async def test_session_paths_are_bound_to_the_callers_workspace(
+    call: str, args: tuple[Any, ...]
+) -> None:
+    repo, workspaces, _ = await _run_sessions(call, *args)
+    bound = _bound_workspaces(repo)
+    assert bound, f"{call} bound no workspace_id at all — nothing scopes it"
+    assert bound == {_CALLER_WORKSPACE}, f"{call} scoped to {bound}"
+    assert set(workspaces) == {_CALLER_WORKSPACE}
+    assert _OTHER_WORKSPACE not in bound and _OTHER_WORKSPACE not in workspaces
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call,args", _SESSION_CALLS, ids=[c for c, _ in _SESSION_CALLS])
+async def test_session_paths_are_bound_to_the_calling_user_too(
+    call: str, args: tuple[Any, ...]
+) -> None:
+    """The half that is easy to lose: this policy is personal, not workspace-wide."""
+    repo, _, users = await _run_sessions(call, *args)
+    assert set(users) == {"usr_1"}
+    assert _bound_users(repo) <= {"usr_1"}
+
+
+@pytest.mark.asyncio
+async def test_the_webhook_takes_its_tenant_from_the_resolved_row() -> None:
+    """The one path that crosses tenants on purpose — so prove where it lands.
+
+    The delivery names a vendor session id and nothing else. Everything after the
+    resolving lookup must follow the row that lookup returned, not any value that
+    arrived with the request.
+    """
+    from app.modules.agents.sessions import AgentSessionsService
+    from app.tests.agents.test_sessions import _anthropic as _session_anthropic
+
+    repo = _session_repo()
+    repo.resolve_session_tenant = AsyncMock(
+        return_value={"id": "ass_9", "workspace_id": _OTHER_WORKSPACE, "user_id": "usr_9"}
+    )
+    service = AgentSessionsService(
+        repository=repo, anthropic=_session_anthropic(), credentials=MagicMock()
+    )
+    tenant = MagicMock()
+    tenant.commit = AsyncMock()
+    opened: list[tuple[str, str]] = []
+
+    def _run_in_tenant(_s: Any, workspace_id: str, user_id: str, *_rest: Any) -> Any:
+        opened.append((workspace_id, user_id))
+        return _AsyncCtx(tenant)
+
+    with patch.multiple(
+        "app.modules.agents.sessions",
+        get_tenant_session=MagicMock(return_value=_AsyncCtx(MagicMock())),
+        get_session=MagicMock(return_value=_AsyncCtx(MagicMock())),
+        run_in_tenant=MagicMock(side_effect=_run_in_tenant),
+    ):
+        await service.sync_from_webhook("ses_remote_1", event_type="session.status_idled")
+
+    assert opened == [(_OTHER_WORKSPACE, "usr_9")]
+    assert _bound_workspaces(repo) == {_OTHER_WORKSPACE}
+    assert repo.update_session_state.await_args.kwargs["session_id"] == "ass_9"
