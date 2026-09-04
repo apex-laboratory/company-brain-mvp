@@ -16,17 +16,22 @@ inside a general update.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import RedirectResponse
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import RedirectResponse, StreamingResponse
 
 from app.modules.agents.credentials import AgentCredentialsService
 from app.modules.agents.schemas import (
     AgentAuthorizeStartRequest,
     AgentConnectorCreateRequest,
     AgentCreateRequest,
+    AgentEventSendRequest,
+    AgentSessionCreateRequest,
     AgentUpdateRequest,
 )
 from app.modules.agents.service import AgentsService
+from app.modules.agents.sessions import AgentSessionsService
 from app.shared.http.respond import accepted, created, no_content, ok
 from app.shared.middleware.authenticate import AuthContext, get_auth_context
 from app.shared.middleware.authorize import require_role
@@ -263,3 +268,158 @@ async def disconnect_credential(
     """
     await _credentials.disconnect(auth, credential_id)
     return no_content()
+
+
+# ── sessions ──────────────────────────────────────────────────────────────────
+#
+# **Viewer-and-up, like credentials and unlike building.** Running somebody's
+# published agent is the point of publishing it, and the run is scoped to the
+# caller: their vault supplies the connector credentials, and `agent_sessions`'
+# RLS is personal, so a viewer's session is invisible to everyone including the
+# agent's owner. Requiring `editor` here would mean an agent could be shared with
+# people who could not use it.
+#
+# Sessions hang off `/agent-sessions/{id}` rather than
+# `/agents/{agent_id}/sessions/{id}` for the ordinary reason: the id is already
+# unique, and nesting would let a caller pass a mismatched agent id and make the
+# route's own authorization check ambiguous. Creation stays nested, because there
+# the agent is the thing being acted on.
+
+sessions_router = APIRouter(prefix="/agent-sessions", tags=["agents"])
+
+_sessions = AgentSessionsService()
+
+
+@router.post("/{agent_id}/sessions")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def create_session(
+    request: Request,
+    agent_id: str,
+    body: AgentSessionCreateRequest,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Start a run of this agent, with the caller's vaults attached, and speak first."""
+    session = await _sessions.create_session(auth, agent_id, body)
+    return created(request, session.model_dump(by_alias=True))
+
+
+@router.get("/{agent_id}/sessions")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def list_agent_sessions(
+    request: Request,
+    agent_id: str,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """The caller's own runs of this agent, newest first."""
+    sessions = await _sessions.list_sessions(auth, agent_id=agent_id, limit=limit)
+    return ok(request, [s.model_dump(by_alias=True) for s in sessions])
+
+
+@sessions_router.get("")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def list_sessions(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Every run of the caller's, across agents."""
+    sessions = await _sessions.list_sessions(auth, limit=limit)
+    return ok(request, [s.model_dump(by_alias=True) for s in sessions])
+
+
+@sessions_router.get("/{session_id}")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def get_session(
+    request: Request, session_id: str, auth: AuthContext = Depends(get_auth_context)
+):
+    """One run's status and usage. Somebody else's session is a 404, not a 403."""
+    session = await _sessions.get_session(auth, session_id)
+    return ok(request, session.model_dump(by_alias=True))
+
+
+@sessions_router.get("/{session_id}/stream")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def stream_session(
+    request: Request, session_id: str, auth: AuthContext = Depends(get_auth_context)
+):
+    """Pass-through of Anthropic's live event stream. Nothing is stored.
+
+    The upstream connection is opened *before* this returns a response, so an
+    unknown or someone else's session still renders as an ordinary 404 envelope
+    rather than a 200 with a silent empty body — Starlette commits the status
+    line before pulling the first chunk of a ``StreamingResponse``.
+    """
+    frames = await _sessions.open_stream(auth, session_id)
+    return StreamingResponse(
+        frames,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@sessions_router.get("/{session_id}/events")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def list_session_events(
+    request: Request,
+    session_id: str,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    order: Annotated[Literal["asc", "desc"], Query()] = "asc",
+    page: Annotated[str | None, Query(max_length=2048)] = None,
+    after: Annotated[str | None, Query(max_length=64)] = None,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Replay proxy for reconnect — **proxied verbatim, never stored**.
+
+    SSE has no replay, so reopening a stream starts from "now" and silently
+    loses the gap. §6.2's recipe is to open the stream first and then call this
+    to backfill, deduping on event id as the live stream catches up; ``after``
+    is an RFC-3339 timestamp bounding that backfill.
+
+    The body is Anthropic's, forwarded unchanged, cursor included. It is not
+    reshaped into a ``CamelModel`` on purpose: the event union is open-ended at
+    the vendor, and typing it here would drop the first event kind they add.
+    """
+    events = await _sessions.list_events(
+        auth, session_id, limit=limit, order=order, page=page, after=after
+    )
+    return ok(request, events)
+
+
+@sessions_router.post("/{session_id}/events")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def send_session_events(
+    request: Request,
+    session_id: str,
+    body: AgentEventSendRequest,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Say something, interrupt, or answer a tool-confirmation prompt."""
+    await _sessions.send_events(auth, session_id, body)
+    return no_content()
+
+
+@sessions_router.delete("/{session_id}")
+@limiter.limit(DASHBOARD_LIMIT, key_func=workspace_key)
+async def archive_session(
+    request: Request, session_id: str, auth: AuthContext = Depends(get_auth_context)
+):
+    """End a run for good and free one of the caller's concurrent-session slots.
+
+    ``DELETE`` rather than a ``/stop`` POST because it is terminal — Anthropic
+    has no unarchive — and because the row survives as history either way. This
+    is the only thing that actually ends the spend; ``user.interrupt`` pauses a
+    turn.
+    """
+    await _sessions.archive_session(auth, session_id)
+    return no_content()
+
+
+async def close_agents_http_client() -> None:
+    """Shut down the module's raw-proxy HTTP client at app shutdown.
+
+    The routers hold process-lifetime service instances, and two vendor calls
+    (the events list and the session stream) go through httpx rather than the
+    SDK, so there is a connection pool here that nothing else would close.
+    """
+    await _sessions._anthropic.aclose()  # noqa: SLF001 — same module's own client

@@ -19,10 +19,16 @@ from app.config.settings import settings
 from app.integrations.base import close_http_client
 from app.jobs.queue import close_queue
 from app.modules.agents.router import (
+    close_agents_http_client,
+)
+from app.modules.agents.router import (
     credentials_router as agent_credentials_router,
 )
 from app.modules.agents.router import (
     router as agents_router,
+)
+from app.modules.agents.router import (
+    sessions_router as agent_sessions_router,
 )
 from app.modules.api_keys.router import router as api_keys_router
 from app.modules.auth.router import router as auth_router
@@ -50,6 +56,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await close_redis()
     await close_queue()
     await close_http_client()
+    # The agents module keeps its own httpx client for the two vendor calls that
+    # bypass the SDK (the events list and the session stream). Closing it here
+    # rather than letting the process exit means an in-flight stream is shut down
+    # deliberately instead of by socket teardown.
+    await close_agents_http_client()
     await close_db_pool()
 
 
@@ -88,6 +99,7 @@ app.include_router(sweeps_router, prefix="/api/v1")
 app.include_router(reviews_router, prefix="/api/v1")
 app.include_router(agents_router, prefix="/api/v1")
 app.include_router(agent_credentials_router, prefix="/api/v1")
+app.include_router(agent_sessions_router, prefix="/api/v1")
 app.include_router(skills_router, prefix="/api/v1")
 app.include_router(interactions_router, prefix="/api/v1")
 app.include_router(brain_router, prefix="/api/v1")
