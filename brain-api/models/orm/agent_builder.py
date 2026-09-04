@@ -126,6 +126,11 @@ class AgentVault(Base):
         Text, ForeignKey("users.id", ondelete="CASCADE")
     )
     anthropic_vault_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The workspace vault's single query_brain credential (migration 0029). A
+    # pointer, not a secret — the API key behind it is stored the way every other
+    # one is, as a hash in ``api_keys``. NULL on a user vault, and on a workspace
+    # vault until the first session that needs grounding provisions it.
+    brain_credential_id: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -175,6 +180,10 @@ class AgentSession(Base):
         UniqueConstraint("workspace_id", "anthropic_session_id",
                          name="agent_sessions_anthropic_session_id_key"),
         Index("ix_agent_sessions_agent_started", "workspace_id", "agent_id", "started_at"),
+        # Migration 0029. The Anthropic webhook resolves a session by its vendor
+        # id alone — it has no workspace to lead with, so the composite unique
+        # above cannot serve it and the lookup would seq-scan every session.
+        Index("ix_agent_sessions_anthropic_id", "anthropic_session_id"),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)              # ass_…
