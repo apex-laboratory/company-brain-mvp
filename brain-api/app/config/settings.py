@@ -125,6 +125,17 @@ class Settings(BaseSettings):
     # raises at first use if a stage needs a missing key (pipeline-only failure).
     gemini_api_key: str = ""
     anthropic_api_key: str = ""
+    # Managed Agents runs each session inside a container described by an
+    # *environment*. Pin one here in production: the find-or-create fallback in
+    # ``anthropic_client.ensure_environment`` is convenient in dev but races
+    # across processes, and two environments sharing a name are two different
+    # container configs that a session row cannot tell apart afterwards.
+    anthropic_environment_id: str = ""
+    anthropic_environment_name: str = "Brainite agents"
+    # Standard Webhooks signing secret (``whsec_…``) for POST /webhooks/anthropic.
+    # Empty means the route rejects every delivery — fail closed, because an
+    # unverified webhook can move a session's status and usage.
+    anthropic_webhook_secret: str = ""
     openai_api_key: str = ""
     openrouter_api_key: str = ""
     # "-latest" alias always resolves to Google's current cheapest flash-lite
