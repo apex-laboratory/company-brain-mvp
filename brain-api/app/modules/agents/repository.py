@@ -15,11 +15,20 @@ back as a forbidden row, it comes back as **no row at all** — so the service
 turns a missing row into 404, never 403. That is the right shape anyway: telling
 someone "this agent exists but is not yours" leaks that it exists.
 
-The three ``*_agent_oauth_state`` methods at the bottom are the documented
-exception to the tenant rule: they run on the **privileged** pool, because the
-OAuth callback has to resolve a state hash before any workspace context exists.
-They are the only methods here that may be called outside ``run_in_tenant``, and
-they touch no workspace-scoped table.
+The methods below the ``privileged:`` headers are the documented exceptions to
+the tenant rule: they run on the **privileged** pool and are the only ones here
+that may be called outside ``run_in_tenant``. There are three groups, and each
+one earns it by having no tenant to scope to yet:
+
+* ``*_agent_oauth_state`` — the OAuth callback must resolve a state hash before
+  any workspace context exists.
+* ``resolve_session_tenant`` — an Anthropic webhook carries a session id and a
+  type; the vendor has no idea which of our workspaces it belongs to. This
+  answers exactly that and returns nothing else, so the tenant-scoped write can
+  then happen normally.
+* ``insert_brain_api_key`` — ``api_keys`` is admin-only at RLS, but the caller
+  who first needs Brain grounding is routinely a viewer. Read its docstring: the
+  safety here is that no part of the row is caller-controlled.
 
 Nothing here calls Anthropic. The vendor round-trip happens in the service,
 outside the transaction (``BACKEND_BEST_PRACTICES.md`` §7); the columns below
@@ -48,6 +57,15 @@ _COLUMNS = """
 _CREDENTIAL_COLUMNS = """
     id, workspace_id, user_id, provider, mcp_server_url,
     anthropic_credential_id, display_name, connected_at
+"""
+
+# Every column ``agent_sessions`` has, and worth reading as an assertion too:
+# there is no transcript here, no message text, no tool arguments. ``title`` and
+# ``stop_reason`` are the only free-text columns and §5.5's schema test says so.
+_SESSION_COLUMNS = """
+    id, workspace_id, agent_id, user_id, anthropic_session_id,
+    anthropic_agent_version, title, status, stop_reason,
+    list_cost_cents, input_tokens, output_tokens, started_at, ended_at
 """
 
 
@@ -360,7 +378,8 @@ class AgentsRepository:
         row = await session.execute(
             text(
                 """
-                SELECT id, workspace_id, user_id, anthropic_vault_id, created_at
+                SELECT id, workspace_id, user_id, anthropic_vault_id,
+                       brain_credential_id, created_at
                   FROM agent_vaults
                  WHERE workspace_id = :workspace_id
                    AND user_id IS NOT DISTINCT FROM :user_id
@@ -395,7 +414,8 @@ class AgentsRepository:
                 INSERT INTO agent_vaults (id, workspace_id, user_id, anthropic_vault_id)
                 VALUES (:id, :workspace_id, :user_id, :anthropic_vault_id)
                 ON CONFLICT DO NOTHING
-                RETURNING id, workspace_id, user_id, anthropic_vault_id, created_at
+                RETURNING id, workspace_id, user_id, anthropic_vault_id,
+                          brain_credential_id, created_at
                 """
             ),
             {
@@ -594,6 +614,289 @@ class AgentsRepository:
             {"workspace_id": workspace_id, "user_id": user_id},
         )
         return [dict(row) for row in rows.mappings()]
+
+    # ── sessions ──────────────────────────────────────────────────────────────
+    #
+    # **No transcript column exists and none may be added** (migration 0028). Every
+    # method below writes pointers and counters: the vendor's session id, a status
+    # token, two token counts. "What did this session say" is answered by proxying
+    # Anthropic's events API, never by reading Postgres.
+    #
+    # ``agent_sessions``' RLS policy is ``workspace_id = current_workspace_id() AND
+    # user_id = current_user_id()`` — personal, not workspace-wide. So a member
+    # cannot see another member's runs of the same published agent, and the reads
+    # below need no ``user_id`` predicate of their own.
+
+    async def insert_session(
+        self,
+        session: AsyncSession,
+        *,
+        session_row_id: str,
+        workspace_id: str,
+        agent_id: str,
+        user_id: str,
+        anthropic_session_id: str,
+        anthropic_agent_version: int | None,
+        title: str | None,
+        status: str | None,
+    ) -> dict[str, Any]:
+        row = await session.execute(
+            text(
+                f"""
+                INSERT INTO agent_sessions
+                    (id, workspace_id, agent_id, user_id, anthropic_session_id,
+                     anthropic_agent_version, title, status)
+                VALUES (:id, :workspace_id, :agent_id, :user_id, :anthropic_session_id,
+                        :anthropic_agent_version, :title, :status)
+                RETURNING {_SESSION_COLUMNS}
+                """
+            ),
+            {
+                "id": session_row_id,
+                "workspace_id": workspace_id,
+                "agent_id": agent_id,
+                "user_id": user_id,
+                "anthropic_session_id": anthropic_session_id,
+                "anthropic_agent_version": anthropic_agent_version,
+                "title": title,
+                "status": status,
+            },
+        )
+        return dict(row.mappings().one())
+
+    async def get_session_row(
+        self, session: AsyncSession, *, workspace_id: str, session_id: str
+    ) -> dict[str, Any] | None:
+        """One session of the caller's. Invisible and nonexistent are both ``None``."""
+        row = await session.execute(
+            text(
+                f"""
+                SELECT {_SESSION_COLUMNS}
+                  FROM agent_sessions
+                 WHERE workspace_id = :workspace_id AND id = :session_id
+                """
+            ),
+            {"workspace_id": workspace_id, "session_id": session_id},
+        )
+        found = row.mappings().first()
+        return dict(found) if found else None
+
+    async def list_sessions(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        agent_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """The caller's sessions, newest first, optionally for one agent."""
+        rows = await session.execute(
+            text(
+                f"""
+                SELECT {_SESSION_COLUMNS}
+                  FROM agent_sessions
+                 WHERE workspace_id = :workspace_id
+                   AND (:agent_id::text IS NULL OR agent_id = :agent_id)
+                 ORDER BY started_at DESC
+                 LIMIT :limit
+                """
+            ),
+            {"workspace_id": workspace_id, "agent_id": agent_id, "limit": limit},
+        )
+        return [dict(row) for row in rows.mappings().all()]
+
+    async def count_live_sessions(
+        self, session: AsyncSession, *, workspace_id: str
+    ) -> int:
+        """How many of the caller's sessions are still costing money.
+
+        ``ended_at IS NULL`` rather than a status test: status is a mirror that
+        only advances when a webhook lands, so a workspace whose webhook is
+        misconfigured would show every session as forever ``running`` under a
+        status predicate — and the cap would lock the user out permanently. The
+        terminal write sets both, so the timestamp is the one that means "we know
+        this is over".
+        """
+        row = await session.execute(
+            text(
+                """
+                SELECT count(*) AS live
+                  FROM agent_sessions
+                 WHERE workspace_id = :workspace_id AND ended_at IS NULL
+                """
+            ),
+            {"workspace_id": workspace_id},
+        )
+        return int(row.scalar_one())
+
+    async def update_session_state(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        session_id: str,
+        status: str | None = None,
+        stop_reason: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        ended: bool = False,
+    ) -> dict[str, Any] | None:
+        """Fold a vendor-reported state change into the mirror.
+
+        Every field is COALESCE'd against the stored value, so a webhook that
+        reports a status but no usage cannot blank the counters a previous
+        delivery set. ``ended`` is a flag rather than a timestamp parameter
+        because the vendor's terminal event carries no end time we could trust,
+        and ``now()`` on a monotonic clock we control is the honest answer.
+        """
+        row = await session.execute(
+            text(
+                f"""
+                UPDATE agent_sessions
+                   SET status        = COALESCE(:status, status),
+                       stop_reason   = COALESCE(:stop_reason, stop_reason),
+                       input_tokens  = COALESCE(:input_tokens, input_tokens),
+                       output_tokens = COALESCE(:output_tokens, output_tokens),
+                       ended_at      = CASE WHEN :ended THEN COALESCE(ended_at, now())
+                                            ELSE ended_at END
+                 WHERE workspace_id = :workspace_id AND id = :session_id
+                RETURNING {_SESSION_COLUMNS}
+                """
+            ),
+            {
+                "workspace_id": workspace_id,
+                "session_id": session_id,
+                "status": status,
+                "stop_reason": stop_reason,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "ended": ended,
+            },
+        )
+        found = row.mappings().first()
+        return dict(found) if found else None
+
+    async def set_vault_brain_credential(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        vault_row_id: str,
+        credential_id: str,
+    ) -> str | None:
+        """Record the workspace vault's ``query_brain`` credential (migration 0029).
+
+        ``WHERE brain_credential_id IS NULL`` makes this the race resolver: two
+        first sessions starting together both create a credential at Anthropic,
+        and only one write lands. The loser reads back the winner's id and
+        abandons its own — the same shape as ``insert_vault``, and for the same
+        reason. Returns the id that is now stored, whoever wrote it.
+        """
+        await session.execute(
+            text(
+                """
+                UPDATE agent_vaults
+                   SET brain_credential_id = :credential_id
+                 WHERE workspace_id = :workspace_id
+                   AND id = :vault_row_id
+                   AND brain_credential_id IS NULL
+                """
+            ),
+            {
+                "workspace_id": workspace_id,
+                "vault_row_id": vault_row_id,
+                "credential_id": credential_id,
+            },
+        )
+        row = await session.execute(
+            text(
+                """
+                SELECT brain_credential_id
+                  FROM agent_vaults
+                 WHERE workspace_id = :workspace_id AND id = :vault_row_id
+                """
+            ),
+            {"workspace_id": workspace_id, "vault_row_id": vault_row_id},
+        )
+        found = row.scalar_one_or_none()
+        return str(found) if found else None
+
+    # ── privileged: the tenantless webhook lookup ─────────────────────────────
+    #
+    # The second documented exception to the tenant rule, alongside the OAuth
+    # states above. ``POST /webhooks/anthropic`` is a vendor callback: it carries
+    # a session id and a type, no JWT, no API key, and no way to know which of our
+    # workspaces the session belongs to. Something has to cross tenants once to
+    # answer that, and this is it — a single lookup that returns only the ids
+    # needed to open a properly-scoped transaction for the actual write.
+    #
+    # It reads three columns and no more. In particular it does not return the
+    # session's own state, so a forged webhook that guessed a real vendor id
+    # learns nothing from a successful call that it did not already supply.
+
+    async def resolve_session_tenant(
+        self, session: AsyncSession, *, anthropic_session_id: str
+    ) -> dict[str, Any] | None:
+        row = await session.execute(
+            text(
+                """
+                SELECT id, workspace_id, user_id
+                  FROM agent_sessions
+                 WHERE anthropic_session_id = :anthropic_session_id
+                """
+            ),
+            {"anthropic_session_id": anthropic_session_id},
+        )
+        found = row.mappings().first()
+        return dict(found) if found else None
+
+    async def insert_brain_api_key(
+        self,
+        session: AsyncSession,
+        *,
+        key_id: str,
+        workspace_id: str,
+        name: str,
+        key_hash: bytes,
+        key_prefix: str,
+        created_by: str,
+    ) -> None:
+        """Mint the workspace's ``query_brain`` key on the **privileged** pool.
+
+        The third and last documented exception here, and the one that most wants
+        justifying. ``api_keys``' RLS policy is admin-only, because a row there
+        holds a usable credential's hash. But the caller who needs grounding is
+        whoever starts the first session, and that is routinely a viewer — so
+        going through the tenant pool would make an ordinary member's first run
+        fail with an error only an admin could clear, on a resource they never
+        asked for and cannot see.
+
+        What keeps that safe is that nothing here is caller-controlled: the scope
+        is fixed at ``brain:query``, ``workspace_id`` is bound from the resolved
+        session context rather than from any request field, and the row is
+        attributed to the user who caused it. The alternative — pre-provisioning
+        at workspace creation — was rejected because it mints a live credential
+        for every workspace that never builds an agent.
+        """
+        await session.execute(
+            text(
+                """
+                INSERT INTO api_keys
+                    (id, workspace_id, name, key_hash, key_prefix, scopes, created_by)
+                VALUES (:id, :workspace_id, :name, :key_hash, :key_prefix,
+                        ARRAY['brain:query'], :created_by)
+                """
+            ),
+            {
+                "id": key_id,
+                "workspace_id": workspace_id,
+                "name": name,
+                "key_hash": key_hash,
+                "key_prefix": key_prefix,
+                "created_by": created_by,
+            },
+        )
+        await session.commit()
 
     # ── oauth_states (privileged pool, no RLS) ────────────────────────────────
     #
